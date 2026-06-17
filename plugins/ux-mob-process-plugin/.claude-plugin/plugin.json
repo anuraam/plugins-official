@@ -1,0 +1,17 @@
+{
+  "name": "ux-mob-process",
+  "description": "Runs AI-native UX mob elaboration workflows for Greenfield and Brownfield projects with artifact guardrails, approval gates, and AI readiness.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Your Team"
+  },
+  "license": "UNLICENSED",
+  "keywords": [
+    "ux",
+    "product",
+    "mob-elaboration",
+    "greenfield",
+    "brownfield",
+    "ai-readiness"
+  ]
+}
