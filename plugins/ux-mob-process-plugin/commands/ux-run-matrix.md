@@ -1,4 +1,5 @@
 ---
+name: ux-run-matrix
 description: Run only the UX Matrix module to generate a prioritized feature-persona matrix from approved artifacts.
 ---
 

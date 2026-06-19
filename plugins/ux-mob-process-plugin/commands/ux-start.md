@@ -1,5 +1,7 @@
 ---
+name: ux-start
 description: Start the full UX Mob process. Prompts for project type (Greenfield or Brownfield) and initializes the project workspace.
+argument-hint: "[greenfield | brownfield]"
 ---
 
 # Command: ux-start

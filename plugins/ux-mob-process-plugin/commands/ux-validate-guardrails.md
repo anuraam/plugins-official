@@ -1,4 +1,5 @@
 ---
+name: ux-validate-guardrails
 description: Check the current project against all UX Mob governance guardrails and report any violations.
 ---
 

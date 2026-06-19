@@ -1,4 +1,5 @@
 ---
+name: ux-run-ai-readiness
 description: Run the Brownfield AI Readiness assessment. Required before Add New Feature, Complete Revamp, or Improve Existing Feature.
 ---
 

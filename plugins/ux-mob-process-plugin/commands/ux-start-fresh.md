@@ -1,4 +1,5 @@
 ---
+name: ux-start-fresh
 description: Start a fresh UX Mob process, clearing any prior project state and initializing a new project folder.
 ---
 

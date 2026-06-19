@@ -1,5 +1,5 @@
 ---
-name: UX Mob Process Runner
+name: ux-mob-process-runner
 description: Runs the UX Mob Process Agent Kit for Greenfield and Brownfield AI-native product prototyping.
 ---
 

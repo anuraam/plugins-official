@@ -1,4 +1,5 @@
 ---
+name: ux-approve-phase
 description: Record explicit phase approval and advance the UX Mob process to the next phase.
 ---
 

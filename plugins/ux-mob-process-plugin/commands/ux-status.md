@@ -1,5 +1,7 @@
 ---
+name: ux-status
 description: Summarize the current project status, including active phase, saved artifacts, and pending approvals.
+argument-hint: "[project-folder]"
 ---
 
 # Command: ux-status

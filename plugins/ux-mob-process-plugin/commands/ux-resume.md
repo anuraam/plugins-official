@@ -1,5 +1,7 @@
 ---
+name: ux-resume
 description: Resume a paused UX Mob process from the last approved phase.
+argument-hint: "[project-folder]"
 ---
 
 # Command: ux-resume
