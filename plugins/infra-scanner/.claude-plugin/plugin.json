@@ -1,0 +1,24 @@
+{
+  "name": "infra-scanner",
+  "version": "1.0.0",
+  "description": "Authorized infrastructure security scanning plugin. Runs Infrastructure-as-Code misconfiguration detection (Dockerfile, Terraform, Kubernetes, GitHub Actions), CycloneDX SBOM generation, and optional network port + TLS scanning. Produces local HTML, Markdown, and JSON reports. Companion to pentest-agent for users who want infra coverage alongside web-application pentesting. Requires explicit --authorized flag.",
+  "author": {
+    "name": "Xianix",
+    "email": "hello@xianix.com",
+    "url": "https://xianix.com"
+  },
+  "homepage": "https://xianix.com",
+  "repository": "https://github.com/xianix-team/plugins-official",
+  "license": "MIT",
+  "keywords": ["infrastructure", "security", "iac", "terraform", "kubernetes", "docker", "github-actions", "sbom", "network-scan", "nmap", "tls"],
+  "commands": ["./commands/infra-scan.md"],
+  "agents": [
+    "./agents/orchestrator.md",
+    "./agents/iac-scanner.md",
+    "./agents/sbom-generator.md",
+    "./agents/network-scanner.md",
+    "./agents/report-writer.md"
+  ],
+  "outputStyles": "./styles/",
+  "schemas": "./schemas/"
+}

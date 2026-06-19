@@ -21,11 +21,36 @@ This skill is invoked by the **orchestrator** agent. It is not a standalone slas
 | Variable | Description |
 |---|---|
 | `REQUIRES_LOGIN` | `true` if credentials are declared in the knowledge block; otherwise `false` |
+| `HAS_CONVERSATION_FLOW` | `true` if the test block contains a non-empty `conversation_flow` array; otherwise `false` |
 | `PHASE1_BLOCK` | Set to a reason string if the run must not proceed; otherwise unset |
 
 ---
 
-## Step 1: Check Login Requirement
+## Step 1: Validate Test Block Entries
+
+Before any other checks, validate every entry in the `knowledge` array and the `conversation_flow` array (if present).
+
+For each entry in `KNOWLEDGE.knowledge` (if the array exists):
+- If the entry has neither `expected_answer` nor `must_contain` → set:
+  `PHASE1_BLOCK="knowledge entry at index {n} has neither 'expected_answer' nor 'must_contain' — at least one is required for judgment."`
+  Stop validation and do not proceed to Phase 2.
+
+Apply the same check to every entry in `KNOWLEDGE.conversation_flow` (if the array exists):
+- If the entry has neither `expected_answer` nor `must_contain` → set:
+  `PHASE1_BLOCK="conversation_flow entry at index {n} has neither 'expected_answer' nor 'must_contain' — at least one is required for judgment."`
+  Stop validation and do not proceed to Phase 2.
+
+---
+
+## Step 2: Detect Conversation Flow
+
+If `KNOWLEDGE` contains a `conversation_flow` key with at least one entry → set `HAS_CONVERSATION_FLOW=true`.
+
+Otherwise → set `HAS_CONVERSATION_FLOW=false`.
+
+---
+
+## Step 3: Check Login Requirement
 
 If `KNOWLEDGE` contains a `credentials` block with both `username` and `password_env` fields → set `REQUIRES_LOGIN=true`.
 
@@ -44,7 +69,7 @@ If `PHASE1_BLOCK` is set, do not proceed to Phase 2. The orchestrator will post 
 
 ---
 
-## Step 2: Lite Mode Notice
+## Step 4: Lite Mode Notice
 
 If `LITE_MODE=true`, log the following so it is included in the final report:
 
@@ -60,4 +85,4 @@ chatbot-test block and re-run:
 
 ## Completion
 
-Hand off to `skills/run-playwright-session/SKILL.md` with `TEST_URL`, `REQUIRES_LOGIN`, `KNOWLEDGE`, `LITE_MODE` in scope.
+Hand off to `skills/run-playwright-session/SKILL.md` with `TEST_URL`, `REQUIRES_LOGIN`, `HAS_CONVERSATION_FLOW`, `KNOWLEDGE`, `LITE_MODE` in scope.

@@ -24,12 +24,17 @@ Overall: {PASSED | PARTIAL | FAILED}
 | Fallback Handling       | ✅ PASSED                       |
 | Response Latency        | ✅ PASSED (avg 1.2s)            |
 | Conversation Continuity | ✅ PASSED                       |
+| Conversation Flow       | ✅ PASSED (5/5 steps)           |
 | Empty Input Handling    | ✅ PASSED                       |
 ```
 
+Include the **Conversation Flow** row only when `HAS_CONVERSATION_FLOW=true`. When `HAS_CONVERSATION_FLOW=false`, omit the row entirely — do not show `⬜ NOT RUN` for it.
+
+When `HAS_CONVERSATION_FLOW=true`, the **Conversation Continuity** row shows `⬜ NOT RUN`.
+
 After the summary table, append one section per category that has detail to show. Categories that fully PASSED with no Q&A pairs or notable probes may be omitted. Categories with `NOT RUN` status are never expanded.
 
-**Login-blocked report example** (when login fails, all 6 categories are NOT RUN):
+**Login-blocked report example** (when login fails, all categories are NOT RUN):
 
 ```markdown
 🤖 chatbot-tester — Test Report
@@ -185,6 +190,59 @@ Include if any probe failed or for visibility.
 **Verdict:** PASS — graceful out-of-scope handling.
 </details>
 ```
+
+---
+
+## Conversation Flow Section
+
+Include this section when `HAS_CONVERSATION_FLOW=true`. Always show all steps — including `NOT_RUN` ones (so the chain stop is visible).
+
+```markdown
+---
+
+### Conversation Flow
+
+<details>
+<summary>✅ PASSED — Step 1: "What equipment is the Alfa Laval technical documentation for?"</summary>
+
+**Step name:** Equipment identity
+**Question sent:** What equipment is the Alfa Laval technical documentation for?
+**Expected answer:** It is for BREW 250 PLUS, project E-2221.
+**Must contain:** BREW 250 PLUS, E-2221
+**Bot response:**
+> This documentation covers the BREW 250 PLUS centrifugal separator, project E-2221.
+
+**Verdict:** PASS
+**Judge reasoning:** Response contains all required terms in the correct context and aligns with the expected answer.
+**Response time:** 2.1s
+</details>
+
+<details>
+<summary>❌ FAILED — Step 2: "What is the serial number for it?" ⛔ Chain stopped here</summary>
+
+**Step name:** Serial number follow-up
+**Question sent:** What is the serial number for it?
+**Expected answer:** The serial number is 4279261M.
+**Must contain:** 4279261M
+**Bot response:**
+> I don't have the serial number in the documentation provided.
+
+**Verdict:** FAIL
+**Judge reasoning:** Response does not contain the required term 4279261M.
+**Response time:** 1.8s
+
+> ⛔ **Chain stopped** — remaining steps were not executed because this step failed.
+</details>
+
+<details>
+<summary>⬜ NOT RUN — Step 3: "What are the inlet requirements for connection 201.1?"</summary>
+
+**Step name:** Connection 201.1 inlet requirements
+**Not executed** — chain stopped at step 2.
+</details>
+```
+
+When all steps pass, omit the chain-stopped callout. When a step times out, use the standard timeout callout in place of the Bot response / Verdict block.
 
 ---
 

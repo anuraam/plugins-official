@@ -1,0 +1,29 @@
+{
+  "name": "release-note-maintainer",
+  "version": "0.0.1",
+  "description": "An intelligent, cross-ecosystem Release Note Maintainer Agent for GitHub and Azure DevOps that automatically generates structured release notes when a new git tag is pushed. It uses language-agnostic intelligence to analyze merged pull requests, commit histories, breaking changes, and linked work items since the last tag, while an internal Knowledge loop continuously refines its understanding of the project's release patterns without static files.",
+  "author": {
+    "name": "99x",
+    "email": "xianix@99x.io",
+    "url": "https://github.com/99x"
+  },
+  "homepage": "https://github.com/99x/xianix-team",
+  "repository": "https://github.com/99x/xianix-team",
+  "license": "MIT",
+  "keywords": [
+    "release-notes",
+    "changelog",
+    "git-tag",
+    "automation",
+    "webhook",
+    "azure-devops",
+    "github"
+  ],
+  "commands": [
+    "./commands/release-notes.md"
+  ],
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "outputStyles": "./styles/",
+  "providers": "./providers/"
+}

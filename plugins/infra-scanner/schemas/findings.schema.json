@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xianix.com/schemas/infra-scanner/findings.schema.json",
+  "title": "infra-scanner Findings",
+  "description": "Canonical intermediate format produced by every infra-scanner scanner and consumed by report-writer.",
+  "type": "object",
+  "required": ["agent", "scanner", "scanned_at", "status", "findings", "summary"],
+  "properties": {
+    "agent": {
+      "type": "string",
+      "enum": ["iac-scanner", "sbom-generator", "network-scanner"]
+    },
+    "scanner": { "type": "string" },
+    "scanned_at": { "type": "string", "format": "date-time" },
+    "target": { "type": "string" },
+    "status": {
+      "type": "string",
+      "enum": ["ok", "partial", "failed", "skipped"]
+    },
+    "status_reason": { "type": "string" },
+    "findings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/finding" }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["total", "critical", "high", "medium", "low", "info"],
+      "properties": {
+        "total":    { "type": "integer", "minimum": 0 },
+        "critical": { "type": "integer", "minimum": 0 },
+        "high":     { "type": "integer", "minimum": 0 },
+        "medium":   { "type": "integer", "minimum": 0 },
+        "low":      { "type": "integer", "minimum": 0 },
+        "info":     { "type": "integer", "minimum": 0 }
+      }
+    },
+    "evidence_path": { "type": "string" }
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "required": ["id", "severity", "category", "title", "location", "remediation"],
+      "properties": {
+        "id":          { "type": "string" },
+        "severity":    { "type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"] },
+        "category":    { "type": "string" },
+        "title":       { "type": "string" },
+        "location":    { "type": "string" },
+        "description": { "type": "string" },
+        "remediation": { "type": "string" },
+        "evidence":    { "type": "string" },
+        "cve":         { "type": "string", "pattern": "^CVE-[0-9]{4}-[0-9]{4,7}$" },
+        "cvss": {
+          "type": "object",
+          "properties": {
+            "score":   { "type": "number", "minimum": 0, "maximum": 10 },
+            "vector":  { "type": "string" },
+            "version": { "type": "string", "enum": ["2.0", "3.0", "3.1", "4.0"] }
+          }
+        },
+        "references": { "type": "array", "items": { "type": "string", "format": "uri" } },
+        "suppressed": { "type": "boolean", "default": false }
+      }
+    }
+  }
+}

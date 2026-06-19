@@ -14,6 +14,7 @@ This skill is invoked by the **orchestrator** agent. It is not a standalone slas
 |---|---|---|
 | `TEST_URL` | Phase 1 | The URL to open in the browser |
 | `REQUIRES_LOGIN` | Phase 1 | `true` if login must be attempted before testing |
+| `HAS_CONVERSATION_FLOW` | Phase 1 | `true` if the test block contains a `conversation_flow` array |
 | `KNOWLEDGE` | orchestrator | Parsed contents of the `chatbot-test` block |
 | `LITE_MODE` | orchestrator | `true` if no issue/work item was provided |
 
@@ -70,6 +71,8 @@ If a fallback selector matches multiple elements, prefer the one deepest inside 
 ---
 
 ## Step 2.5: Generate Continuity Probes
+
+**Skip this step entirely if `HAS_CONVERSATION_FLOW=true`** — conversation flow testing supersedes the auto-generated probe. Set `CONTINUITY_PROBES={}`.
 
 Before writing the test script, generate a topic-specific follow-up question for **each** Q&A pair so the probe can be sent immediately after the first passing pair.
 
@@ -161,8 +164,12 @@ try:
     log('CATEGORY_RESULT|login|PASSED|Login succeeded|' + str(duration))
 except Exception as e:
     log('CATEGORY_RESULT|login|BLOCKED|Login failed: ' + str(e) + '|0')
-    for category in ['ui_availability', 'functional_accuracy', 'fallback_handling',
-                     'response_latency', 'conversation_continuity', 'empty_input_handling']:
+    categories = ['ui_availability', 'functional_accuracy', 'fallback_handling',
+                  'response_latency', 'conversation_continuity']
+    if HAS_CONVERSATION_FLOW:
+        categories.append('conversation_flow')
+    categories.append('empty_input_handling')
+    for category in categories:
         log(f'CATEGORY_RESULT|{category}|NOT_RUN|Login failed — category not executed|0')
     sys.exit(0)
 ```
@@ -235,12 +242,14 @@ try:
 
     log(f'QA_RESULT|{index}|{question}|{response_text}|{duration_ms}')
 
-    # Inline continuity check — send the probe immediately after the first passing pair
-    # so the bot still has that exchange in context. "Passing" here means a quick
-    # substring check on must_contain (the LLM judge does the authoritative evaluation
-    # in Phase 3; this is just used to pick the anchor pair).
-    if not continuity_done and must_contain and response_text != '__RESPONSE_CAPTURE_FAILED__':
-        if all(term.lower() in response_text.lower() for term in must_contain):
+    # Inline continuity check — skipped when HAS_CONVERSATION_FLOW=True (flow testing
+    # supersedes the auto-probe). Otherwise send the probe after the first passing pair.
+    # "Passing" uses must_contain substring check if present; falls back to any non-empty
+    # response when only expected_answer is declared (LLM judge is authoritative in Phase 3).
+    if not HAS_CONVERSATION_FLOW and not continuity_done and response_text != '__RESPONSE_CAPTURE_FAILED__':
+        must_contain = step.get('must_contain', [])
+        pair_passes = all(term.lower() in response_text.lower() for term in must_contain) if must_contain else bool(response_text.strip())
+        if pair_passes:
             continuity_probe = CONTINUITY_PROBES[index]
             try:
                 c_start = time.time()
@@ -296,21 +305,87 @@ If `LITE_MODE=true` and no Q&A pairs were run, measure latency on the fallback p
 
 ### Category 5: Conversation Continuity
 
-Three cases based on what happened in Category 2:
+Four cases:
 
-**Case A — `continuity_done = True`:** The probe already ran inline after the first passing Q&A pair. No action needed — results are already logged. Log:
+**Case A — `HAS_CONVERSATION_FLOW=True`:** Conversation Flow category supersedes the auto-probe. Do not send a probe. Log:
+`CATEGORY_RESULT|conversation_continuity|NOT_RUN|conversation_flow defined — continuity probe superseded by Conversation Flow category|0`
+
+**Case B — `continuity_done = True`:** The probe already ran inline after the first passing Q&A pair. No action needed — results are already logged. Log:
 `CATEGORY_RESULT|conversation_continuity|DONE_INLINE|Probe ran inline after Q&A pair {continuity_anchor_index}|0`
 
-**Case B — Lite mode or no `knowledge` array:** No Q&A pairs were run. Send `CONTINUITY_PROBE_FALLBACK` after the fallback probes have been sent:
+**Case C — Lite mode or no `knowledge` array:** No Q&A pairs were run. Send `CONTINUITY_PROBE_FALLBACK` after the fallback probes have been sent:
 `PROBE_RESULT|conversation_continuity|{CONTINUITY_PROBE_FALLBACK}|{actual_response}|{duration_ms}`
 
 Wrap in a try/except for `playwright.sync_api.TimeoutError` and log:
 `PROBE_RESULT|conversation_continuity|{CONTINUITY_PROBE_FALLBACK}|90-second selector timeout — chatbot did not respond in time|90000`
 
-**Case C — Q&A pairs were run but none passed the inline check:** No anchor pair was found. Do not send a probe. Log:
+**Case D — Q&A pairs were run but none passed the inline check:** No anchor pair was found. Do not send a probe. Log:
 `CATEGORY_RESULT|conversation_continuity|NOT_RUN|No passing Q&A pair found — continuity probe skipped|0`
 
-### Category 6: Empty Input Handling
+### Category 6: Conversation Flow
+
+**Skip this category entirely if `HAS_CONVERSATION_FLOW=False`.** Log:
+`CATEGORY_RESULT|conversation_flow|NOT_RUN|No conversation_flow defined in test block|0`
+
+Otherwise, iterate through each step in `KNOWLEDGE.conversation_flow` in order. Maintain `chain_stopped = False` and `chain_stop_index = None` before the loop.
+
+```python
+conversation_flow = KNOWLEDGE.get('conversation_flow', [])
+chain_stopped = False
+chain_stop_index = None
+
+for index, step in enumerate(conversation_flow):
+    if chain_stopped:
+        log(f'FLOW_RESULT|{index}|{step.get("name", "")}|{step["question"]}|NOT_RUN — chain stopped at step {chain_stop_index}|0|NOT_RUN')
+        continue
+
+    try:
+        start = time.time()
+        input_field = page.wait_for_selector(READY_SELECTOR, timeout=90000)
+        input_field.fill(step['question'])
+        page.keyboard.press('Enter')
+        page.wait_for_selector(RESPONSE_DONE_SELECTOR, timeout=90000)
+
+        response_text = page.locator('[class*="bot-message"], [class*="assistant"], [data-role="bot"]').last.inner_text()
+        if not response_text.strip():
+            response_text = page.locator(
+                '[class*="chat"] [class*="message"]:last-child, '
+                '[class*="widget"] [class*="message"]:last-child, '
+                '[class*="response"]:last-child'
+            ).last.inner_text()
+        if not response_text.strip():
+            response_text = '__RESPONSE_CAPTURE_FAILED__'
+
+        duration_ms = int((time.time() - start) * 1000)
+
+        # Chain-stop decision: must_contain substring check if present;
+        # otherwise continue optimistically (LLM judge is authoritative in Phase 3).
+        must_contain = step.get('must_contain', [])
+        if response_text == '__RESPONSE_CAPTURE_FAILED__':
+            chain_status = 'STOPPED'
+            chain_stopped = True
+            chain_stop_index = index
+        elif must_contain:
+            if all(term.lower() in response_text.lower() for term in must_contain):
+                chain_status = 'CONTINUE'
+            else:
+                chain_status = 'STOPPED'
+                chain_stopped = True
+                chain_stop_index = index
+        else:
+            chain_status = 'CONTINUE'
+
+        log(f'FLOW_RESULT|{index}|{step.get("name", "")}|{step["question"]}|{response_text}|{duration_ms}|{chain_status}')
+
+    except playwright.sync_api.TimeoutError:
+        log(f'FLOW_RESULT|{index}|{step.get("name", "")}|{step["question"]}|90-second selector timeout — chatbot did not respond in time|90000|STOPPED')
+        chain_stopped = True
+        chain_stop_index = index
+```
+
+Log lines for this category use the prefix `FLOW_RESULT` (not `CATEGORY_RESULT`) so the parser can distinguish them from category-level entries.
+
+### Category 7: Empty Input Handling
 
 ```python
 try:

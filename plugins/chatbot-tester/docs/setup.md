@@ -106,17 +106,69 @@ Define Q&A pairs the chatbot should answer correctly.
 ```json
 "knowledge": [
   {
+    "name": "Opening hours",
     "question": "What are your opening hours?",
+    "expected_answer": "We are open Monday to Friday, 9am until 5pm.",
     "must_contain": ["9am", "5pm", "Monday"]
   },
   {
+    "name": "Password reset",
     "question": "How do I reset my password?",
+    "expected_answer": "You can reset your password using the link sent to your email.",
     "must_contain": ["email", "reset link"]
   }
 ]
 ```
 
+| Field | Required | Description |
+|---|---|---|
+| `name` | No | Human-readable label shown in the report |
+| `question` | Yes | The question to send to the chatbot |
+| `expected_answer` | Conditional | Full expected answer — used by the LLM judge as a semantic reference. Required if `must_contain` is absent. |
+| `must_contain` | Conditional | Array of terms that must appear in the bot's response. Required if `expected_answer` is absent. Acts as the hard verdict gate when both fields are present. |
+
+**Rules:**
+- Every entry must have at least one of `expected_answer` or `must_contain` — an entry with neither will block the test run with a clear error.
+- When both are present, `must_contain` is the hard gate — a response missing any required term cannot be PASS even if it semantically matches the expected answer.
+- When only `expected_answer` is present, the LLM judge determines the verdict purely by semantic alignment.
+
 Without a `knowledge` block, Functional Accuracy is skipped.
+
+---
+
+### Conversation Flow Block (optional)
+
+Define a sequential chain of Q&A pairs where later questions depend on earlier context. This tests the chatbot's multi-turn reasoning — each question is sent in order in the same session.
+
+```json
+"conversation_flow": [
+  {
+    "name": "Equipment identity",
+    "question": "What equipment is the Alfa Laval technical documentation for?",
+    "expected_answer": "It is for BREW 250 PLUS, project E-2221.",
+    "must_contain": ["BREW 250 PLUS", "E-2221"]
+  },
+  {
+    "name": "Serial number follow-up",
+    "question": "What is the serial number for it?",
+    "expected_answer": "The serial number is 4279261M.",
+    "must_contain": ["4279261M"]
+  },
+  {
+    "name": "Inlet requirements",
+    "question": "What are the inlet requirements for connection 201.1?",
+    "expected_answer": "Temperature 0–100°C, max density 1100 kg/m³, flow range 1–25 m³/h, pressure range 100–600 kPa.",
+    "must_contain": ["1100 kg/m³", "100–600 kPa"]
+  }
+]
+```
+
+**How it works:**
+- Steps run in order in a single continuous browser session (after `knowledge` Q&A pairs complete).
+- If a step fails its `must_contain` check, the chain stops — subsequent steps are marked `NOT_RUN` in the report.
+- When `conversation_flow` is present, the auto-generated Conversation Continuity probe (Category 5) is skipped — flow testing supersedes it.
+
+**Same field rules as `knowledge`** — each step must have at least one of `expected_answer` or `must_contain`.
 
 ---
 

@@ -31,7 +31,7 @@ Before judging, check each Q&A pair's `actual_response`. If it equals `(response
 
 For all remaining pairs, truncate `actual_response` to 500 tokens before including it in the judge prompt.
 
-Make **one single LLM call** with all Q&A pairs and the continuity probe batched together (skip continuity section if NOT_RUN). Use this prompt structure:
+Make **one single LLM call** with all Q&A pairs, continuity probe (if applicable), and conversation flow steps (if applicable) batched together. Use this prompt structure:
 
 ```
 You are a strict but fair QA judge evaluating an AI chatbot's responses.
@@ -40,19 +40,25 @@ You are a strict but fair QA judge evaluating an AI chatbot's responses.
 For each Q&A pair below, return a verdict of PASS, PARTIAL, or FAIL and a one-line reason.
 
 Verdict criteria:
-- PASS: the response clearly and correctly addresses the question and contains all required terms in a meaningful context
-- PARTIAL: the response is relevant and partially correct but missing one or more required terms or key details
+- PASS: the response clearly and correctly addresses the question; contains all required terms in a meaningful context (if provided); and is substantially aligned with the expected answer (if provided)
+- PARTIAL: the response is relevant and partially correct but missing one or more required terms, or only partially aligned with the expected answer
 - FAIL: the response is incorrect, irrelevant, deflects without answering, or contains none of the required terms
+
+When only "Expected answer" is provided (no required terms): base the verdict purely on semantic alignment with that expected answer.
+When both are provided: required terms are the hard gate — a response missing any required term cannot be PASS regardless of semantic alignment.
 
 {for each pair}
 ---
 Index: {n}
 Question: {question}
-Required terms (must appear in a meaningful context): {must_contain joined by ", "}
+{if expected_answer present: Expected answer (semantic reference): {expected_answer}}
+{if must_contain present: Required terms (must appear in a meaningful context): {must_contain joined by ", "}}
 Bot response (truncated to 500 tokens): {actual_response_truncated}
 ---
 
 ## Conversation Continuity Probe
+(include this section only if continuity probe was run — omit if NOT_RUN)
+
 The follow-up question below was sent immediately after Q&A pair {continuity_anchor_index} in the same conversation, once that pair returned a response containing all required terms. Judge whether the bot's response demonstrates it retained context from that specific exchange.
 
 Anchor Q&A pair (index {continuity_anchor_index}):
@@ -67,19 +73,42 @@ Verdict criteria for continuity:
 - PARTIAL: response is non-empty and on-topic but generic — could have been given without any prior context
 - FAIL: response is empty, asks the user to clarify what they mean, or shows no awareness of the anchor exchange
 
+## Conversation Flow Steps
+(include this section only if HAS_CONVERSATION_FLOW=true and flow steps exist — omit otherwise)
+
+The steps below were sent as a sequential conversation in a single session. Each step's question may rely on context established by prior steps. Judge each step that has a response (status NOT_RUN steps are already marked — do not include them here).
+
+Use the same verdict criteria as Q&A Pairs above.
+
+{for each flow step with response}
+---
+Step: {index}
+Name: {name}
+Question: {question}
+{if expected_answer present: Expected answer (semantic reference): {expected_answer}}
+{if must_contain present: Required terms: {must_contain joined by ", "}}
+Bot response (truncated to 500 tokens): {actual_response_truncated}
+---
+
 Return a JSON object:
 {
   "qa_pairs": [
     { "index": n, "verdict": "PASS|PARTIAL|FAIL", "reasoning": "one-line explanation" },
     ...
   ],
-  "continuity": { "verdict": "PASS|PARTIAL|FAIL", "reasoning": "one-line explanation" }
+  "continuity": { "verdict": "PASS|PARTIAL|FAIL", "reasoning": "one-line explanation" },
+  "flow_steps": [
+    { "index": n, "verdict": "PASS|PARTIAL|FAIL", "reasoning": "one-line explanation" },
+    ...
+  ]
 }
 ```
 
-Parse the JSON response and attach `verdict` and `judge_reasoning` to each Q&A pair and the continuity probe in `JUDGED_RESULTS`.
+Omit `continuity` key if the continuity probe was NOT_RUN. Omit `flow_steps` key if `HAS_CONVERSATION_FLOW=false`.
 
-**If no Q&A pairs exist** (lite mode), omit the Q&A Pairs section and judge continuity only.
+Parse the JSON response and attach `verdict` and `judge_reasoning` to each Q&A pair, the continuity probe, and each flow step in `JUDGED_RESULTS`.
+
+**If no Q&A pairs exist** (lite mode), omit the Q&A Pairs section and judge continuity and/or flow steps only.
 
 ---
 
