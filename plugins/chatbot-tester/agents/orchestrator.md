@@ -1,6 +1,6 @@
 ---
 name: orchestrator
-description: Chatbot Tester orchestrator. Accepts a GitHub issue URL, Azure DevOps work item URL, or a direct app URL. Infers platform from the URL pattern, fetches the chatbot-test block from the issue/work item, and runs four sequential phases — gather test context, run a Playwright browser session, judge responses with a batched LLM call, and post the test report. Browser automation uses Python playwright — NOT playwright-cli, npx, or Node.js.
+description: Chatbot Tester orchestrator. Accepts a GitHub issue URL, Azure DevOps work item URL, or a direct app URL. Infers platform from the URL pattern, fetches the chatbot-test block from the issue/work item, and runs five sequential phases — gather test context, run a Playwright browser session, judge responses with a batched LLM call, post the test report, and persist results to a GitHub repository. Browser automation uses Python playwright — NOT playwright-cli, npx, or Node.js.
 tools: Read, Bash, Agent
 model: inherit
 ---
@@ -92,6 +92,7 @@ Add the following to the issue/work item body and re-run:
 
 ```chatbot-test
 {
+  "name": "my-chatbot",
   "url": "https://your-app-url.com",
   "widget": {
     "trigger_hint": "description of how to open the chatbot",
@@ -108,7 +109,7 @@ Add the following to the issue/work item body and re-run:
 }
 ```
 
-`credentials` and `knowledge` are optional. `url`, `widget.trigger_hint`, `widget.ready_hint`, and `widget.response_done_hint` are required.
+`name`, `credentials`, and `knowledge` are optional. `url`, `widget.trigger_hint`, `widget.ready_hint`, and `widget.response_done_hint` are required.
 ````
 
 **If the block is found**, extract and parse it by running this pipeline — do not embed raw content in a Python string literal:
@@ -177,6 +178,32 @@ Set `TEST_URL` from `KNOWLEDGE.url`.
 
 ---
 
+## Derive Chatbot Name
+
+After setting `TEST_URL`, derive `CHATBOT_NAME`:
+
+1. If `KNOWLEDGE.name` is set and non-empty: use that value.
+2. Otherwise: extract the hostname from `TEST_URL` (e.g., `online.superoffice.com` from `https://online.superoffice.com/chat`).
+
+In both cases, sanitize the value: lowercase, replace spaces and any character that is not `a-z`, `0-9`, or `-` with hyphens, collapse consecutive hyphens into one, strip leading and trailing hyphens.
+
+Run:
+
+```bash
+python3 -c "
+import re, urllib.parse
+raw = '{KNOWLEDGE_NAME_OR_HOSTNAME}'  # substitute KNOWLEDGE.name if set, else hostname from TEST_URL
+sanitized = raw.lower()
+sanitized = re.sub(r'[^a-z0-9]+', '-', sanitized)
+sanitized = sanitized.strip('-')
+print('CHATBOT_NAME=' + sanitized)
+"
+```
+
+Store as `CHATBOT_NAME`.
+
+---
+
 ## Lite Mode (ENTRY_TYPE=url)
 
 Set `KNOWLEDGE` to an empty object `{}`. Set `LITE_MODE=true`.
@@ -233,6 +260,20 @@ If posting fails, output a single warning line and continue.
 
 ---
 
+## Pre-read All Phase Skill Files
+
+Before dispatching any phase, read all five skill files so the full workflow is in context:
+
+- `skills/gather-test-context/SKILL.md`
+- `skills/run-playwright-session/SKILL.md`
+- `skills/judge-responses/SKILL.md`
+- `skills/post-test-report/SKILL.md`
+- `skills/persist-results/SKILL.md`
+
+Do not skip any of these reads. Phase 5 (`persist-results`) **must always run** after Phase 4, unless `CHATBOT_RESULTS_REPO` is explicitly unset.
+
+---
+
 ## Phase 1 — Gather Test Context
 
 Read and follow `skills/gather-test-context/SKILL.md`.
@@ -256,11 +297,47 @@ After Phase 1 completes, check if `PHASE1_BLOCK` is set. If it is:
 
 ---
 
+## Phase 2 Pre-Condition: 60-Second Probe Timeout
+
+This is a hard constraint that applies to Phase 2 before any test categories run.
+
+**The bot must produce a completely finished response to the probe message within 60 seconds.** "Finished" means the bot's reply is fully rendered and the input field is ready for the next message. A loading spinner, "Thinking…" indicator, or streaming-in-progress state does NOT count as finished — even if the bot eventually responds at 90 or 150 seconds.
+
+**Do not wait more than 60 seconds for the probe response.** If the bot has not produced a complete response within 60 seconds of the probe message being sent:
+
+1. Output these lines exactly (add `conversation_flow` if `HAS_CONVERSATION_FLOW` is true):
+   ```
+   CATEGORY_RESULT|functional_accuracy|BLOCKED|Bot did not complete a response to initial probe within 60 seconds — all test categories skipped|0
+   CATEGORY_RESULT|fallback_handling|BLOCKED|Bot did not complete a response to initial probe within 60 seconds — all test categories skipped|0
+   CATEGORY_RESULT|response_latency|BLOCKED|Bot did not complete a response to initial probe within 60 seconds — all test categories skipped|0
+   CATEGORY_RESULT|conversation_continuity|BLOCKED|Bot did not complete a response to initial probe within 60 seconds — all test categories skipped|0
+   CATEGORY_RESULT|empty_input_handling|BLOCKED|Bot did not complete a response to initial probe within 60 seconds — all test categories skipped|0
+   ```
+2. Set `CATEGORY_RESULTS` to these BLOCKED entries.
+3. Proceed directly to the Phase 2→Phase 3 Transition check — skip running any test categories.
+
+The 60-second limit is non-negotiable. The probe implementation (two-stage: 30s for any bot element + 30s for response completion) is in `skills/run-playwright-session/SKILL.md`.
+
+---
+
 ## Phase 2 — Run Playwright Session
 
 Read and follow `skills/run-playwright-session/SKILL.md`, passing in `TEST_URL`, `REQUIRES_LOGIN`, `HAS_CONVERSATION_FLOW`, `KNOWLEDGE`, and `LITE_MODE`.
 
 This phase outputs: `CATEGORY_RESULTS` — a structured list of results per test category, including verbatim bot responses for all Q&A pairs.
+
+---
+
+## Phase 2 → Phase 3 Transition: BLOCKED Check
+
+After Phase 2 completes, check whether all categories in `CATEGORY_RESULTS` have `status = BLOCKED`.
+
+**If all categories are BLOCKED** (e.g., bot responsiveness probe failed, or login failed):
+- Skip Phase 3 entirely — there are no responses to judge.
+- Set `JUDGED_RESULTS = CATEGORY_RESULTS` directly.
+- Proceed to Phase 4 with `JUDGED_RESULTS` in scope.
+
+**Otherwise** proceed to Phase 3 as normal.
 
 ---
 
@@ -281,11 +358,26 @@ Read and follow `skills/post-test-report/SKILL.md`, passing in `JUDGED_RESULTS`,
 For issue/wi runs: posts report as a comment via the correct provider.
 For direct URL runs: writes `chatbot-test-report.md` in the current directory.
 
+Capture `OVERALL_VERDICT` and `PASSED_COUNT` from Phase 4's completion line:
+```
+chatbot-tester phase4-complete: {OVERALL_VERDICT} — {PASSED_COUNT}/{TOTAL_CATEGORIES} categories passed
+```
+
+**Do not treat this line as the end of the workflow. Phase 5 must run next.**
+
+---
+
+## Phase 5 — Persist Results
+
+Read and follow `skills/persist-results/SKILL.md`, passing in `JUDGED_RESULTS`, `TEST_URL`, `ENTRY_TYPE`, `ENTRY_ID`, `PLATFORM`, `OVERALL_VERDICT`, `CHATBOT_NAME`, and `LITE_MODE`.
+
+This phase writes JSON + CSV result files and updates the README in the results repo. If `CHATBOT_RESULTS_REPO` is not set, Phase 5 is skipped with a warning and the run still completes normally.
+
 ---
 
 ## Final Output
 
-After Phase 4 completes, output exactly one line:
+After Phase 5 completes, output exactly one line:
 
 ```
 chatbot-tester complete for {ENTRY_TYPE} {ENTRY_ID_OR_URL}: {OVERALL_VERDICT} — {PASSED_COUNT}/{TOTAL_CATEGORIES} categories passed

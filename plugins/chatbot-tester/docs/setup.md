@@ -40,6 +40,16 @@ export AZURE_DEVOPS_TOKEN=your_pat_here
 
 Store the test account password in **Xianix Agentri Studio Secrets** with the key `CHATBOT-TEST-PASSWORD`. The plugin reads it at runtime via the env var name declared in the test case block.
 
+### 5. Results Repository (optional)
+
+To enable result persistence and accuracy tracking across runs:
+
+1. Create a GitHub repository (e.g., `your-org/chatbot-test-results`).
+2. Set the `CHATBOT-RESULTS-REPO` environment variable to `your-org/chatbot-test-results`.
+3. Create a GitHub PAT with write access to that repository and set it as `CHATBOT-RESULTS-GITHUB-TOKEN`.
+
+If `CHATBOT-RESULTS-REPO` is not set, Phase 5 is silently skipped and the run still completes normally.
+
 ---
 
 ## Creating a Test Case
@@ -49,6 +59,7 @@ Add a `chatbot-test` fenced code block to a **GitHub issue** or **Azure DevOps w
 ````
 ```chatbot-test
 {
+  "name": "my-chatbot",
   "url": "https://your-app-url.com",
   "widget": {
     "trigger_hint": "description of how to open the chatbot",
@@ -68,6 +79,14 @@ Add a `chatbot-test` fenced code block to a **GitHub issue** or **Azure DevOps w
 }
 ```
 ````
+
+### Name Field (optional but recommended)
+
+```json
+"name": "superoffice-main-chat"
+```
+
+A stable identifier for the chatbot. Used as the folder name in the results repository (`results/superoffice-main-chat/`). If omitted, the hostname of `url` is used instead. Keep it short, lowercase, and hyphen-separated — it becomes a folder name so avoid spaces and special characters.
 
 ### Widget Block (required)
 
