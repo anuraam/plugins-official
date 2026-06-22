@@ -8,22 +8,15 @@ Elaborate the backlog item $ARGUMENTS — act as a thinking partner, not a gatek
 
 ## What This Does
 
-This command invokes the **orchestrator** agent. It fetches the item, indexes the repository for product/requirements documents (PRDs, specs, RFCs, ADRs, feature briefs, user stories), reasons about how the new ask fits the existing product context, then runs four analysts in parallel followed by a Gap & Risk pass.
+This command invokes the **orchestrator** agent. It fetches the item, indexes the repository for product/requirements documents (PRDs, specs, RFCs, ADRs, feature briefs, user stories), reasons about how the new ask fits the existing product context, then runs two analysts in sequence.
 
-**Phase 1 — Context lenses (parallel):**
+**Phase 1 — Context (`context-analyst`):**
 
-| Analyst | Lens |
-|---------|------|
-| `intent-analyst` | The "why" behind the ask — underlying user need, success definition, current workaround |
-| `domain-analyst` | Domain knowledge, terminology, regulations, and how comparable products / competitors approach the same problem |
-| `journey-mapper` | End-to-end user workflow this change participates in — upstream triggers, downstream consequences, **usability touchpoints and friction risks** |
-| `persona-analyst` | Affected personas, where their goals diverge, and **adoption considerations** (onboarding, migration, change management, success signals) |
+A single all-in-one pass returning 5–8 bullets covering intent (the "why"), user journey, personas & adoption, domain knowledge, and competitive patterns.
 
-**Phase 2 — Gap & Risk:**
+**Phase 2 — Gap & Risk (`gap-risk-analyst`):**
 
-| Analyst | Lens |
-|---------|------|
-| `gap-risk-analyst` | Open questions, assumptions worth validating, acceptance criteria worth tightening — framed as **prompts for the team**, not blockers |
+Open questions, assumptions worth validating, acceptance criteria worth tightening — framed as **prompts for the team**, not blockers.
 
 The orchestrator also reasons explicitly about **fit with existing requirements** — overlaps, dependencies, contradictions, and gaps at the **product/requirements level** (not the code level).
 
@@ -45,17 +38,15 @@ The plugin auto-detects the hosting platform from your git remote URL:
 
 ## How It Posts
 
-Each lens is posted as a **separate comment** on the issue/work item, preserving the original description. The thread looks like:
+Each section is posted as a **separate comment** on the issue/work item, preserving the original description. The thread looks like:
 
 1. **Elaboration Summary** — a short overview, the readiness signal, and the key takeaways
-2. **Fit with Existing Requirements** — overlaps, dependencies, contradictions, gaps with PRDs/specs/ADRs/feature briefs already in the repo
-3. **Intent & User Context** — the underlying need, situational context, decision points
-4. **User Journey** — upstream triggers, downstream consequences, usability touchpoints, friction risks
-5. **Personas & Adoption** — affected user types, where goals diverge, onboarding/migration/change-management considerations
-6. **Domain & Competitive Context** — concepts, terminology, regulations, how comparable products solve this
-7. **Open Questions & Gaps** — assumptions to validate, ACs worth tightening — as prompts for the next refinement
+2. **Fit with Existing Requirements** — overlaps, dependencies, contradictions, gaps with PRDs/specs/ADRs/feature briefs already in the repo *(skipped if no requirement docs exist)*
+3. **Context** — the 5–8 bullets returned by context-analyst as-is, under `## Context`. No sub-sections, no expansion.
+4. **Open Questions & Gaps** — assumptions to validate, ACs worth tightening — as prompts for the next refinement *(skipped if no findings)*
+5. **Refined Requirement** — a structured requirement spec compiled from the full analysis, always posted last
 
-Sections that yield no real findings are **skipped**, not filled with "None identified."
+Sections with no findings are **skipped**, not filled with "None identified."
 
 ## Readiness Signal (Hint, Not a Gate)
 
@@ -72,7 +63,7 @@ A lightweight label/tag is also applied as a triage hint — but the real value 
 The agent outputs:
 
 ```
-Elaboration posted on issue #<number>: <signal> — <N> comments — <N> open questions
+Elaboration posted on issue #<number>: <signal> — <N> comments — <N> open questions — refined requirement posted
 ```
 
 ## Prerequisites

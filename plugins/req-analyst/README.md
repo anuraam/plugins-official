@@ -103,15 +103,13 @@ For CI pipelines, you can also set `PLATFORM`, `REPO_URL`, and `ISSUE_NUMBER` to
 
 ## Output Layout
 
-The plugin posts one comment per lens, in this order, preserving the original description:
+The plugin posts one comment per section, in this order, preserving the original description:
 
-1. **📋 Elaboration Summary** — overview, readiness signal, key takeaways
-2. **🧩 Fit with Existing Requirements** — overlaps / dependencies / contradictions / gaps with PRDs, specs, ADRs, feature briefs already in the repo
-3. **🔍 Intent & User Context** — underlying need, situational context, decision points
-4. **🗺️ User Journey** — upstream/downstream, usability touchpoints, friction risks
-5. **👥 Personas & Adoption** — affected personas, conflicts, adoption per persona
-6. **🏢 Domain & Competitive Context** — concepts, terminology, regulations, comparable products
-7. **❓ Open Questions & Gaps** — prompts for the next refinement
+1. ** Elaboration Summary** — overview, readiness signal, key takeaways
+2. ** Fit with Existing Requirements** — overlaps / dependencies / contradictions / gaps with PRDs, specs, ADRs, feature briefs already in the repo
+3. ** Context** — 5–8 bullets covering intent, journey, personas, domain, and competitor patterns
+4. ** Open Questions & Gaps** — prompts for the next refinement
+5. ** Refined Requirement** — structured requirement spec, always last
 
 A lightweight signal label/tag is also applied:
 

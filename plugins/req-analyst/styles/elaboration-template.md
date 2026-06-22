@@ -42,61 +42,11 @@ The plugin is a **thinking partner**, not a gatekeeper. Frame everything as obse
 
 ---
 
-### Intent & User Context
+### Context
 
-- **Who & when:** [Primary user; situational context — calm planning vs high-stress operation]
-- **Constraints:** [Time, device, connectivity, regulation — only if relevant]
-- **Workflow:** [Before → this step → after; happy path; key edge flows]
-- **Decision points:** [Where users think; what can be automated vs must stay human]
+> 5–8 bullets from the context-analyst covering intent, journey, personas, domain, and competitor patterns. No sub-sections — bullets as-is. Skip this section if no findings.
 
----
-
-### User Journey
-
-> Where this requirement fits in the end-to-end user journey, with usability touchpoints and friction risks. Skip if the requirement is too narrow for meaningful journey context.
-
-| # | Stage | User Goal | Touchpoint | Emotion | Issues |
-|---|-------|-----------|------------|---------|--------|
-| 1 | [Stage] | [Goal] | [Where] | [State] | #[refs] |
-| **2** | **[This requirement]** | **[Goal]** | **[Where]** | **[State]** | **#[this]** |
-| 3 | [Stage] | [Goal] | [Where] | [State] | #[refs] |
-
-- **Upstream trigger / downstream consequence:** [What flows in / out]
-- **Usability touchpoints:** [Accessibility, discoverability, error states, empty states, "what happens when…"]
-- **Friction risks:** [Where the user is most likely to get stuck or frustrated]
-- **Journey gaps:** [Steps with no corresponding issue or feature]
-- **Moments that matter:** [High-stakes, trust-building, or delight opportunities]
-
----
-
-### Personas & Adoption
-
-> Distinct user types affected, where their goals diverge, and what adoption looks like for each. Skip persona table if a single persona is clearly the only audience; skip adoption table if the requirement is trivial to adopt.
-
-| Persona | Role | Frequency | Primary Goal |
-|---------|------|-----------|--------------|
-| [Label] | [Who] | [How often] | [Goal] |
-
-- **Conflicts:** [Where personas' needs diverge; suggested resolution]
-- **Underserved:** [User types not mentioned but likely affected]
-
-| Persona | Onboarding | Migration from today | Documentation / change-management | Success signal |
-|---|---|---|---|---|
-| [Label] | [What they need first time] | [Path from current workflow] | [What would smooth the rollout] | [How we'd know they're using it] |
-
----
-
-### Domain & Competitive Context
-
-> Domain knowledge, terminology, regulations, business rules, and how comparable products solve this — only include what's relevant.
-
-- **Concepts & terminology:** [What terms/data mean to users — semantic, not structural]
-- **Regulations / compliance:** [Only if genuinely relevant]
-- **Business rules:** [Standard behavior; exceptions ("except when…"); overrides]
-- **User expectations:** [Fast enough, trustworthy, simple]
-- **Comparable products / competitors:** [How they approach this; patterns; differentiation opportunities; common pitfalls]
-
-*(Skip the competitive section if web search yields nothing relevant.)*
+[Bullet points from context-analyst]
 
 ---
 
@@ -112,11 +62,5 @@ The plugin is a **thinking partner**, not a gatekeeper. Frame everything as obse
 
 ---
 
-### Risks, Dependencies & Assumptions
+> After posting these sections, the orchestrator posts the Refined Requirement as a final separate comment using `styles/requirement-template.md`.
 
-- **Value & priority:** [Primary value driver; possible MVP vs nice-to-have; time sensitivity]
-- **Risks:** [Specific to this item — with mitigation idea]
-- **Dependencies:** [Upstream / downstream / external]
-- **Assumptions to validate:** [Conditions assumed true — worth confirming with the product owner]
-
-*(Skip subsections with no findings.)*

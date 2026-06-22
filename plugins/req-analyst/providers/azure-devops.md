@@ -98,32 +98,16 @@ curl -s -u ":${AZURE-DEVOPS-TOKEN}" \
   -X POST \
   -H "Content-Type: application/json" \
   "https://dev.azure.com/${AZURE_ORG}/${AZURE_PROJECT}/_apis/wit/workitems/${WORK_ITEM_ID}/comments?format=markdown&api-version=7.1-preview.4" \
-  -d '{"text":"📋 **Requirement elaboration in progress**\n\nSurrounding this item with the context a senior analyst would bring — intent, user journey, personas & adoption, domain & competitive insight, fit with existing requirements, and open questions. The elaboration will be posted as a series of comments when complete — this may take a few minutes."}'
+  -d '{"text":"**Requirement elaboration in progress**\n\nA senior analyst is surrounding this item with context for the next refinement session. The following will be posted as ordered comments:\n\n1. **Elaboration Summary** — readiness signal and key takeaways\n2. **Fit with Existing Requirements** — overlaps, dependencies, contradictions, and gaps against existing docs\n3. **Context** — intent, user journey, personas, domain, and competitive patterns\n4. **Open Questions & Gaps** — discussion prompts for the next refinement session\n5. **Refined Requirement** — structured specification with functional requirements, user journey, and acceptance criteria\n\nThis is a thinking-partner exercise — the original description will not be modified."}'
 ```
 
 If posting the starting comment fails, output a single warning line and continue — do not stop the elaboration.
 
 ---
 
-## Posting the Elaboration
+## Posting a Comment
 
-The original work item description is **never modified**. All elaboration is posted as **separate comments** — one per lens.
-
-### Comment Order
-
-Post each lens as its own work item comment. Each comment must have a clear heading.
-
-| # | Comment | Heading | Source |
-|---|---------|---------|--------|
-| 1 | Elaboration Summary | `## 📋 Elaboration Summary` | Orchestrator (compiled) |
-| 2 | Fit with Existing Requirements | `## 🧩 Fit with Existing Requirements` | Orchestrator (from doc indexing in Step 2) |
-| 3 | Intent & User Context | `## 🔍 Intent & User Context` | intent-analyst |
-| 4 | User Journey | `## 🗺️ User Journey` | journey-mapper |
-| 5 | Personas & Adoption | `## 👥 Personas & Adoption` | persona-analyst |
-| 6 | Domain & Competitive Context | `## 🏢 Domain & Competitive Context` | domain-analyst |
-| 7 | Open Questions & Gaps | `## ❓ Open Questions & Gaps` | gap-risk-analyst |
-
-**Skip** any comment whose source produced no meaningful findings (e.g. a narrow bug fix may not need Journey, Personas, or Fit).
+Azure DevOps must be told that comment bodies are Markdown. If you omit `format=markdown`, the API stores the text as plain content and the UI shows `##`, tables, and emphasis as raw characters.
 
 ### Posting each comment
 
@@ -180,5 +164,5 @@ print(json.dumps([
 On completion:
 
 ```
-Elaboration posted on work item #<id>: <signal> — <N> comments — <N> open questions
+Elaboration posted on work item #<id>: <signal> — <N> comments — <N> open questions — refined requirement posted
 ```

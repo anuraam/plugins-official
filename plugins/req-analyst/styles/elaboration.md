@@ -14,16 +14,16 @@ A lightweight readiness signal (`GROOMED` / `NEEDS CLARIFICATION` / `NEEDS DECOM
 
 ## Core Lenses
 
-Push every requirement through these lenses:
+The context-analyst covers all of these in a single pass and returns them as bullets under `## Context`:
 
 | Lens | Question |
 |---|---|
-| **Fit with existing requirements** | How does this fit (or conflict with) what is already specified in the repo? |
 | **Intent** | Why does this exist? What problem disappears if solved? |
-| **Domain & competitive** | What domain knowledge, regulations, and competitor approaches apply? |
 | **User journey** | Where does this sit in the broader workflow? Usability touchpoints? Friction risks? |
 | **Personas & adoption** | Who is affected? How will they get from today to actually using this? |
-| **Open questions** | What assumptions are worth validating? Which ACs are worth tightening? |
+| **Domain & competitive** | What domain knowledge, regulations, and competitor approaches apply? |
+
+The orchestrator handles **Fit with existing requirements** and **Open questions** separately.
 
 ---
 
@@ -74,17 +74,15 @@ These are hints — the team decides what blocks them.
 
 ---
 
-## Section Order
+## Comment Order
 
-1. Header (issue number, title, type, readiness signal)
-2. Summary (with intent decomposition table)
-3. **Fit with Existing Requirements** *(skip if repo has no requirement docs)*
-4. Intent & User Context
-5. User Journey *(if cross-issue context, usability, or friction add insight)*
-6. Personas & Adoption *(if multiple user types or adoption is non-trivial)*
-7. Domain & Competitive Context
-8. Open Questions & Gaps
-9. Risks, Dependencies & Assumptions
+Post each as its own comment, in this order:
+
+1. **Elaboration Summary** — readiness signal, key takeaways
+2. **Fit with Existing Requirements** *(skip if repo has no requirement docs)*
+3. **Context** — 5–8 bullets from context-analyst covering intent, journey, personas, domain, competitors. No sub-sections.
+4. **Open Questions & Gaps** — from gap-risk-analyst, framed as prompts
+5. **Refined Requirement** — structured spec from `styles/requirement-template.md`, always last
 
 **Skip sections with no findings** rather than writing "None identified."
 

@@ -34,38 +34,28 @@ Readiness signal: GROOMED | NEEDS CLARIFICATION | NEEDS DECOMPOSITION
 
 ---
 
-## 📋 Elaboration Summary
+## Elaboration Summary
 <summary and intent decomposition>
 
 ---
 
-## 🧩 Fit with Existing Requirements
+## Fit with Existing Requirements
 <orchestrator's fit note — omit if no requirement docs in the repo>
 
 ---
 
-## 🔍 Intent & User Context
-<intent-analyst output>
+## Context
+<5–8 bullets from context-analyst — intent, journey, personas, domain, competitors — omit if no findings>
 
 ---
 
-## 🗺️ User Journey
-<journey-mapper output — omit if not applicable>
-
----
-
-## 👥 Personas & Adoption
-<persona-analyst output — omit if single persona and adoption is trivial>
-
----
-
-## 🏢 Domain & Competitive Context
-<domain-analyst output>
-
----
-
-## ❓ Open Questions & Gaps
+## Open Questions & Gaps
 <gap-risk-analyst output — framed as prompts for the team>
+
+---
+
+## Refined Requirement
+<structured requirement compiled by the orchestrator in Step 10 — user intent, functional requirements, non-functional requirements, user journey, and acceptance criteria; TODO markers for all assumed values>
 ```
 
 ---
@@ -75,7 +65,7 @@ Readiness signal: GROOMED | NEEDS CLARIFICATION | NEEDS DECOMPOSITION
 On completion:
 
 ```
-Elaboration complete: <signal> — report written to requirement-elaboration-report.md
+Elaboration complete: <signal> — report written to requirement-elaboration-report.md — refined requirement included
 ```
 
 ---

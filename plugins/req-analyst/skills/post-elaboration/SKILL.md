@@ -31,21 +31,19 @@ Do not ask for confirmation at any point. Execute all steps autonomously and pro
 
    If the item does not exist or is already closed/completed, stop and output a single error line.
 
-3. **Post each lens as a separate comment**
+3. **Post each section as a separate comment**
 
-   **Do not modify the item body.** Post each lens as its own comment, in this order:
+   **Do not modify the item body.** Post each section as its own comment, in this order:
 
-   | # | Comment | Heading |
-   |---|---------|---------|
-   | 1 | Elaboration Summary | `## 📋 Elaboration Summary` |
-   | 2 | Fit with Existing Requirements | `## 🧩 Fit with Existing Requirements` |
-   | 3 | Intent & User Context | `## 🔍 Intent & User Context` |
-   | 4 | User Journey | `## 🗺️ User Journey` |
-   | 5 | Personas & Adoption | `## 👥 Personas & Adoption` |
-   | 6 | Domain & Competitive Context | `## 🏢 Domain & Competitive Context` |
-   | 7 | Open Questions & Gaps | `## ❓ Open Questions & Gaps` |
+   | # | Comment | Heading | Always? |
+   |---|---------|---------|---------|
+   | 1 | Elaboration Summary | `## Elaboration Summary` | Yes |
+   | 2 | Fit with Existing Requirements | `## Fit with Existing Requirements` | Skip if no req docs |
+   | 3 | Context | `## Context` | Skip if no findings |
+   | 4 | Open Questions & Gaps | `## Open Questions & Gaps` | Skip if no findings |
+   | 5 | Refined Requirement | `## Refined Requirement` | Yes — always last |
 
-   Skip any comment whose source produced no meaningful findings.
+   Comment 5 uses `styles/requirement-template.md` — follow that template exactly.
 
    **GitHub:** Use `gh issue comment`.
 
@@ -80,7 +78,7 @@ Do not ask for confirmation at any point. Execute all steps autonomously and pro
 6. **Output result**
 
    ```
-   Elaboration posted on issue #<number>: <signal> — <N> comments — <N> open questions
+   Elaboration posted on issue #<number>: <signal> — <N> comments — <N> open questions — refined requirement posted
    ```
 
 > **Note:** GitHub requires `gh` CLI installed and authenticated. Azure DevOps requires `AZURE-DEVOPS-TOKEN`. See `docs/platform-config.md` for setup.
