@@ -1,0 +1,20 @@
+{
+  "project_name": "",
+  "project_folder": "",
+  "workspace_root": "../ux-mob-workspace",
+  "project_root": "../ux-mob-workspace/projects/[project-folder]",
+  "outputs_root": "../ux-mob-workspace/projects/[project-folder]/outputs",
+  "archive_root": "../ux-mob-workspace/archived-mob-runs",
+  "main_category": "",
+  "brownfield_ai_readiness": "not_required",
+  "brownfield_work_type": "not_selected",
+  "active_process_file": "",
+  "current_phase": 1,
+  "completed_phases": [],
+  "approved_artifacts": [],
+  "open_questions": [],
+  "assumptions": [],
+  "needs_human_input": [],
+  "decisions": [],
+  "last_approval_status": "pending"
+}

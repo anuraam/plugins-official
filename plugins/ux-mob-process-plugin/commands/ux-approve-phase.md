@@ -1,0 +1,35 @@
+---
+name: ux-approve-phase
+description: Record explicit phase approval and advance the UX Mob process to the next phase.
+---
+
+# Command: ux-approve-phase
+
+**Purpose:** Record phase approval and move to the next phase.
+
+## Instructions
+- Ensure all required artifacts for the current phase have been saved and reviewed.
+- Remember: Saving an artifact does not automatically approve the phase.
+- Record the current phase as approved only if the user has explicitly given phase approval.
+- Update `project-state.json` to move to the next phase.
+- Load the next phase requirements from the active process file and ask the next set of questions.
+
+
+# Phase Quality Checklist
+
+At the end of each phase, before asking for phase approval, the agent must run this checklist in chat:
+
+1. Were the required source artifacts approved?
+2. Did the artifact use the correct source of truth?
+3. Were assumptions clearly marked?
+4. Were inferred items clearly marked?
+5. Were missing inputs clearly marked?
+6. Were evidence labels used where needed?
+7. Were out-of-scope or removed items excluded?
+8. Was the artifact previewed in chat before saving?
+9. Was explicit save approval received?
+10. Was the artifact saved under projects/[project-folder]/?
+11. Were decisions, assumptions, or drift items logged if needed?
+12. Is the phase ready for approval?
+
+Then ask the phase approval gate.

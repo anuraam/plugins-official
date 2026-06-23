@@ -1,0 +1,46 @@
+{
+  "name": "ux-mob-process",
+  "version": "1.0.0",
+  "description": "Runs AI-native UX mob elaboration workflows for Greenfield and Brownfield projects with artifact guardrails, approval gates, and AI readiness.",
+  "author": {
+    "name": "99x",
+    "email": "xianix-agent@99x.io",
+    "url": "https://github.com/99x"
+  },
+  "homepage": "https://opensource.99x.io/xianix-team/",
+  "repository": "https://github.com/xianix-team/xianix-plugins-official",
+  "license": "MIT",
+  "keywords": [
+    "ux",
+    "product",
+    "mob-elaboration",
+    "greenfield",
+    "brownfield",
+    "ai-readiness",
+    "approval-gates",
+    "artifact-guardrails",
+    "human-gated",
+    "ux-design"
+  ],
+  "commands": [
+    "./commands/ux-start.md",
+    "./commands/ux-start-fresh.md",
+    "./commands/ux-resume.md",
+    "./commands/ux-status.md",
+    "./commands/ux-run-ai-readiness.md",
+    "./commands/ux-approve-phase.md",
+    "./commands/ux-validate-guardrails.md",
+    "./commands/ux-validate-context-drift.md",
+    "./commands/ux-run-matrix.md"
+  ],
+  "agents": [
+    "./agents/ux-mob-facilitator.md",
+    "./agents/greenfield-process-agent.md",
+    "./agents/brownfield-ai-readiness-agent.md",
+    "./agents/design-review-agent.md",
+    "./agents/context-drift-validator-agent.md",
+    "./agents/artifact-auditor-agent.md"
+  ],
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json"
+}

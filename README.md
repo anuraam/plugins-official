@@ -27,6 +27,7 @@ A curated directory of high-quality plugins for [Xianix the-agent](https://opens
 | [pr-reviewer](./plugins/pr-reviewer) | 1.1.0 | Comprehensive PR review with specialized agents for code quality, security, test coverage, and performance analysis. Works with GitHub, Azure DevOps, Bitbucket, and any git repository. | code-review |
 | [req-analyst](./plugins/req-analyst) | 1.0.0 | Requirement grooming plugin focused on user experience. Analyzes user intent, domain knowledge, competitive context, and workflow to produce well-understood, groomed requirements. | requirements |
 | [test-strategist](./plugins/test-strategist) | 1.0.0 | Automated impact analysis and risk-based test strategy generation for bug fixes, PBIs, and feature implementations. Posts a business-readable test guide on the PR/issue/work item discussion for QA engineers doing risk-based testing. Works with GitHub and Azure DevOps. | testing |
+| [ux-mob-process](./plugins/ux-mob-process-plugin) | 1.0.0 | AI-native UX mob elaboration workflow for Greenfield and Brownfield projects. Runs structured, human-gated phase processes with artifact guardrails, approval gates, context isolation, and AI readiness checks before any brownfield work begins. | ux-design |
 | [web-app-tester](./plugins/web-app-tester) | 1.0.0 | Automated web app behaviour verification triggered from a GitHub PR, Issue, or Azure DevOps work item. Finds a testable URL, runs or auto-generates a test plan using Playwright CLI (headless Chromium), and posts a structured test execution report. | testing |
 
 ---
