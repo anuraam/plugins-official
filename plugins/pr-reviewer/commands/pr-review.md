@@ -1,7 +1,7 @@
 ---
 name: pr-review
-description: Run a full PR review. Analyzes code quality, security, tests, and performance. Works with GitHub, Azure DevOps, Bitbucket, and any git repository. Usage: /pr-review [PR number, branch name, or leave blank for current branch]
-argument-hint: [pr-number | branch-name]
+description: "Run a full PR review. Analyzes code quality, security, tests, and performance. Works with GitHub, Azure DevOps, Bitbucket, and any git repository. Usage: /pr-review [PR number, branch name, or leave blank for current branch]"
+argument-hint: "[pr-number | branch-name]"
 ---
 
 Run a comprehensive pull request review for $ARGUMENTS.
@@ -145,6 +145,38 @@ If posting the starting comment fails, output a single warning line and continue
 
 The diff is what matters. Resolve the base/head and pull the diff first — for small PRs (≤10 changed files), this is *all* the context the sub-agents need, and the codebase index in step 4 can be skipped entirely.
 
+### Ensure the correct branch is checked out (Azure DevOps comment-triggered runs only)
+
+When the review is triggered by a pull request comment event (`ms.vss-code.git-pullrequest-comment-event`), the executor clones the repository without a specific branch reference because the comment webhook payload does not include `sourceRefName`. The executor therefore lands on the repository's default branch. Before computing any diffs, detect and correct this:
+
+```bash
+# Only needed on Azure DevOps when a PR number is known.
+# Skipped on GitHub (git-ref is always resolved from the webhook payload there).
+if [ "$PLATFORM" = "azuredevops" ] && [ -n "${PR_NUMBER:-}" ]; then
+  # Fetch the PR source branch from the ADO REST API.
+  # providers/azure-devops.md "Fetching PR Metadata" shows how AZURE_BASE_URL is constructed.
+  PR_SOURCE_REF=$(curl -s -u ":$AZURE_DEVOPS_TOKEN" \
+    "${AZURE_BASE_URL}/pullRequests/${PR_NUMBER}?api-version=7.1" \
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('sourceRefName',''))" 2>/dev/null || true)
+
+  if [ -n "$PR_SOURCE_REF" ]; then
+    PR_SOURCE_BRANCH="${PR_SOURCE_REF#refs/heads/}"
+    CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "HEAD")
+    if [ "$CURRENT_BRANCH" != "$PR_SOURCE_BRANCH" ]; then
+      echo "Comment-triggered run: checking out PR source branch '$PR_SOURCE_BRANCH' (was on '$CURRENT_BRANCH')"
+      git fetch origin "${PR_SOURCE_REF}:${PR_SOURCE_BRANCH}" 2>/dev/null \
+        || git fetch origin "${PR_SOURCE_REF}" 2>/dev/null
+      git checkout "$PR_SOURCE_BRANCH" 2>/dev/null \
+        || git checkout -b "$PR_SOURCE_BRANCH" FETCH_HEAD
+    fi
+  else
+    echo "WARN: could not resolve PR source branch from ADO API — continuing on current branch"
+  fi
+fi
+```
+
+If the checkout fails, output a single warning line and continue — the diff will be computed against whatever HEAD is, and the report will note the branch mismatch.
+
 ### Resolve the base ref (robust to detached HEAD, missing remote-tracking refs, and non-`main` defaults)
 
 > **Important:** detached worktrees created by CI runners (e.g. the Xianix Executor) often have **zero** remote-tracking refs (`refs/remotes/origin/*`). `git show-ref | grep remotes` returns nothing. Resolving `origin/master` will fail. Always fall back to **local** branches and use `git merge-base` for the diff.
@@ -230,6 +262,8 @@ Use `git show ${HEAD_SHA}:<filepath>` or the `Read` tool to read the full conten
 
 This is the one place reading platform PR comments is required, because it determines whether the run is an **initial** review or a **re-review**. Skip entirely on the generic platform (no API) and when `PR_REVIEWER_RECONCILE=false`.
 
+**Auto-detection (no flags required):** the run reads platform PR comments and detects whether the plugin has reviewed this PR before. If prior markers are found, `REVIEW_MODE` is set to `rereview` and `RANGE_BASE` is resolved from the prior summary SHA so the review is scoped to commits since the last review. If no markers exist, `REVIEW_MODE` is set to `initial` and a full review runs.
+
 1. List the existing review comments/threads on the PR and keep only those carrying the plugin marker (`<!-- pr-reviewer:v1 ... -->` on GitHub, or the `pr-reviewer.*` thread properties on Azure DevOps). Use the platform helper:
    - **GitHub** → `providers/github.md` → *Detecting a prior review* (GraphQL: review threads with `id`, `isResolved`, body, fid).
    - **Azure DevOps** → `providers/azure-devops.md` → *Detecting a prior review* (`GET .../threads`, filter by `properties["pr-reviewer.fid"]`).
@@ -241,12 +275,17 @@ This is the one place reading platform PR comments is required, because it deter
 # prior marked finding thread: {fid, status(open|resolved), thread_ref[, comment_ref]}.
 # Matching is by fid alone, so file/line are not needed here.
 # PRIOR_SUMMARY_SHA is the sha= from the most recent summary marker, or empty.
+#
+# Mode is determined purely from the marker data — no flags required.
+# Every run auto-detects whether it is an initial review or a follow-up.
+# Set PR_REVIEWER_RECONCILE=false to force a full stateless review that ignores markers.
 if [ "${PR_REVIEWER_RECONCILE:-true}" = "false" ] || [ ! -s /tmp/pr_prior_findings.jsonl ]; then
   REVIEW_MODE="initial"
   RANGE_BASE="$BASE_SHA"
 else
   REVIEW_MODE="rereview"
-  # New commits since the last review; fall back to BASE_SHA if the recorded sha is gone.
+  # Scope the incremental range to commits since the last reviewed SHA.
+  # Fall back to BASE_SHA only if the recorded SHA has been garbage-collected.
   if [ -n "${PRIOR_SUMMARY_SHA:-}" ] && git cat-file -e "${PRIOR_SUMMARY_SHA}^{commit}" 2>/dev/null; then
     RANGE_BASE="$PRIOR_SUMMARY_SHA"
   else
@@ -310,14 +349,28 @@ Before launching any agents:
 
 The review runs on the **cheap Haiku-finder path by default** (step 6A) and only **escalates to the full specialist reviewers** (step 6B) when the diff touches a high-risk surface. Detect high-risk changes from both the file list and the diff content:
 
+In **re-review mode** the tier is assessed against only the incremental diff (`/tmp/pr_incremental_diff.patch`) — high-risk files from earlier commits in the PR that were not touched since the last review do not escalate the tier for the current run.
+
 ```bash
+# In rereview mode scope the tier decision to the incremental diff only.
+# This prevents auth/payment files reviewed in a prior run from forcing the
+# full specialist path on every subsequent push where those files are unchanged.
+if [ "$REVIEW_MODE" = "rereview" ] && [ -s /tmp/pr_incremental_diff.patch ]; then
+  TIER_DIFF_FILE=/tmp/pr_incremental_diff.patch
+  TIER_FILES_FILE=/tmp/pr_incremental_changed_files.txt
+  git diff --name-only ${RANGE_BASE}...${HEAD_SHA} > "$TIER_FILES_FILE" 2>/dev/null || cp /tmp/pr_changed_files.txt "$TIER_FILES_FILE"
+else
+  TIER_DIFF_FILE=/tmp/pr_full_diff.patch
+  TIER_FILES_FILE=/tmp/pr_changed_files.txt
+fi
+
 # 1. High-risk by file path
 HIGH_RISK_FILES=$(grep -iE \
   '(auth|login|signin|session|password|passwd|secret|token|jwt|oauth|crypto|encrypt|decrypt|payment|billing|charge|invoice|checkout|migration|schema|\.sql$|webhook|/api/|/controllers?/|/routes?/|/handlers?/|iam|rbac|permission)' \
-  /tmp/pr_changed_files.txt || true)
+  "$TIER_FILES_FILE" || true)
 
 # 2. High-risk by changed content (added lines only)
-HIGH_RISK_DIFF=$(grep -iE '^\+' /tmp/pr_full_diff.patch \
+HIGH_RISK_DIFF=$(grep -iE '^\+' "$TIER_DIFF_FILE" \
   | grep -iE '(password|secret|api[_-]?key|private[_-]?key|authorize|authenticate|hashpw|bcrypt|jwt|sql|exec\(|eval\(|subprocess|os\.system|pickle\.loads)' \
   || true)
 
@@ -342,13 +395,24 @@ Run **exactly one** of the two paths below, chosen by `REVIEW_TIER` from step 5.
 
 **Constraints every sub-agent prompt below must include, verbatim:**
 
-- A reminder: *"Do not re-fetch git data; the diff at /tmp/pr_full_diff.patch is authoritative. Return findings only."*
+- A reminder: *"Do not re-fetch git data; the diff at `$REVIEW_DIFF_FILE` is authoritative. Return findings only."* — in rereview mode this is `/tmp/pr_incremental_diff.patch` (commits since the last review); in initial mode it is `/tmp/pr_full_diff.patch`.
+- When `REVIEW_MODE=rereview`, also include: *"This is a focused re-review. Only the commits since the last review are in scope — review only the diff at `/tmp/pr_incremental_diff.patch`, not the full PR history."*
 - A line-number constraint: *"Every `path/to/file.ext:NN` reference must use the POST-CHANGE file line number — the line as it appears in the new version of the file. Derive `NN` from the `@@ -old,+new @@` hunk header's `+new` start plus the offset of the flagged `+` line within that hunk. Never report the diff's own line position or an old-side line number. Findings on deleted (`-`) lines must reference the nearest surviving line."*
 
 > **Diff size (used by both paths):**
 > ```bash
-> DIFF_LINES=$(wc -l < /tmp/pr_full_diff.patch)
-> echo "Diff size: $DIFF_LINES lines  |  Tier: $REVIEW_TIER"
+> # In rereview mode, sub-agents work on the incremental diff (commits since last review).
+> # In initial mode, sub-agents work on the full PR diff.
+> if [ "$REVIEW_MODE" = "rereview" ] && [ -s /tmp/pr_incremental_diff.patch ]; then
+>   REVIEW_DIFF_FILE=/tmp/pr_incremental_diff.patch
+>   REVIEW_DIFF_LABEL="incremental (re-review)"
+> else
+>   REVIEW_DIFF_FILE=/tmp/pr_full_diff.patch
+>   REVIEW_DIFF_LABEL="full PR"
+> fi
+> DIFF_LINES=$(wc -l < "$REVIEW_DIFF_FILE")
+> echo "Diff size: $DIFF_LINES lines ($REVIEW_DIFF_LABEL)  |  Tier: $REVIEW_TIER"
+> export REVIEW_DIFF_FILE
 > ```
 
 ---
@@ -367,11 +431,13 @@ Then emit **both Agent calls in the same assistant turn** (so they run in parall
 
 **Agent 1 — Correctness & regressions**
 
+Construct the prompt with the resolved `$REVIEW_DIFF_FILE` path before emitting the agent call. In rereview mode this is `/tmp/pr_incremental_diff.patch`; otherwise `/tmp/pr_full_diff.patch`.
+
 ```json
 {
   "description": "Correctness & regression finder",
   "model": "claude-haiku-4-5",
-  "prompt": "Read /tmp/pr_full_diff.patch then /tmp/pr_context.txt.\n\nFind correctness bugs and behavioural regressions introduced by the diff. Focus on:\n- Logic errors in changed code paths\n- Changed conditions that now allow or block cases they shouldn't\n- Null / empty / zero edge cases on new code paths\n- Removed guards that previously protected against a bad state\n- Interface/contract mismatches between callers and the changed function\n\nFor each finding output exactly:\nFILE: <path>\nLINE: <post-change file line number from the @@ hunk header's +new start plus the offset of the flagged + line within that hunk; never the diff's own line position>\nSEVERITY: CRITICAL | WARNING\nISSUE: <one sentence>\n\nIf you find nothing, output: NONE\nDo not call any tools."
+  "prompt": "Read $REVIEW_DIFF_FILE then /tmp/pr_context.txt.\n\n[If REVIEW_MODE=rereview, prepend: 'This is a focused re-review — only review the commits since the last review. Do not flag issues from earlier commits in the PR.']\n\nFind correctness bugs and behavioural regressions introduced by the diff. Focus on:\n- Logic errors in changed code paths\n- Changed conditions that now allow or block cases they shouldn't\n- Null / empty / zero edge cases on new code paths\n- Removed guards that previously protected against a bad state\n- Interface/contract mismatches between callers and the changed function\n\nFor each finding output exactly:\nFILE: <path>\nLINE: <post-change file line number from the @@ hunk header's +new start plus the offset of the flagged + line within that hunk; never the diff's own line position>\nSEVERITY: CRITICAL | WARNING\nISSUE: <one sentence>\n\nIf you find nothing, output: NONE\nDo not call any tools."
 }
 ```
 
@@ -381,7 +447,7 @@ Then emit **both Agent calls in the same assistant turn** (so they run in parall
 {
   "description": "Security & edge-case finder",
   "model": "claude-haiku-4-5",
-  "prompt": "Read /tmp/pr_full_diff.patch then /tmp/pr_context.txt.\n\nFind security issues and missing edge-case handling in the diff. Focus on:\n- Input not validated before use (injection, path traversal)\n- Authentication or authorisation checks removed or weakened\n- Sensitive data written to logs\n- Exception or error paths that swallow failures silently\n- Resource leaks (connections, file handles) on error paths\n- Off-by-one errors or boundary conditions in new loops/ranges\n\nFor each finding output exactly:\nFILE: <path>\nLINE: <post-change file line number from the @@ hunk header's +new start plus the offset of the flagged + line within that hunk; never the diff's own line position>\nSEVERITY: CRITICAL | WARNING | SUGGESTION\nISSUE: <one sentence>\n\nIf you find nothing, output: NONE\nDo not call any tools."
+  "prompt": "Read $REVIEW_DIFF_FILE then /tmp/pr_context.txt.\n\n[If REVIEW_MODE=rereview, prepend: 'This is a focused re-review — only review the commits since the last review. Do not flag issues from earlier commits in the PR.']\n\nFind security issues and missing edge-case handling in the diff. Focus on:\n- Input not validated before use (injection, path traversal)\n- Authentication or authorisation checks removed or weakened\n- Sensitive data written to logs\n- Exception or error paths that swallow failures silently\n- Resource leaks (connections, file handles) on error paths\n- Off-by-one errors or boundary conditions in new loops/ranges\n\nFor each finding output exactly:\nFILE: <path>\nLINE: <post-change file line number from the @@ hunk header's +new start plus the offset of the flagged + line within that hunk; never the diff's own line position>\nSEVERITY: CRITICAL | WARNING | SUGGESTION\nISSUE: <one sentence>\n\nIf you find nothing, output: NONE\nDo not call any tools."
 }
 ```
 
@@ -404,12 +470,12 @@ Deeper coverage for high-risk diffs. Run `code-reviewer` **always**; gate the ot
 
 In **one assistant turn**, emit one parallel sub-agent invocation per selected reviewer (between 1 and 4). Each invocation prompt must include, in addition to the two shared constraints above:
 
-- The path `/tmp/pr_full_diff.patch` and the path `/tmp/pr_changed_files.txt`
+- The resolved path `$REVIEW_DIFF_FILE` (in rereview mode: `/tmp/pr_incremental_diff.patch`; in initial mode: `/tmp/pr_full_diff.patch`) and the path `/tmp/pr_changed_files.txt`
 - `BASE_SHA` and `HEAD_SHA`
 - The PR title and description (from the platform metadata fetched in step 2)
 - A file-reading constraint: *"When you need full file context, read only the enclosing function/class (±60 lines around each changed hunk). Do not read any file in its entirety if it exceeds 400 lines — use `Bash(sed -n '<start>,<end>p' <file>)` scoped to the changed region instead. Read at most 3 files beyond the diff."*
 
-> **Pass-by-value vs path:** if `DIFF_LINES ≤ 300`, pass the diff **inline** in each prompt (cheaper than each sub-agent re-opening a shared file); if `DIFF_LINES > 300`, pass the path `/tmp/pr_full_diff.patch`.
+> **Pass-by-value vs path:** if `DIFF_LINES ≤ 300`, pass the diff **inline** in each prompt (cheaper than each sub-agent re-opening a shared file); if `DIFF_LINES > 300`, pass the path `$REVIEW_DIFF_FILE`.
 
 > **Model selection (mixed-model tiering).** The reviewers split into two model tiers so you don't pay frontier-model rates for the cheaper review dimensions. Set each sub-agent's `model` from its tier (per the table above), resolved with this precedence:
 >
