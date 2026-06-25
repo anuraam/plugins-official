@@ -344,6 +344,7 @@ Run **exactly one** of the two paths below, chosen by `REVIEW_TIER` from step 5.
 
 - A reminder: *"Do not re-fetch git data; the diff at /tmp/pr_full_diff.patch is authoritative. Return findings only."*
 - A line-number constraint: *"Every `path/to/file.ext:NN` reference must use the POST-CHANGE file line number — the line as it appears in the new version of the file. Derive `NN` from the `@@ -old,+new @@` hunk header's `+new` start plus the offset of the flagged `+` line within that hunk. Never report the diff's own line position or an old-side line number. Findings on deleted (`-`) lines must reference the nearest surviving line."*
+- A suggestion constraint: *"For findings where the fix is a concrete, drop-in replacement (wrong identifier, missing null guard, insecure call swapped for safe equivalent, etc.), add a native GitHub suggestion block immediately after the `**Fix:**` block. Prefix it with an HTML comment that carries the line range, then a ` ```suggestion ` fenced block containing the verbatim replacement lines with indentation preserved. Example for a single-line fix: `<!-- suggestion: line NN -->` on its own line, then ` ```suggestion `, then the replacement line, then ` ``` `. For multi-line: `<!-- suggestion: lines NN-MM -->`. Do not include this for architectural improvements or fixes requiring author judgment."*
 
 > **Diff size (used by both paths):**
 > ```bash
@@ -371,7 +372,7 @@ Then emit **both Agent calls in the same assistant turn** (so they run in parall
 {
   "description": "Correctness & regression finder",
   "model": "claude-haiku-4-5",
-  "prompt": "Read /tmp/pr_full_diff.patch then /tmp/pr_context.txt.\n\nFind correctness bugs and behavioural regressions introduced by the diff. Focus on:\n- Logic errors in changed code paths\n- Changed conditions that now allow or block cases they shouldn't\n- Null / empty / zero edge cases on new code paths\n- Removed guards that previously protected against a bad state\n- Interface/contract mismatches between callers and the changed function\n\nFor each finding output exactly:\nFILE: <path>\nLINE: <post-change file line number from the @@ hunk header's +new start plus the offset of the flagged + line within that hunk; never the diff's own line position>\nSEVERITY: CRITICAL | WARNING\nISSUE: <one sentence>\n\nIf you find nothing, output: NONE\nDo not call any tools."
+  "prompt": "Read /tmp/pr_full_diff.patch then /tmp/pr_context.txt.\n\nFind correctness bugs and behavioural regressions introduced by the diff. Focus on:\n- Logic errors in changed code paths\n- Changed conditions that now allow or block cases they shouldn't\n- Null / empty / zero edge cases on new code paths\n- Removed guards that previously protected against a bad state\n- Interface/contract mismatches between callers and the changed function\n\nFor each finding output exactly:\nFILE: <path>\nLINE: <post-change file line number from the @@ hunk header's +new start plus the offset of the flagged + line within that hunk; never the diff's own line position>\nSEVERITY: CRITICAL | WARNING\nISSUE: <one sentence>\nSUGGESTION_START_LINE: <line number, only when the fix is a concrete drop-in single-line or consecutive-block replacement; omit otherwise>\nSUGGESTION_END_LINE: <last line of the replacement block; same as SUGGESTION_START_LINE for a single-line fix; omit if no suggestion>\nSUGGESTION_CODE: <verbatim replacement lines with indentation preserved exactly; omit if no suggestion>\n\nInclude SUGGESTION_* fields only when the fix is an unambiguous drop-in swap (wrong value, missing guard, insecure call replaced by its safe equivalent). Omit for architectural or design-level fixes.\n\nIf you find nothing, output: NONE\nDo not call any tools."
 }
 ```
 
@@ -381,11 +382,11 @@ Then emit **both Agent calls in the same assistant turn** (so they run in parall
 {
   "description": "Security & edge-case finder",
   "model": "claude-haiku-4-5",
-  "prompt": "Read /tmp/pr_full_diff.patch then /tmp/pr_context.txt.\n\nFind security issues and missing edge-case handling in the diff. Focus on:\n- Input not validated before use (injection, path traversal)\n- Authentication or authorisation checks removed or weakened\n- Sensitive data written to logs\n- Exception or error paths that swallow failures silently\n- Resource leaks (connections, file handles) on error paths\n- Off-by-one errors or boundary conditions in new loops/ranges\n\nFor each finding output exactly:\nFILE: <path>\nLINE: <post-change file line number from the @@ hunk header's +new start plus the offset of the flagged + line within that hunk; never the diff's own line position>\nSEVERITY: CRITICAL | WARNING | SUGGESTION\nISSUE: <one sentence>\n\nIf you find nothing, output: NONE\nDo not call any tools."
+  "prompt": "Read /tmp/pr_full_diff.patch then /tmp/pr_context.txt.\n\nFind security issues and missing edge-case handling in the diff. Focus on:\n- Input not validated before use (injection, path traversal)\n- Authentication or authorisation checks removed or weakened\n- Sensitive data written to logs\n- Exception or error paths that swallow failures silently\n- Resource leaks (connections, file handles) on error paths\n- Off-by-one errors or boundary conditions in new loops/ranges\n\nFor each finding output exactly:\nFILE: <path>\nLINE: <post-change file line number from the @@ hunk header's +new start plus the offset of the flagged + line within that hunk; never the diff's own line position>\nSEVERITY: CRITICAL | WARNING | SUGGESTION\nISSUE: <one sentence>\nSUGGESTION_START_LINE: <line number, only when the fix is a concrete drop-in single-line or consecutive-block replacement; omit otherwise>\nSUGGESTION_END_LINE: <last line of the replacement block; same as SUGGESTION_START_LINE for a single-line fix; omit if no suggestion>\nSUGGESTION_CODE: <verbatim replacement lines with indentation preserved exactly; omit if no suggestion>\n\nInclude SUGGESTION_* fields only when the fix is an unambiguous drop-in swap (wrong value, missing guard, insecure call replaced by its safe equivalent). Omit for architectural or design-level fixes.\n\nIf you find nothing, output: NONE\nDo not call any tools."
 }
 ```
 
-**Verify and compile (you are the verifier — no extra agents).** For each finding from both agents: (1) confirm the flagged line appears in `/tmp/pr_full_diff.patch` as a `+` line (new code, not pre-existing); (2) discard pre-existing issues, linter/compiler-caught problems, pedantic style, and obvious false positives; (3) merge duplicates and **cap at 8 findings**, ranked CRITICAL → WARNING → SUGGESTION. Then go to step 7.
+**Verify and compile (you are the verifier — no extra agents).** For each finding from both agents: (1) confirm the flagged line appears in `/tmp/pr_full_diff.patch` as a `+` line (new code, not pre-existing); (2) discard pre-existing issues, linter/compiler-caught problems, pedantic style, and obvious false positives; (3) merge duplicates and **cap at 8 findings**, ranked CRITICAL → WARNING → SUGGESTION; (4) **preserve the `SUGGESTION_START_LINE` / `SUGGESTION_END_LINE` / `SUGGESTION_CODE` fields verbatim** — they will be extracted in the "Extract suggestion annotations" step before posting and are what enables the GitHub "Commit suggestion" button. Then go to step 7.
 
 ---
 
@@ -568,6 +569,20 @@ For each finding before serializing it:
 2. The finding's file line = `<newStart>` + (count of context ` ` and added `+` lines that precede the flagged line within that hunk). Deleted (`-`) lines do **not** advance the new-side counter.
 3. If a finding sits on a deleted line (no surviving `+`/context line), anchor it to the nearest surviving line in the same hunk and note the relocation in the comment body.
 4. Confirm the resolved `path` is repo-relative (matches an entry in `/tmp/pr_changed_files.txt`) and the line is within the file's new length.
+
+### Handle suggestion blocks (enables "Apply suggestion" / "Commit suggestion" button on GitHub)
+
+Sub-agents emit ` ```suggestion ` blocks directly in their finding output (prefixed with an `<!-- suggestion: line NN -->` or `<!-- suggestion: lines NN-MM -->` HTML comment). Include the finding body **verbatim** in the JSONL — the ` ```suggestion ` block is already in the right format for GitHub and no text transformation is needed.
+
+For each finding that contains a suggestion block:
+
+1. Parse the line range from the HTML comment immediately before the ` ```suggestion ` fence:
+   - `<!-- suggestion: line NN -->` → single-line: `suggestion_start_line = NN`, `suggestion_end_line = NN`
+   - `<!-- suggestion: lines NN-MM -->` → multi-line: `suggestion_start_line = NN`, `suggestion_end_line = MM`
+2. Include those values as `suggestion_start_line` / `suggestion_end_line` in the JSONL entry — the posting loop uses them to set `start_line` in the GitHub API call for multi-line suggestions.
+3. Copy the **entire finding body verbatim** (including the HTML comment and the ` ```suggestion ` block) into the JSONL `body` field. **Do not strip or transform it.** GitHub renders the ` ```suggestion ` block as the "Commit suggestion" button automatically.
+
+If a finding has no ` ```suggestion ` block, omit `suggestion_start_line` and `suggestion_end_line`. The body is still copied verbatim.
 
 The reviewers were already instructed (step 6) to return post-change line numbers, but verify here — a wrong line number is the single most common cause of silently dropped inline comments.
 
