@@ -149,7 +149,7 @@ PY
 # 3. POST and check status
 RESP=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
   -H "Content-Type: application/json" \
-  -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 -w0)" \
+  -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 | tr -d '\n')" \
   -X POST \
   --data @/tmp/pr_thread_payload.json \
   "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads?api-version=7.1")
@@ -186,7 +186,7 @@ PY
 
 Then POST exactly as in step 3 above.
 
-> **Authentication note:** Both `-u ":${AZURE_DEVOPS_TOKEN}"` and `-H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 -w0)"` work for Azure DevOps PAT auth. The `-H` form is shown above because it makes the auth header visible in `curl -v` traces and is what the model converges on in practice.
+> **Authentication note:** Both `-u ":${AZURE_DEVOPS_TOKEN}"` and `-H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 | tr -d '\n')"` work for Azure DevOps PAT auth. The `-H` form is shown above because it makes the auth header visible in `curl -v` traces and is what the model converges on in practice.
 
 ---
 
@@ -242,7 +242,7 @@ Called from Step 3 of `commands/pr-review.md` to decide initial vs. re-review mo
 
 ```bash
 curl -sS -u ":${AZURE_DEVOPS_TOKEN}" \
-  "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads?api-version=7.1" \
+  "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads?\$top=1000&api-version=7.1" \
   > /tmp/pr_threads.json
 
 # Our marked finding threads → /tmp/pr_prior_findings.jsonl
@@ -286,7 +286,7 @@ PY
 export PRIOR_SUMMARY_SHA
 ```
 
-If `/tmp/pr_prior_findings.jsonl` is empty, the run is an **initial** review. Reconciliation matches on `fid` only, so `file`/`line` are not needed here.
+The mode decision (initial vs. rereview) is made in `commands/pr-review.md` based on `PRIOR_SUMMARY_SHA` first, then the findings file as a fallback. Reconciliation matches on `fid` only, so `file`/`line` are not needed here.
 
 ---
 
@@ -327,7 +327,7 @@ PY
 
 curl -sS -w "\nHTTP_STATUS:%{http_code}\n" \
   -H "Content-Type: application/json" \
-  -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 -w0)" \
+  -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 | tr -d '\n')" \
   -X POST --data @/tmp/pr_thread_payload.json \
   "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads?api-version=7.1"
 ```
@@ -398,7 +398,7 @@ esac
 
 ```bash
 REVIEWER_ID=$(curl -sS \
-  -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 -w0)" \
+  -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 | tr -d '\n')" \
   "https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1" \
   | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))")
 
@@ -407,7 +407,7 @@ if [ -z "$REVIEWER_ID" ]; then
 else
   VOTE_RESP=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
     -H "Content-Type: application/json" \
-    -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 -w0)" \
+    -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 | tr -d '\n')" \
     -X PUT \
     "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/reviewers/${REVIEWER_ID}?api-version=7.1" \
     -d "{\"vote\": ${VOTE}, \"id\": \"${REVIEWER_ID}\"}")
@@ -446,7 +446,7 @@ PY
 
 curl -sS -w "\nHTTP_STATUS:%{http_code}\n" \
   -H "Content-Type: application/json" \
-  -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 -w0)" \
+  -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 | tr -d '\n')" \
   -X POST --data @/tmp/pr_thread_payload.json \
   "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads?api-version=7.1"
 ```
@@ -519,7 +519,7 @@ PY
 
   RESP=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
     -H "Content-Type: application/json" \
-    -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 -w0)" \
+    -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 | tr -d '\n')" \
     -X POST --data @/tmp/pr_thread_payload.json \
     "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads?api-version=7.1")
 
@@ -586,14 +586,14 @@ print(json.dumps({"content": open('/tmp/pr_resolve_body.md').read(), "commentTyp
 PY
   curl -sS -o /dev/null \
     -H "Content-Type: application/json" \
-    -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 -w0)" \
+    -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 | tr -d '\n')" \
     -X POST --data @/tmp/pr_resolve_payload.json \
     "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads/${THREAD_ID}/comments?api-version=7.1"
 
   # 2. Set thread status to fixed
   RESP=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
     -H "Content-Type: application/json" \
-    -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 -w0)" \
+    -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 | tr -d '\n')" \
     -X PATCH -d '{"status":"fixed"}' \
     "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads/${THREAD_ID}?api-version=7.1")
   STATUS=$(echo "$RESP" | sed -n 's/^HTTP_STATUS://p')

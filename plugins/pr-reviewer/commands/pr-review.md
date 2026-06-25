@@ -262,47 +262,95 @@ Use `git show ${HEAD_SHA}:<filepath>` or the `Read` tool to read the full conten
 
 This is the one place reading platform PR comments is required, because it determines whether the run is an **initial** review or a **re-review**. Skip entirely on the generic platform (no API) and when `PR_REVIEWER_RECONCILE=false`.
 
-**Auto-detection (no flags required):** the run reads platform PR comments and detects whether the plugin has reviewed this PR before. If prior markers are found, `REVIEW_MODE` is set to `rereview` and `RANGE_BASE` is resolved from the prior summary SHA so the review is scoped to commits since the last review. If no markers exist, `REVIEW_MODE` is set to `initial` and a full review runs.
+> **Critical execution rule:** Run ALL THREE parts below (A, B, C) as a single uninterrupted sequence before drawing any conclusion about the mode. **Do NOT decide the mode after Part A alone.** An empty `/tmp/pr_prior_findings.jsonl` does NOT mean initial mode — a prior review with zero findings leaves the findings file empty but stamps a summary marker. You MUST complete Part B (summary SHA query) before Part C (mode decision). Stopping after Part A and outputting "initial review" is a hard bug.
 
-1. List the existing review comments/threads on the PR and keep only those carrying the plugin marker (`<!-- pr-reviewer:v1 ... -->` on GitHub, or the `pr-reviewer.*` thread properties on Azure DevOps). Use the platform helper:
-   - **GitHub** → `providers/github.md` → *Detecting a prior review* (GraphQL: review threads with `id`, `isResolved`, body, fid).
-   - **Azure DevOps** → `providers/azure-devops.md` → *Detecting a prior review* (`GET .../threads`, filter by `properties["pr-reviewer.fid"]`).
+#### Part A — Detect prior finding threads
 
-2. Decide the mode:
+Run the full provider detection code to populate `/tmp/pr_prior_findings.jsonl`. For the exact code see the relevant section in the platform provider file:
+
+- **GitHub** → `providers/github.md` → *Detecting a prior review* (GraphQL + python3 parse)
+- **Azure DevOps** → `providers/azure-devops.md` → *Detecting a prior review* (REST threads GET + python3 parse)
+
+#### Part B — Detect prior summary SHA (MANDATORY, even when Part A finds nothing)
+
+Run the following **immediately after Part A, regardless of whether the findings file is empty**:
+
+**GitHub:**
 
 ```bash
-# /tmp/pr_prior_findings.jsonl is written by the provider helper: one JSON object per
-# prior marked finding thread: {fid, status(open|resolved), thread_ref[, comment_ref]}.
-# Matching is by fid alone, so file/line are not needed here.
-# PRIOR_SUMMARY_SHA is the sha= from the most recent summary marker, or empty.
-#
-# Mode is determined purely from the marker data — no flags required.
-# Every run auto-detects whether it is an initial review or a follow-up.
-# Set PR_REVIEWER_RECONCILE=false to force a full stateless review that ignores markers.
-#
-# IMPORTANT: PRIOR_SUMMARY_SHA is the authoritative signal for a prior review, not the
-# findings file. A clean first review (LGTM, zero findings) stamps the summary marker
-# but leaves pr_prior_findings.jsonl empty — using the file as the gate would falsely
-# re-run a full initial review on every subsequent push to a passing PR.
+# The summary marker may be in plain PR comments OR in a PR review body.
+# Both endpoints must be checked — searching only one will miss it.
+PRIOR_SUMMARY_SHA=$(
+  {
+    gh api "repos/${OWNER}/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
+      --jq '.[].body' 2>/dev/null
+    gh api "repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}/reviews" --paginate \
+      --jq '.[].body' 2>/dev/null
+  } | grep -oE 'pr-reviewer:v1 kind=summary[^>]*sha=[0-9a-f]+' \
+    | tail -1 | grep -oE 'sha=[0-9a-f]+' | cut -d= -f2
+)
+export PRIOR_SUMMARY_SHA
+echo "Prior summary SHA: ${PRIOR_SUMMARY_SHA:-(none)}"
+```
+
+**Azure DevOps:**
+
+```bash
+# Summary SHA is stored as a thread property pr-reviewer.sha on the kind=summary thread.
+# This was already read in Part A — re-use the /tmp/pr_threads.json file from there.
+PRIOR_SUMMARY_SHA=$(python3 - <<'PY'
+import json
+data = json.load(open('/tmp/pr_threads.json'))
+def prop(props, key):
+    v = (props or {}).get(key)
+    return v.get("$value") if isinstance(v, dict) else v
+shas = [prop(t.get("properties") or {}, "pr-reviewer.sha")
+        for t in data.get("value", [])
+        if prop(t.get("properties") or {}, "pr-reviewer.kind") == "summary"]
+print([s for s in shas if s][-1] if any(shas) else "")
+PY
+)
+export PRIOR_SUMMARY_SHA
+echo "Prior summary SHA: ${PRIOR_SUMMARY_SHA:-(none)}"
+```
+
+#### Part C — Decide the mode (only after Parts A and B are complete)
+
+```bash
+# PRIOR_SUMMARY_SHA is the authoritative signal for a prior review, not the findings file.
+# A clean first review (LGTM, zero findings) stamps the summary marker but leaves
+# pr_prior_findings.jsonl empty — the summary SHA is the only reliable indicator.
 if [ "${PR_REVIEWER_RECONCILE:-true}" = "false" ]; then
   # Explicit override — force a full stateless review ignoring all prior markers.
   REVIEW_MODE="initial"
   RANGE_BASE="$BASE_SHA"
-elif [ -n "${PRIOR_SUMMARY_SHA:-}" ] && git cat-file -e "${PRIOR_SUMMARY_SHA}^{commit}" 2>/dev/null; then
-  # Summary marker found and the commit is reachable — definitive prior review.
+elif [ -n "${PRIOR_SUMMARY_SHA:-}" ]; then
+  # Summary marker found — definitive prior review.
+  # Ensure the commit is locally available (freshly cloned repos may not have it).
+  if ! git cat-file -e "${PRIOR_SUMMARY_SHA}^{commit}" 2>/dev/null; then
+    git fetch origin "${PRIOR_SUMMARY_SHA}" 2>/dev/null || true
+  fi
   REVIEW_MODE="rereview"
-  RANGE_BASE="$PRIOR_SUMMARY_SHA"
+  if git cat-file -e "${PRIOR_SUMMARY_SHA}^{commit}" 2>/dev/null; then
+    RANGE_BASE="$PRIOR_SUMMARY_SHA"
+  else
+    # Commit not reachable even after fetch (force-push / history rewrite).
+    # Fall back to the full PR range. The incremental diff won't be created
+    # (RANGE_BASE=BASE_SHA fails the != check below), so sub-agents get the
+    # full PR diff — fid reconciliation still prevents duplicates.
+    RANGE_BASE="$BASE_SHA"
+    echo "WARN: prior review commit ${PRIOR_SUMMARY_SHA} is unreachable — re-review will cover full PR diff (fid reconciliation prevents duplicates)"
+  fi
 elif [ -s /tmp/pr_prior_findings.jsonl ]; then
-  # Finding markers exist but no reachable summary SHA (older run or SHA was GC'd).
-  # Still a prior review — scope from BASE_SHA as the safe fallback.
+  # Finding markers exist but no reachable summary SHA (pre-summary older run).
   REVIEW_MODE="rereview"
   RANGE_BASE="$BASE_SHA"
 else
-  # No markers of any kind — this is a genuine initial review.
+  # No markers of any kind — genuine initial review.
   REVIEW_MODE="initial"
   RANGE_BASE="$BASE_SHA"
 fi
-echo "Review mode: $REVIEW_MODE  |  incremental range: ${RANGE_BASE}..${HEAD_SHA}"
+echo "Review mode: $REVIEW_MODE  |  range base: ${RANGE_BASE}  |  head: ${HEAD_SHA}"
 export REVIEW_MODE RANGE_BASE
 ```
 
@@ -316,7 +364,7 @@ if [ "$REVIEW_MODE" = "rereview" ] && [ "$RANGE_BASE" != "$BASE_SHA" ]; then
 fi
 ```
 
-> **Why review the full PR diff, not just the increment?** The full diff (`/tmp/pr_full_diff.patch`) stays the authoritative input to the reviewers so the *current* finding set is always complete — an unresolved finding in a file the latest commits didn't touch must still be detected so it stays open. The incremental diff focuses your attention and drives the delta summary; it does not replace the full scan. Reconciliation (step 7 / posting) compares the current finding set to the prior one **by `fid`**.
+> **Incremental diff scope:** In rereview mode the sub-agents work on `/tmp/pr_incremental_diff.patch` (new commits only) for focus and cost. Reconciliation in step 7 uses `/tmp/pr_incremental_changed_files.txt` to guard against false "Fixed" conclusions: a prior finding is only closed if its file was in scope for this review pass. If the file wasn't touched, the finding stays open regardless.
 
 ## 4. Index the Codebase (skip on small PRs)
 
@@ -405,14 +453,15 @@ Run **exactly one** of the two paths below, chosen by `REVIEW_TIER` from step 5.
 
 **Constraints every sub-agent prompt below must include, verbatim:**
 
-- A reminder: *"Do not re-fetch git data; the diff at `$REVIEW_DIFF_FILE` is authoritative. Return findings only."* — in rereview mode this is `/tmp/pr_incremental_diff.patch` (commits since the last review); in initial mode it is `/tmp/pr_full_diff.patch`.
-- When `REVIEW_MODE=rereview`, also include: *"This is a focused re-review. Only the commits since the last review are in scope — review only the diff at `/tmp/pr_incremental_diff.patch`, not the full PR history."*
+- A reminder: *"Do not re-fetch git data; the diff at `$REVIEW_DIFF_FILE` is authoritative. Return findings only."* — in rereview mode this is `/tmp/pr_incremental_diff.patch` (new commits only); in initial mode it is `/tmp/pr_full_diff.patch`.
+- When `REVIEW_MODE=rereview`, also include: *"This is a focused re-review. Review only the commits since the last review — the diff at `/tmp/pr_incremental_diff.patch`. Do not flag issues from files not touched in this diff."*
 - A line-number constraint: *"Every `path/to/file.ext:NN` reference must use the POST-CHANGE file line number — the line as it appears in the new version of the file. Derive `NN` from the `@@ -old,+new @@` hunk header's `+new` start plus the offset of the flagged `+` line within that hunk. Never report the diff's own line position or an old-side line number. Findings on deleted (`-`) lines must reference the nearest surviving line."*
 
 > **Diff size (used by both paths):**
 > ```bash
-> # In rereview mode, sub-agents work on the incremental diff (commits since last review).
-> # In initial mode, sub-agents work on the full PR diff.
+> # In rereview mode, sub-agents work on the incremental diff (new commits only) for focus
+> # and cost. Reconciliation in step 7 uses the incremental file list to avoid falsely
+> # marking prior findings as "Fixed" when their file wasn't touched in this push.
 > if [ "$REVIEW_MODE" = "rereview" ] && [ -s /tmp/pr_incremental_diff.patch ]; then
 >   REVIEW_DIFF_FILE=/tmp/pr_incremental_diff.patch
 >   REVIEW_DIFF_LABEL="incremental (re-review)"
@@ -447,7 +496,7 @@ Construct the prompt with the resolved `$REVIEW_DIFF_FILE` path before emitting 
 {
   "description": "Correctness & regression finder",
   "model": "claude-haiku-4-5",
-  "prompt": "Read $REVIEW_DIFF_FILE then /tmp/pr_context.txt.\n\n[If REVIEW_MODE=rereview, prepend: 'This is a focused re-review — only review the commits since the last review. Do not flag issues from earlier commits in the PR.']\n\nFind correctness bugs and behavioural regressions introduced by the diff. Focus on:\n- Logic errors in changed code paths\n- Changed conditions that now allow or block cases they shouldn't\n- Null / empty / zero edge cases on new code paths\n- Removed guards that previously protected against a bad state\n- Interface/contract mismatches between callers and the changed function\n\nFor each finding output exactly:\nFILE: <path>\nLINE: <post-change file line number from the @@ hunk header's +new start plus the offset of the flagged + line within that hunk; never the diff's own line position>\nSEVERITY: CRITICAL | WARNING\nISSUE: <one sentence>\n\nIf you find nothing, output: NONE\nDo not call any tools."
+  "prompt": "Read $REVIEW_DIFF_FILE then /tmp/pr_context.txt.\n\n[If REVIEW_MODE=rereview, prepend: 'This is a focused re-review. Only review the diff at `/tmp/pr_incremental_diff.patch` — it contains the commits pushed since the last review. Do not flag issues from files not in this diff.']\n\nFind correctness bugs and behavioural regressions introduced by the diff. Focus on:\n- Logic errors in changed code paths\n- Changed conditions that now allow or block cases they shouldn't\n- Null / empty / zero edge cases on new code paths\n- Removed guards that previously protected against a bad state\n- Interface/contract mismatches between callers and the changed function\n\nFor each finding output exactly:\nFILE: <path>\nLINE: <post-change file line number from the @@ hunk header's +new start plus the offset of the flagged + line within that hunk; never the diff's own line position>\nSEVERITY: CRITICAL | WARNING\nISSUE: <one sentence>\n\nIf you find nothing, output: NONE\nDo not call any tools."
 }
 ```
 
@@ -457,7 +506,7 @@ Construct the prompt with the resolved `$REVIEW_DIFF_FILE` path before emitting 
 {
   "description": "Security & edge-case finder",
   "model": "claude-haiku-4-5",
-  "prompt": "Read $REVIEW_DIFF_FILE then /tmp/pr_context.txt.\n\n[If REVIEW_MODE=rereview, prepend: 'This is a focused re-review — only review the commits since the last review. Do not flag issues from earlier commits in the PR.']\n\nFind security issues and missing edge-case handling in the diff. Focus on:\n- Input not validated before use (injection, path traversal)\n- Authentication or authorisation checks removed or weakened\n- Sensitive data written to logs\n- Exception or error paths that swallow failures silently\n- Resource leaks (connections, file handles) on error paths\n- Off-by-one errors or boundary conditions in new loops/ranges\n\nFor each finding output exactly:\nFILE: <path>\nLINE: <post-change file line number from the @@ hunk header's +new start plus the offset of the flagged + line within that hunk; never the diff's own line position>\nSEVERITY: CRITICAL | WARNING | SUGGESTION\nISSUE: <one sentence>\n\nIf you find nothing, output: NONE\nDo not call any tools."
+  "prompt": "Read $REVIEW_DIFF_FILE then /tmp/pr_context.txt.\n\n[If REVIEW_MODE=rereview, prepend: 'This is a focused re-review. Only review the diff at `/tmp/pr_incremental_diff.patch` — it contains the commits pushed since the last review. Do not flag issues from files not in this diff.']\n\nFind security issues and missing edge-case handling in the diff. Focus on:\n- Input not validated before use (injection, path traversal)\n- Authentication or authorisation checks removed or weakened\n- Sensitive data written to logs\n- Exception or error paths that swallow failures silently\n- Resource leaks (connections, file handles) on error paths\n- Off-by-one errors or boundary conditions in new loops/ranges\n\nFor each finding output exactly:\nFILE: <path>\nLINE: <post-change file line number from the @@ hunk header's +new start plus the offset of the flagged + line within that hunk; never the diff's own line position>\nSEVERITY: CRITICAL | WARNING | SUGGESTION\nISSUE: <one sentence>\n\nIf you find nothing, output: NONE\nDo not call any tools."
 }
 ```
 
@@ -553,9 +602,12 @@ When `REVIEW_MODE=rereview`, classify by comparing the current finding set to `/
 | Bucket | Condition | Posting action (see "Posting the Review") |
 |---|---|---|
 | **Carried-over** | prior `fid` is still in the current finding set | Leave the existing thread open. **Do not post a duplicate.** |
-| **Fixed** | prior `fid` (status `open`) is **absent** from the current finding set | Reply "resolved as of `<HEAD_SHA>`" on the existing thread and mark it resolved. |
+| **Fixed** | prior `fid` (status `open`) is **absent** from the current finding set, **AND** its file appears in `/tmp/pr_incremental_changed_files.txt` | Reply "resolved as of `<HEAD_SHA>`" on the existing thread and mark it resolved. |
+| **Carried-over (unreviewed)** | prior `fid` (status `open`) is absent from the current finding set, but its file is **NOT** in `/tmp/pr_incremental_changed_files.txt` | Leave open — the file was not touched in this push so we cannot confirm the fix; do not resolve. |
 | **New** | current `fid` not present in the prior set | Post a new inline thread (with marker). |
 | **Already-resolved** | prior `fid` whose thread is already resolved | Ignore — no action. |
+
+> **Why the file-scope guard on "Fixed":** sub-agents only review the incremental diff (new commits). A prior finding in a file that wasn't touched in this push will simply not appear in the current finding set — not because the author fixed it, but because the reviewers never looked at it. Marking it "Fixed" would silently close a valid open issue. Only classify a prior finding as "Fixed" when its file was in scope for this review pass.
 
 Write the three actionable buckets to `/tmp/pr_reconcile.json` (`{"fixed":[...], "carried_over":[...], "new":[...]}`, each entry keyed by `fid` with its `thread_ref`/`comment_ref` from the prior file) so the posting step can act on them without recomputing.
 
