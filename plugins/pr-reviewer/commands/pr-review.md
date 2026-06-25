@@ -279,18 +279,28 @@ This is the one place reading platform PR comments is required, because it deter
 # Mode is determined purely from the marker data — no flags required.
 # Every run auto-detects whether it is an initial review or a follow-up.
 # Set PR_REVIEWER_RECONCILE=false to force a full stateless review that ignores markers.
-if [ "${PR_REVIEWER_RECONCILE:-true}" = "false" ] || [ ! -s /tmp/pr_prior_findings.jsonl ]; then
+#
+# IMPORTANT: PRIOR_SUMMARY_SHA is the authoritative signal for a prior review, not the
+# findings file. A clean first review (LGTM, zero findings) stamps the summary marker
+# but leaves pr_prior_findings.jsonl empty — using the file as the gate would falsely
+# re-run a full initial review on every subsequent push to a passing PR.
+if [ "${PR_REVIEWER_RECONCILE:-true}" = "false" ]; then
+  # Explicit override — force a full stateless review ignoring all prior markers.
   REVIEW_MODE="initial"
   RANGE_BASE="$BASE_SHA"
-else
+elif [ -n "${PRIOR_SUMMARY_SHA:-}" ] && git cat-file -e "${PRIOR_SUMMARY_SHA}^{commit}" 2>/dev/null; then
+  # Summary marker found and the commit is reachable — definitive prior review.
   REVIEW_MODE="rereview"
-  # Scope the incremental range to commits since the last reviewed SHA.
-  # Fall back to BASE_SHA only if the recorded SHA has been garbage-collected.
-  if [ -n "${PRIOR_SUMMARY_SHA:-}" ] && git cat-file -e "${PRIOR_SUMMARY_SHA}^{commit}" 2>/dev/null; then
-    RANGE_BASE="$PRIOR_SUMMARY_SHA"
-  else
-    RANGE_BASE="$BASE_SHA"
-  fi
+  RANGE_BASE="$PRIOR_SUMMARY_SHA"
+elif [ -s /tmp/pr_prior_findings.jsonl ]; then
+  # Finding markers exist but no reachable summary SHA (older run or SHA was GC'd).
+  # Still a prior review — scope from BASE_SHA as the safe fallback.
+  REVIEW_MODE="rereview"
+  RANGE_BASE="$BASE_SHA"
+else
+  # No markers of any kind — this is a genuine initial review.
+  REVIEW_MODE="initial"
+  RANGE_BASE="$BASE_SHA"
 fi
 echo "Review mode: $REVIEW_MODE  |  incremental range: ${RANGE_BASE}..${HEAD_SHA}"
 export REVIEW_MODE RANGE_BASE

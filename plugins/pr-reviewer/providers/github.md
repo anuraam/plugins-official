@@ -89,15 +89,22 @@ for t in threads:
     }))
 PY
 
-# Most-recent summary marker sha (PR-level review/issue comments carry kind=summary)
-PRIOR_SUMMARY_SHA=$(gh api "repos/${OWNER}/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
-  --jq '.[].body' 2>/dev/null \
-  | grep -oE 'pr-reviewer:v1 kind=summary[^>]*sha=[0-9a-f]+' \
-  | tail -1 | grep -oE 'sha=[0-9a-f]+' | cut -d= -f2)
+# Most-recent summary marker sha.
+# Check both locations: the marker may be in a plain PR comment (gh pr comment) OR
+# in a PR review body (gh pr review --comment). Both endpoints must be searched.
+PRIOR_SUMMARY_SHA=$(
+  {
+    gh api "repos/${OWNER}/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
+      --jq '.[].body' 2>/dev/null
+    gh api "repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}/reviews" --paginate \
+      --jq '.[].body' 2>/dev/null
+  } | grep -oE 'pr-reviewer:v1 kind=summary[^>]*sha=[0-9a-f]+' \
+    | tail -1 | grep -oE 'sha=[0-9a-f]+' | cut -d= -f2
+)
 export PRIOR_SUMMARY_SHA
 ```
 
-If `/tmp/pr_prior_findings.jsonl` is empty, the run is an **initial** review. The `file`/`line` fields are intentionally omitted here — reconciliation matches on `fid` alone, so they are not needed.
+The mode decision (initial vs. rereview) is made in `commands/pr-review.md` based on `PRIOR_SUMMARY_SHA` first, then the findings file as a fallback. The `file`/`line` fields are intentionally omitted here — reconciliation matches on `fid` alone.
 
 ---
 
