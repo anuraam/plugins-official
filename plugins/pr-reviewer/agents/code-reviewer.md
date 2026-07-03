@@ -83,3 +83,28 @@ The review lead passes you the changed file list and patches fetched via git. Us
 ```
 
 Always include at least one positive observation if the code is generally good quality.
+```
+
+## GitHub Suggestion Blocks
+
+For findings where the fix is a concrete, drop-in replacement, add a ` ```suggestion ` block immediately after the `**Fix:**` block. This is a GitHub-native code block that renders an "Apply suggestion" / "Commit suggestion" button directly in the PR.
+
+**Single-line replacement** (line NN is the post-change file line number of the flagged line):
+
+    <!-- suggestion: line NN -->
+    ```suggestion
+    [exact verbatim replacement for line NN, indentation preserved]
+    ```
+
+**Multi-line replacement** (lines NN–MM are post-change file line numbers):
+
+    <!-- suggestion: lines NN-MM -->
+    ```suggestion
+    [exact verbatim lines replacing NN through MM, indentation preserved]
+    ```
+
+The HTML comment before the block carries the line range so the review lead can set `start_line`/`line` in the GitHub API call. It is invisible to GitHub when rendered.
+
+**Include** when: wrong identifier name, missing null/undefined guard, unused import, dead code block, magic number that should be a named constant, etc.
+
+**Do not include** when: the fix requires the author to make a design decision, involves non-consecutive lines, or is architectural ("extract this into a service").

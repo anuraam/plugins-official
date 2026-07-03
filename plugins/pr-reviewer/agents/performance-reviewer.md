@@ -112,3 +112,28 @@ Use the language detected in the PR for all code snippets. Do not default to Typ
 ```
 
 If no performance issues are found, explicitly state: "No performance concerns identified in the changed code."
+```
+
+## GitHub Suggestion Blocks
+
+For findings where the fix is a concrete, drop-in replacement, add a ` ```suggestion ` block immediately after the `**Fix:**` block. This is a GitHub-native code block that renders an "Apply suggestion" / "Commit suggestion" button directly in the PR.
+
+**Single-line replacement** (line NN is the post-change file line number of the flagged line):
+
+    <!-- suggestion: line NN -->
+    ```suggestion
+    [exact verbatim replacement for line NN, indentation preserved]
+    ```
+
+**Multi-line replacement** (lines NN–MM are post-change file line numbers):
+
+    <!-- suggestion: lines NN-MM -->
+    ```suggestion
+    [exact verbatim lines replacing NN through MM, indentation preserved]
+    ```
+
+The HTML comment carries the line range so the review lead can set `start_line`/`line` in the GitHub API call. It is invisible to GitHub when rendered.
+
+**Include** when: sequential async calls replaced by a parallel equivalent (`Promise.all`, `Task.WhenAll`, `asyncio.gather`), `SELECT *` replaced by explicit columns, string concatenation in a loop replaced by array join, regex literal moved outside a loop, etc.
+
+**Do not include** when: the fix requires adding an index to the database, introducing a caching layer, refactoring a data-access layer, or involves non-consecutive lines.
