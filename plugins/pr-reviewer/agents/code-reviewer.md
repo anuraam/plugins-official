@@ -58,11 +58,13 @@ The review lead passes you the changed file list and patches fetched via git. Us
 
 ## Output Format
 
+**Line-number convention:** the number after the colon is **the line within the diff file you were given** (count from line 1 of that file), **not** the post-change file line. A separate deterministic script (`resolve-line.py`) converts diff-line to file-line afterward — do not attempt the `@@` hunk-header arithmetic yourself.
+
 ```
 ## Code Review
 
 ### Critical Issues
-- `path/to/file.<ext>:42` — [Issue]
+- `path/to/file.<ext>:42` — [Issue] [line 42 = line 42 of the diff file, not the file itself]
   **Why:** [Explanation]
   **Fix:**
   ```[language]

@@ -9,84 +9,32 @@ Post the PR review findings as review comments on PR #$ARGUMENTS.
 
 Do not ask for confirmation at any point. Execute all steps autonomously and proceed immediately from one step to the next.
 
+This skill posts findings **already compiled in this conversation** (e.g. from a prior `/pr-review` run whose posting step didn't complete, or findings you derived some other way). It uses the same deterministic scripts `/pr-review` uses — see `commands/pr-review.md` for the full procedure these are steps 1, 6, and 7 of.
+
 ## Steps
 
-1. **Detect Platform**
-
-   Run:
+1. **Gather context** — resolves platform, PR metadata, base/head, diff, and prior-review state in one atomic call:
    ```bash
-   git remote get-url origin
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/gather-context.sh" $ARGUMENTS
    ```
+   Read `/tmp/pr_review_state.json` for `platform`, `pr_id`/`pr_number`, `review_mode`, `head_sha`.
 
-   Determine the platform:
-   - Contains `github.com` → **GitHub**
-   - Contains `dev.azure.com` or `visualstudio.com` → **Azure DevOps**
-   - Anything else → **Generic**
+2. **Ensure findings are on disk.** If `/tmp/pr_findings.json` doesn't already reflect the findings you want to post, write it now: a JSON list of `{"file", "line", "severity", "fid", "body"}`, using `scripts/resolve-line.py` and `scripts/compute-fid.py` for the `line` and `fid` fields respectively (never compute either by hand — see *Comment markers and finding identity* in `commands/pr-review.md`).
 
-2. **Verify PR exists**
-
-   Use the platform-appropriate method to confirm the PR exists and retrieve its current state:
-
-   **GitHub:**
+3. **Reconcile and get the verdict:**
    ```bash
-   gh pr view <pr-number> --json state,title,headRefName
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/reconcile.py"
    ```
-   If the PR does not exist or is already merged/closed, stop and output a single error line.
+   Writes `/tmp/pr_reconcile.json` with the bucketed findings and a deterministic verdict — use it as-is, do not invent your own verdict string.
 
-   **Azure DevOps:**
+4. **Write the report body** to `/tmp/pr_report_body.md` per `styles/report-template.md`, using the verdict and delta counts from `/tmp/pr_reconcile.json` (see `commands/pr-review.md` step 6 for the exact rules).
+
+5. **Post:**
    ```bash
-   curl -s -u ":${AZURE_DEVOPS_TOKEN}" \
-     "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests/${PR_NUMBER}?api-version=7.1"
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/post-review.sh" /tmp/pr_report_body.md
    ```
-   Parse org, project, repo, and `API_BASE` from `git remote get-url origin` as described in `providers/azure-devops.md`.
+   This casts the vote/review event, posts the summary with its marker, reconciles any `fixed` threads, posts one inline thread per finding in the `new` bucket, and prints the final confirmation line — echo what it printed, don't self-tally.
 
-   If the PR does not exist or is already completed/abandoned, stop and output a single error line — do not ask the user what to do.
+If the platform is generic/unknown, `post-review.sh` writes `pr-review-report.md` and prints its own completion line instead.
 
-3. **Format the review**
-
-   Map the verdict to the platform event type. The exact GitHub flag / Azure DevOps vote for `REQUEST CHANGES` depends on `PR_REVIEWER_BLOCK_ON_CRITICAL` (default **non-blocking** — see the provider files, which are authoritative):
-
-   | Plugin verdict | GitHub event | Azure DevOps vote |
-   |---|---|---|
-   | `APPROVE` | `APPROVE` | `10` |
-   | `APPROVE WITH SUGGESTIONS` | `APPROVE` | `5` |
-   | `REQUEST CHANGES` | `COMMENT` (default) / `REQUEST_CHANGES` if `PR_REVIEWER_BLOCK_ON_CRITICAL=true` | `-5` (default) / `-10` if `PR_REVIEWER_BLOCK_ON_CRITICAL=true` |
-   | `NEEDS DISCUSSION` | `COMMENT` | `-5` |
-
-4. **Post the review** (sub-steps, all mandatory when supported by the platform)
-
-   First, unless `PR_REVIEWER_RECONCILE=false`, run the provider's **Detecting a prior review** step. If marked prior findings exist, this is a **re-review**: reconcile them (resolve the ones now fixed, leave carried-over ones open, post only genuinely new findings). See *Comment markers and finding identity* and *Reconciling prior findings* in `commands/pr-review.md` and the provider files.
-
-   1. Cast the verdict / vote (GitHub review flag, Azure DevOps reviewer PUT — see provider).
-   2. Post the full report body (with the re-review delta block when applicable) as one PR-level comment, **carrying the summary marker**.
-   3. **(Re-review only) Reconcile prior findings** — reply on + resolve the threads whose findings are now fixed; do not re-post carried-over findings.
-   4. **Post one inline thread per finding** that has a `path/to/file.ext:NN` reference (initial mode: every finding; re-review mode: only the New bucket), **each carrying its finding marker**. This is mandatory — skipping it collapses every finding into the summary thread and defeats the purpose of the review.
-
-   Follow the instructions in the appropriate provider file:
-
-   - **GitHub** → `providers/github.md`
-   - **Azure DevOps** → `providers/azure-devops.md` — inline loop is in **§4 (MANDATORY)**, not the one-off example
-   - **Generic / unknown** → `providers/generic.md`
-
-5. **Output result**
-
-   On completion, output a single summary line:
-
-   **GitHub:**
-   ```
-   Posted review on PR #<number>: <verdict> — <N> inline comments — <review URL>
-   ```
-
-   **Azure DevOps:**
-   ```
-   Posted review on PR #<number>: <verdict> — <N> inline comments — ${API_BASE}/_git/<repo>/pullrequest/<number>
-   ```
-
-   **Generic:**
-   ```
-   Review complete: <verdict> — report written to pr-review-report.md
-   ```
-
-   If any step fails, output the error and stop — do not retry or ask for input.
-
-> **Note:** GitHub posting requires the **`gh` CLI** installed and authenticated. Azure DevOps posting uses `curl` with the `AZURE_DEVOPS_TOKEN` environment variable (PAT with Pull Request Threads Read & Write scope). See `docs/platform-setup.md` for setup instructions. On Azure DevOps, follow `providers/azure-devops.md` exactly — including thread `properties` so Markdown in PR comments renders (this differs from Work Item comments, which use `?format=markdown` on a different API).
+> **Note:** GitHub posting requires the **`gh` CLI** installed and authenticated. Azure DevOps posting uses `AZURE_DEVOPS_TOKEN` (PAT with Pull Request Threads Read & Write scope). See `docs/platform-setup.md`.
