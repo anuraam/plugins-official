@@ -5,8 +5,18 @@
 
 set -euo pipefail
 
+# Real JSON parse, not a quote-blind grep — see validate-prerequisites.sh for why the old
+# `"command":"[^"]*"` extraction silently truncates on any embedded `"` (e.g. a quoted commit
+# message pushed just before this hook fires).
 INPUT=$(cat)
-COMMAND=$(echo "$INPUT" | grep -o '"command":"[^"]*"' | head -1 | cut -d'"' -f4 2>/dev/null || echo "")
+COMMAND=$(printf '%s' "$INPUT" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    print(data.get('tool_input', {}).get('command', ''))
+except Exception:
+    print('')
+")
 
 # Only act on git push commands
 if ! echo "$COMMAND" | grep -qE "^git push"; then

@@ -17,8 +17,20 @@
 
 set -euo pipefail
 
+# Parse tool_input.command with a real JSON parser, not a quote-blind grep. A grep-based
+# `"command":"[^"]*"` extraction breaks on (a) pretty-printed JSON with a space after `:`,
+# and (b) any command containing an embedded `"` — e.g. `git commit -m "fix: foo"`, which is
+# exactly what commands/pr-review.md's fix-mode instructions tell the agent to run. Either
+# failure mode silently truncates COMMAND, which then silently disables every check below.
 INPUT=$(cat)
-COMMAND=$(echo "$INPUT" | grep -o '"command":"[^"]*"' | head -1 | cut -d'"' -f4 2>/dev/null || echo "")
+COMMAND=$(printf '%s' "$INPUT" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    print(data.get('tool_input', {}).get('command', ''))
+except Exception:
+    print('')
+")
 
 # GitHub CLI — used for PR view/diff/post on github.com remotes
 if echo "$COMMAND" | grep -qE "(^|[[:space:]])gh[[:space:]]"; then
@@ -105,6 +117,16 @@ if echo "$COMMAND" | grep -qE "^git push"; then
     # Detect platform from the remote URL
     REMOTE_URL=$(git remote get-url origin 2>/dev/null || echo "")
 
+    # NOTE on the mechanism below: a PreToolUse hook runs as its own throwaway subprocess —
+    # `export` here does NOT propagate to the later, separate process that actually executes
+    # the `git push` Bash tool call (confirmed: gather-context.sh's header comment documents
+    # this exact cross-call state loss as "confirmed behavior under the Xianix Executor's
+    # Claude Agent SDK-based runner", and the CLI's own PreToolUse hook-output schema has no
+    # `env` field — the only supported way for a hook to affect the tool call is
+    # `hookSpecificOutput.updatedInput`, which rewrites the command string itself). So instead
+    # of exporting GIT_CONFIG_*, we prepend `VAR=value` assignments directly onto the command
+    # line — standard POSIX "scoped to one command" env-var-prefix syntax — and return the
+    # rewritten command via updatedInput. This actually reaches the process that runs `git push`.
     if echo "$REMOTE_URL" | grep -qE "(dev\.azure\.com|visualstudio\.com)"; then
         # Azure DevOps — use AZURE_DEVOPS_TOKEN
         if [ -z "${AZURE_DEVOPS_TOKEN:-}" ]; then
@@ -112,13 +134,22 @@ if echo "$COMMAND" | grep -qE "^git push"; then
             exit 0
         fi
 
-        # Inject the PAT into git credentials for Azure DevOps HTTPS remotes
-        # Supports both dev.azure.com and *.visualstudio.com URL formats
-        export GIT_CONFIG_COUNT=2
-        export GIT_CONFIG_KEY_0="url.https://x-access-token:${AZURE_DEVOPS_TOKEN}@dev.azure.com/.insteadOf"
-        export GIT_CONFIG_VALUE_0="https://dev.azure.com/"
-        export GIT_CONFIG_KEY_1="url.https://x-access-token:${AZURE_DEVOPS_TOKEN}@visualstudio.com/.insteadOf"
-        export GIT_CONFIG_VALUE_1="https://visualstudio.com/"
+        # Build `GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=... ... git push ...` — a single command
+        # line with leading env-var assignments, safely shell-quoted via shlex.
+        NEW_COMMAND=$(TOKEN="$AZURE_DEVOPS_TOKEN" CMD="$COMMAND" python3 -c "
+import os, shlex
+token = os.environ['TOKEN']
+cmd = os.environ['CMD']
+pairs = [
+    ('GIT_CONFIG_COUNT', '2'),
+    ('GIT_CONFIG_KEY_0', f'url.https://x-access-token:{token}@dev.azure.com/.insteadOf'),
+    ('GIT_CONFIG_VALUE_0', 'https://dev.azure.com/'),
+    ('GIT_CONFIG_KEY_1', f'url.https://x-access-token:{token}@visualstudio.com/.insteadOf'),
+    ('GIT_CONFIG_VALUE_1', 'https://visualstudio.com/'),
+]
+prefix = ' '.join(f'{k}={shlex.quote(v)}' for k, v in pairs)
+print(f'{prefix} {cmd}')
+")
     else
         # GitHub or generic HTTPS remote — use GITHUB_TOKEN
         if [ -z "${GITHUB_TOKEN:-}" ]; then
@@ -126,12 +157,31 @@ if echo "$COMMAND" | grep -qE "^git push"; then
             exit 0
         fi
 
-        # Inject token via env-based git config — no files written, no global config touched,
-        # scoped to this shell session only.
-        export GIT_CONFIG_COUNT=1
-        export GIT_CONFIG_KEY_0="url.https://x-access-token:${GITHUB_TOKEN}@github.com/.insteadOf"
-        export GIT_CONFIG_VALUE_0="https://github.com/"
+        NEW_COMMAND=$(TOKEN="$GITHUB_TOKEN" CMD="$COMMAND" python3 -c "
+import os, shlex
+token = os.environ['TOKEN']
+cmd = os.environ['CMD']
+pairs = [
+    ('GIT_CONFIG_COUNT', '1'),
+    ('GIT_CONFIG_KEY_0', f'url.https://x-access-token:{token}@github.com/.insteadOf'),
+    ('GIT_CONFIG_VALUE_0', 'https://github.com/'),
+]
+prefix = ' '.join(f'{k}={shlex.quote(v)}' for k, v in pairs)
+print(f'{prefix} {cmd}')
+")
     fi
+
+    python3 -c "
+import json, sys
+print(json.dumps({
+    'hookSpecificOutput': {
+        'hookEventName': 'PreToolUse',
+        'permissionDecision': 'allow',
+        'updatedInput': {'command': sys.argv[1]},
+    }
+}))
+" "$NEW_COMMAND"
+    exit 0
 fi
 
 # All checks passed — allow the command to proceed
