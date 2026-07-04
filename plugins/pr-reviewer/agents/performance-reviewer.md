@@ -79,15 +79,13 @@ Multiple independent remote calls made sequentially, each waiting for the previo
 
 Use the language detected in the PR for all code snippets. Do not default to TypeScript.
 
-**Line-number convention:** the number after the colon is **the line within the diff file you were given** (count from line 1 of that file), **not** the post-change file line. A separate deterministic script (`resolve-line.py`) converts diff-line to file-line afterward — do not attempt the `@@` hunk-header arithmetic yourself.
-
 ```
 ## Performance Review
 
 **Language / Framework:** [detected language and framework]
 
 ### CRITICAL (Will cause production issues)
-- `src/api/users.<ext>:67` — N+1 query: fetching related record for each item in a loop [line 67 = line 67 of the diff file, not the file itself]
+- `src/api/users.<ext>:67` — N+1 query: fetching related record for each item in a loop
   **Impact:** 100 items = 101 database queries. Will cause timeouts under load.
   **Current:**
   ```[language]

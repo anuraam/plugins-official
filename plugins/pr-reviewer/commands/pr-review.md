@@ -1,6 +1,6 @@
 ---
 name: pr-review
-description: Run a full PR review. Analyzes code quality, security, tests, and performance. Works with GitHub, Azure DevOps, Bitbucket, and any git repository.
+description: Run a full PR review. Analyzes code quality, security, tests, and performance. Works with GitHub, Azure DevOps, Bitbucket, and any git repository. Usage: /pr-review [PR number, branch name, or leave blank for current branch]
 argument-hint: [pr-number | branch-name]
 ---
 
@@ -8,24 +8,22 @@ Run a comprehensive pull request review for $ARGUMENTS.
 
 ## You are the review lead — run this yourself, do NOT delegate to an orchestrator sub-agent
 
-**Critical execution rule (read first).** You, the top-level agent, perform the orchestration described below directly. The specialized reviews (`code-reviewer`, and whichever of `security-reviewer`, `test-reviewer`, `performance-reviewer` apply per the tier gate) are run by spawning those sub-agents **from here, in the main context**.
+**Critical execution rule (read first).** You, the top-level agent, perform the orchestration described below directly. The specialized reviews (`code-reviewer`, and whichever of `security-reviewer`, `test-reviewer`, `performance-reviewer` apply per the step 5 gate) are run by spawning those sub-agents **from here, in the main context**.
 
-Do **not** spawn a separate `orchestrator` / "PR review" sub-agent and ask *it* to run the reviewers. A sub-agent cannot spawn further sub-agents — in the Claude Agent SDK that fails with `No such tool available: Task. Task is not available inside subagents`, the parallel review silently degrades, and the report never gets posted. The fan-out only works when it is emitted from the top-level agent, which is you.
+Do **not** spawn a separate `orchestrator` / "PR review" sub-agent and ask *it* to run the reviewers. A sub-agent cannot spawn further sub-agents — in the Claude Agent SDK that fails with `No such tool available: Task. Task is not available inside subagents`, the parallel review silently degrades, and the report never gets posted. The fan-out in **Step 6** only works when it is emitted from the top-level agent, which is you.
 
 Execute every step below autonomously and in order. Do not ask for confirmation, clarification, or approval at any point. If a step fails, output a single error line describing what failed and stop — except where a step explicitly says "warn and continue".
 
-**Deterministic plumbing, LLM judgment.** Platform detection, PR metadata, base/head resolution, diffing, prior-review detection, the review-mode/tier decisions, diff-line-to-file-line resolution, finding-id hashing, reconciliation bucketing, and posting mechanics are **all handled by committed scripts** in `${CLAUDE_PLUGIN_ROOT}/scripts/` — not re-implemented by you each run. This exists because re-typing this plumbing as bash across many separate `Bash` tool calls used to silently break: under harnesses whose `Bash` tool doesn't persist shell state across calls, variables computed in one call evaporated by the next, and the plugin once silently ran a full review on a PR it had already reviewed because the prior-review-detection API call hit an empty `API_BASE`. The scripts read/write a single state file (`/tmp/pr_review_state.json`) instead of shell variables, so this class of failure is now structurally impossible. **Always invoke scripts as `bash "${CLAUDE_PLUGIN_ROOT}/scripts/<name>"`, never `./scripts/<name>`** (sidesteps exec-bit issues). Your job is the part scripts can't do: understanding the diff, finding real bugs, and writing the report prose.
-
 **Fix mode vs report mode:** if the invocation includes a `--fix` flag or the instruction explicitly says to fix issues, apply fixes and push (see *Applying Fixes*). Otherwise, compile and post the review report only.
 
-**Re-review awareness (first review vs. follow-up review).** `gather-context.sh` (step 1 below) detects whether *this plugin* has already reviewed the PR (via its own comment markers — see *Comment markers* below) and returns `review_mode: "rereview" | "initial"` in the state file. In re-review mode: prior findings are reconciled (resolving the ones the author fixed, leaving unresolved ones open without re-posting duplicates), the review focuses on commits pushed since the last review, and a re-review delta is posted instead of a brand-new wall of comments. This is automatic. Set `PR_REVIEWER_RECONCILE=false` to force a full, stateless review that ignores prior findings.
+**Re-review awareness (first review vs. follow-up review).** Before reviewing, the command checks whether *this plugin* has already reviewed the PR (it stamps every comment it posts with a hidden marker — see *Comment markers* below). If a prior review is found, the run switches to **re-review mode**: it reconciles old findings against the current head (resolving the ones the author fixed, leaving the unresolved ones open without re-posting duplicates), focuses on the commits pushed since the last review, and posts a short re-review delta instead of a brand-new wall of comments. The first review of a PR always runs in **initial mode**. This is automatic; no flag is required. Set `PR_REVIEWER_RECONCILE=false` to force a full, stateless review that ignores prior findings.
 
 ## What This Does
 
-This command runs a **cost-tiered** review and posts the results back to the PR. `gather-context.sh` chooses the tier from the diff automatically:
+This command runs a **cost-tiered** review and posts the results back to the PR. The tier is chosen automatically from the diff (see step 5):
 
 - **Default — low-cost path:** two parallel Haiku finder agents scan the diff for correctness/regression bugs and security/edge-case issues; you then self-verify and keep the strongest findings (capped at 8). This is the path for ordinary PRs and keeps token cost low.
-- **Escalated — full specialist path:** when the diff touches a **high-risk surface** (auth/authz, payments/billing, crypto, DB migrations/schema, or public APIs), the dedicated specialized reviewers run instead for deeper coverage, on **mixed model tiers** so frontier-model spend goes only where it pays off:
+- **Escalated — full specialist path:** when the diff touches a **high-risk surface** (auth/authz, payments/billing, crypto, DB migrations/schema, or public APIs), the dedicated specialized reviewers run instead for deeper coverage. They run on **mixed model tiers** so frontier-model spend goes only where it pays off (see *Model selection* in step 6B):
 
 | Reviewer | Focus | Model tier |
 |----------|-------|------------|
@@ -38,17 +36,17 @@ Either way the outcome is identical downstream: a verdict, a summary comment, an
 
 ## Platform Support
 
-Auto-detected by `gather-context.sh` from the git remote URL:
+The plugin auto-detects the hosting platform from your git remote URL:
 
 | Remote URL contains | Platform | How review is posted |
 |---|---|---|
-| `github.com` | GitHub | `gh` CLI — see `providers/github.md` |
+| `github.com` | GitHub | GitHub CLI (`gh`) — see `providers/github.md` |
 | `dev.azure.com` / `visualstudio.com` | Azure DevOps | REST API (`curl`) — see `providers/azure-devops.md` |
 | Anything else | Generic | Written to `pr-review-report.md` — see `providers/generic.md` |
 
 ## Prerequisites
 
-- Must be run inside a git repository with `bash` and `python3` (stdlib only, no extra packages) available
+- Must be run inside a git repository
 - The branch under review must have at least one commit ahead of the base branch
 - **GitHub**: `gh` CLI installed and authenticated (see `docs/platform-setup.md`)
 - **Azure DevOps**: `AZURE_DEVOPS_TOKEN` environment variable set (see `docs/platform-setup.md`)
@@ -58,101 +56,323 @@ Auto-detected by `gather-context.sh` from the git remote URL:
 
 # Comment markers and finding identity (read before posting)
 
-Re-review depends on the plugin being able to recognise its **own** previous comments and match each old finding to the current code. Two pieces of metadata make this possible, written on **every** comment the plugin posts (initial *and* re-review).
+Re-review depends on the plugin being able to recognise its **own** previous comments and match each old finding to the current code. Two pieces of metadata make this possible. Both are written on **every** comment the plugin posts (initial *and* re-review) so that the *next* run can read them.
 
 ### 1. The marker (identifies a comment as ours)
 
-`<!-- pr-reviewer:v1 kind=<finding|summary> fid=<finding-id> sha=<HEAD_SHA> -->` — on **GitHub** this is an HTML comment appended to the body (renders invisibly); on **Azure DevOps** the same fields are thread `properties` (`pr-reviewer.kind`/`pr-reviewer.fid`/`pr-reviewer.sha`) since HTML comments aren't reliably hidden there. `post-review.sh` stamps every comment it posts — you never write this yourself.
+Stamp every comment the plugin posts with a hidden marker string:
+
+```
+<!-- pr-reviewer:v1 kind=<finding|summary> fid=<finding-id> sha=<HEAD_SHA> -->
+```
+
+- `kind` — `finding` for an inline finding thread, `summary` for the PR-level report comment.
+- `fid` — the stable finding id (below). Omit for `kind=summary`.
+- `sha` — the `HEAD_SHA` the comment was generated against (lets the next run compute the incremental range).
+
+On **GitHub** the marker is an HTML comment appended to the comment body — it renders invisibly. On **Azure DevOps**, HTML comments are *not* reliably hidden, so the same fields are stored as thread **`properties`** (`pr-reviewer.kind`, `pr-reviewer.fid`, `pr-reviewer.sha`) instead of in the body. The provider files show the exact mechanics.
+
+Only comments carrying this marker are ever reconciled, replied to, or resolved by the plugin. Human review comments are never touched.
 
 ### 2. The finding id `fid` (matches a finding across revisions)
 
-`fid` must be **deterministic** and **independent of line number**. It's computed by `scripts/compute-fid.py <file> "<issue summary sentence>"` — always call the script, never hand-compute it. This is a compatibility requirement, not a style preference: PRs already in production have fids computed by this exact algorithm, and re-review matching depends on byte-identical reproduction.
+`fid` must be **deterministic** and **independent of line number** (lines drift as the author edits), so the same logical issue produces the same id on every run. Compute it from the file path plus a normalised issue signature:
 
-Use the **issue summary sentence** (not the code snippet, not the line) as the issue text — the same wording each run keeps the id stable.
+```bash
+# fid = first 12 hex of sha1( lowercased repo-relative path + "|" + normalised issue text )
+# Normalisation: lowercase, keep [a-z0-9 ], collapse runs of whitespace, trim.
+compute_fid() {  # args: <file> <issue-text>
+  python3 - "$1" "$2" <<'PY'
+import sys, re, hashlib
+path = sys.argv[1].strip().lower()
+issue = re.sub(r'[^a-z0-9 ]', ' ', sys.argv[2].lower())
+issue = re.sub(r'\s+', ' ', issue).strip()
+print(hashlib.sha1(f"{path}|{issue}".encode()).hexdigest()[:12])
+PY
+}
+```
+
+Use the **issue summary sentence** (not the code snippet, not the line) as the issue text. The same wording each run keeps the id stable; if the reviewer rephrases an issue slightly between runs it may be treated as new — acceptable, since the worst case is one duplicate rather than a missed regression.
 
 ---
 
 # Procedure
 
-## 1. Gather PR context (one script call — replaces platform detection, PR metadata, base/head resolution, diffing, prior-review detection, and the mode/tier decisions)
+When invoked with a PR number, branch name, or no argument (defaults to current branch vs main):
+
+## 1. Detect Platform (do this FIRST, before any other tool call)
+
+Run **only** the following to detect which hosting platform is in use:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/gather-context.sh" $ARGUMENTS
+git remote get-url origin
 ```
 
-Pass `--push-update` as an additional argument when the trigger context indicates this is a follow-up push to an existing PR (the executor sets this) — it forces re-review mode and scopes the tier decision to the incremental diff only, per the script's own logic.
+From the remote URL, determine the platform:
+- Contains `github.com` → **GitHub**
+- Contains `dev.azure.com` or `visualstudio.com` → **Azure DevOps**
+- Contains `bitbucket.org` → **Bitbucket**
+- Anything else → **Generic** (report only, no inline posting)
 
-Read the digest this prints, then read `/tmp/pr_review_state.json` for anything you need by name (`platform`, `pr_id`/`pr_number`, `review_mode`, `review_tier`, `review_diff_file`, `changed_count`, `pr_title`, `pr_description`, etc.). **Do not recompute any of these values yourself** — that's exactly the failure mode this script exists to eliminate.
+Store the detected platform — it determines every subsequent CLI/API choice. Do **not** assume the platform from the argument or the repo name; the remote URL is authoritative.
 
-If the script exits non-zero, output its stderr as a single error line and stop — these are genuinely unrecoverable (can't resolve the platform, the base ref, or the PR number). If it prints a `WARN:` about prior-review detection failing, that's not fatal — the run continues in `initial` mode with the failure visible; do not treat it as "confirmed no prior review."
+### Platform-exclusive CLI rule (mandatory)
 
-If `changed_count` is `0`, there's nothing to review — skip to posting a short "no changes to review" note and stop.
+After detection, use **only** the platform-appropriate tool for the rest of the run. Mixing them wastes turns and leaks credentials into logs:
 
-## 2. Post a "Review in Progress" Comment
+| Platform | Allowed for posting / PR API | Forbidden |
+|---|---|---|
+| GitHub | `gh`, `git` | `curl` to Azure DevOps, `az` |
+| Azure DevOps | `curl` + `AZURE_DEVOPS_TOKEN`, `git` | `gh` (will fail with `gh auth login`), `az login` |
+| Bitbucket / Generic | `git` only | `gh`, `curl` to private APIs |
+
+Do **not** probe other CLIs ("just to check"). The hook layer will block obvious mismatches; doing it wrong will block the run.
+
+## 2. Post a "Review in Progress" Comment (must be within the first 3 tool calls)
+
+Immediately after platform detection, post a comment so the PR author knows the review has started. **Do not read any files, do not run `find`/`ls`, do not index the codebase before this step.**
+
+Use the platform-appropriate method:
+- **GitHub:** `gh pr comment` — see `providers/github.md`
+- **Azure DevOps:** REST API — see `providers/azure-devops.md` (Posting the Starting Comment section)
+- **Generic / unknown platform:** Skip — no API available
+
+Resolve the PR number from the argument first; only fall back to a CLI lookup (`gh pr list` on GitHub, `pullrequests?searchCriteria.sourceRefName=...` on Azure DevOps) if it was not provided.
+
+If posting the starting comment fails, output a single warning line and continue — do not stop the review.
+
+## 3. Gather PR Context (do this BEFORE indexing the codebase)
+
+The diff is what matters. Resolve the base/head and pull the diff first — for small PRs (≤10 changed files), this is *all* the context the sub-agents need, and the codebase index in step 4 can be skipped entirely.
+
+### Resolve the base ref (robust to detached HEAD, missing remote-tracking refs, and non-`main` defaults)
+
+> **Important:** detached worktrees created by CI runners (e.g. the Xianix Executor) often have **zero** remote-tracking refs (`refs/remotes/origin/*`). `git show-ref | grep remotes` returns nothing. Resolving `origin/master` will fail. Always fall back to **local** branches and use `git merge-base` for the diff.
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/post-start-comment.sh"
+HEAD_SHA=$(git rev-parse HEAD)
+
+# Helper: does a ref exist?
+_have_ref() { git show-ref --verify --quiet "$1"; }
+
+# Try origin/HEAD, then origin/{main,master,develop}, then local {main,master,develop},
+# then any remote tracking branch, then any local branch other than the current one.
+BASE_REF=""
+for candidate in \
+  "$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null)" \
+  refs/remotes/origin/main refs/remotes/origin/master refs/remotes/origin/develop \
+  refs/heads/main refs/heads/master refs/heads/develop; do
+  [ -n "$candidate" ] && _have_ref "$candidate" && { BASE_REF="$candidate"; break; }
+done
+
+# Last-resort fallbacks
+if [ -z "$BASE_REF" ]; then
+  # First remote tracking branch that isn't HEAD
+  BASE_REF=$(git for-each-ref --format='%(refname)' refs/remotes/origin \
+    | grep -v '/HEAD$' | head -1)
+fi
+if [ -z "$BASE_REF" ]; then
+  # First local branch that isn't whatever HEAD points at
+  BASE_REF=$(git for-each-ref --format='%(refname)' refs/heads \
+    | grep -v -F "$(git symbolic-ref -q HEAD || echo /no/symbolic/ref)" | head -1)
+fi
+
+[ -z "$BASE_REF" ] && { echo "ERROR: could not resolve any base ref"; exit 1; }
+
+# Short label (e.g. "master") and a merge-base SHA we can diff against
+BASE=$(echo "$BASE_REF" | sed -e 's|^refs/remotes/origin/||' -e 's|^refs/heads/||')
+BASE_SHA=$(git merge-base "$BASE_REF" "$HEAD_SHA")
+
+echo "Base: $BASE ($BASE_REF -> $BASE_SHA)"
+echo "Head: $HEAD_SHA"
+export HEAD_SHA BASE BASE_REF BASE_SHA
 ```
 
-Reads everything it needs from the state file written in step 1. Non-fatal by design — if it warns, continue.
+> On **Azure DevOps**, prefer the PR's real target branch as the base: fetch the PR metadata (see `providers/azure-devops.md` → *Fetching PR Metadata*) and resolve `$PR_TARGET` to a SHA the same way as above, then use that as `BASE_SHA`. The PR object is the source of truth for title/description/target.
 
-## 3. Index the Codebase (skip on small PRs)
+Use `${BASE_SHA}` (not `origin/${BASE}`) in every diff command below — it works regardless of whether remote-tracking refs exist.
+
+### Resolve the source branch name (handles detached HEAD)
 
 ```bash
-if [ "$(python3 -c "import json; print(json.load(open('/tmp/pr_review_state.json'))['changed_count'])")" -le 10 ]; then
-  echo "Small PR — skipping codebase index, diff alone is enough context."
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [ "$CURRENT_BRANCH" = "HEAD" ]; then
+  CURRENT_BRANCH=$(git branch --contains "$HEAD_SHA" \
+    | sed 's|^[* ] *||' | grep -v '^(' | head -1)
+fi
+export CURRENT_BRANCH
+```
+
+### Diff and metadata commands (use `BASE_SHA`, not `origin/${BASE}`)
+
+```bash
+git log --oneline ${BASE_SHA}..${HEAD_SHA}
+git diff --stat ${BASE_SHA}...${HEAD_SHA}
+git diff --name-only ${BASE_SHA}...${HEAD_SHA} | tee /tmp/pr_changed_files.txt
+git diff ${BASE_SHA}...${HEAD_SHA} > /tmp/pr_full_diff.patch
+git log -1 --format="%an <%ae>" ${HEAD_SHA}
+git log --format="%s%n%b" ${BASE_SHA}..${HEAD_SHA}
+
+CHANGED_COUNT=$(wc -l < /tmp/pr_changed_files.txt | tr -d ' ')
+echo "Changed files: $CHANGED_COUNT"
+export CHANGED_COUNT
+```
+
+Writing the diff to `/tmp/pr_full_diff.patch` lets you pass it by **path** to sub-agents instead of by value — much smaller prompts when the diff is large.
+
+> **Anti-pattern:** Do NOT `cat <<'DIFF_EOF' ... DIFF_EOF` the diff back to yourself in a subsequent `Bash` call. The diff is already in your conversation history once you ran `git diff`. Echoing it back wastes a turn and tokens; if you need it as a file, you already wrote it to `/tmp/pr_full_diff.patch` above.
+
+Use `git show ${HEAD_SHA}:<filepath>` or the `Read` tool to read the full content of any file that requires deeper analysis beyond the patch.
+
+**Platform CLIs are not used in this diff step.** Use **`gh`** only when posting to GitHub and **`curl`/Azure DevOps REST** only when posting to Azure DevOps (see the provider docs and "Posting the Review" below).
+
+### Detect a prior review and compute the re-review range
+
+This is the one place reading platform PR comments is required, because it determines whether the run is an **initial** review or a **re-review**. Skip entirely on the generic platform (no API) and when `PR_REVIEWER_RECONCILE=false`.
+
+1. List the existing review comments/threads on the PR and keep only those carrying the plugin marker (`<!-- pr-reviewer:v1 ... -->` on GitHub, or the `pr-reviewer.*` thread properties on Azure DevOps). Use the platform helper:
+   - **GitHub** → `providers/github.md` → *Detecting a prior review* (GraphQL: review threads with `id`, `isResolved`, body, fid).
+   - **Azure DevOps** → `providers/azure-devops.md` → *Detecting a prior review* (`GET .../threads`, filter by `properties["pr-reviewer.fid"]`).
+
+2. Decide the mode:
+
+```bash
+# /tmp/pr_prior_findings.jsonl is written by the provider helper: one JSON object per
+# prior marked finding thread: {fid, status(open|resolved), thread_ref[, comment_ref]}.
+# Matching is by fid alone, so file/line are not needed here.
+# PRIOR_SUMMARY_SHA is the sha= from the most recent summary marker, or empty.
+if [ "${PR_REVIEWER_RECONCILE:-true}" = "false" ] || [ ! -s /tmp/pr_prior_findings.jsonl ]; then
+  REVIEW_MODE="initial"
+  RANGE_BASE="$BASE_SHA"
 else
-  ls -1
-  find . -maxdepth 3 -not -path './.git/*' -not -path './node_modules/*' -not -path './bin/*' -not -path './obj/*' -not -path './.vs/*' | sort
-  find . -not -path './.git/*' -type f | sed 's/.*\.//' | sort | uniq -c | sort -rn | head -20
-  ls *.sln *.csproj package.json go.mod Cargo.toml pom.xml build.gradle pyproject.toml setup.py requirements.txt CMakeLists.txt 2>/dev/null || true
+  REVIEW_MODE="rereview"
+  # New commits since the last review; fall back to BASE_SHA if the recorded sha is gone.
+  if [ -n "${PRIOR_SUMMARY_SHA:-}" ] && git cat-file -e "${PRIOR_SUMMARY_SHA}^{commit}" 2>/dev/null; then
+    RANGE_BASE="$PRIOR_SUMMARY_SHA"
+  else
+    RANGE_BASE="$BASE_SHA"
+  fi
+fi
+echo "Review mode: $REVIEW_MODE  |  incremental range: ${RANGE_BASE}..${HEAD_SHA}"
+export REVIEW_MODE RANGE_BASE
+```
+
+3. Capture the **incremental** diff (commits pushed since the last review) in addition to the full PR diff — it is what you skim first in re-review mode and what populates the "changed since last review" line in the delta:
+
+```bash
+if [ "$REVIEW_MODE" = "rereview" ] && [ "$RANGE_BASE" != "$BASE_SHA" ]; then
+  git log --oneline ${RANGE_BASE}..${HEAD_SHA}
+  git diff ${RANGE_BASE}...${HEAD_SHA} > /tmp/pr_incremental_diff.patch
+  echo "Incremental diff: $(wc -l < /tmp/pr_incremental_diff.patch) lines since last review"
 fi
 ```
 
-If indexing was performed, use `Read` on key config/manifest files and `Grep` to locate the main entry point, base classes, or shared utilities referenced by the changed files. Otherwise skip directly to step 4.
+> **Why review the full PR diff, not just the increment?** The full diff (`/tmp/pr_full_diff.patch`) stays the authoritative input to the reviewers so the *current* finding set is always complete — an unresolved finding in a file the latest commits didn't touch must still be detected so it stays open. The incremental diff focuses your attention and drives the delta summary; it does not replace the full scan. Reconciliation (step 7 / posting) compares the current finding set to the prior one **by `fid`**.
 
-## 4. Understand the Change
+## 4. Index the Codebase (skip on small PRs)
 
-Before launching any agents, from `/tmp/pr_review_state.json` and the diff at `review_diff_file`:
+```bash
+if [ "${CHANGED_COUNT:-0}" -le 10 ]; then
+  echo "Small PR ($CHANGED_COUNT files) — skipping codebase index, diff alone is enough context."
+else
+  # Top-level layout
+  ls -1
 
+  # Source tree (depth 3, ignore common noise)
+  find . -maxdepth 3 \
+    -not -path './.git/*' \
+    -not -path './node_modules/*' \
+    -not -path './bin/*' \
+    -not -path './obj/*' \
+    -not -path './.vs/*' \
+    | sort
+
+  # Language fingerprint
+  find . -not -path './.git/*' -type f \
+    | sed 's/.*\.//' | sort | uniq -c | sort -rn | head -20
+
+  # Entry points / build manifests
+  ls *.sln *.csproj package.json go.mod Cargo.toml pom.xml build.gradle \
+     pyproject.toml setup.py requirements.txt CMakeLists.txt 2>/dev/null || true
+fi
+```
+
+If indexing was performed, use `Read` on key config/manifest files (`package.json`, `*.csproj`, `go.mod`) and `Grep` to locate patterns such as the main entry point, base classes, or shared utilities referenced by the changed files. Otherwise skip directly to step 5.
+
+## 5. Understand the Change & Choose the Review Tier
+
+Before launching any agents:
 - Identify the type of change (feature, bugfix, refactor, config, docs)
 - Note which languages/frameworks are involved
 - Estimate scope (small/medium/large)
 
-The review **tier** (`review_tier`: `"haiku"` or `"specialists"`) was already decided by `gather-context.sh` from the same high-risk-surface heuristic this step used to re-run — read it from the state file, don't recompute it. `"haiku"` → go to step 5A. `"specialists"` → go to step 5B.
+### Decide the tier: default Haiku finders vs. escalated specialists
 
-## 5. Run the Review (parallel sub-agent calls — MANDATORY)
+The review runs on the **cheap Haiku-finder path by default** (step 6A) and only **escalates to the full specialist reviewers** (step 6B) when the diff touches a high-risk surface. Detect high-risk changes from both the file list and the diff content:
 
-Run **exactly one** of the two paths below, per `review_tier` from the state file. Both paths run **real, parallel, top-level sub-agents** (you are the top-level agent, so `Task`/`Agent` is available here) and both feed step 6. Use whichever of `Task`/`Agent` your SDK accepts; if one returns `No such tool available`, retry with the other name. If your SDK requires the plugin prefix, use `pr-reviewer:<name>` instead of the bare name.
+```bash
+# 1. High-risk by file path
+HIGH_RISK_FILES=$(grep -iE \
+  '(auth|login|signin|session|password|passwd|secret|token|jwt|oauth|crypto|encrypt|decrypt|payment|billing|charge|invoice|checkout|migration|schema|\.sql$|webhook|/api/|/controllers?/|/routes?/|/handlers?/|iam|rbac|permission)' \
+  /tmp/pr_changed_files.txt || true)
+
+# 2. High-risk by changed content (added lines only)
+HIGH_RISK_DIFF=$(grep -iE '^\+' /tmp/pr_full_diff.patch \
+  | grep -iE '(password|secret|api[_-]?key|private[_-]?key|authorize|authenticate|hashpw|bcrypt|jwt|sql|exec\(|eval\(|subprocess|os\.system|pickle\.loads)' \
+  || true)
+
+if [ -n "$HIGH_RISK_FILES" ] || [ -n "$HIGH_RISK_DIFF" ]; then
+  REVIEW_TIER="specialists"
+  echo "High-risk surface detected — escalating to specialist reviewers."
+else
+  REVIEW_TIER="haiku"
+  echo "No high-risk surface — using low-cost Haiku finder path."
+fi
+export REVIEW_TIER
+```
+
+- `REVIEW_TIER=haiku` → go to **step 6A** (two Haiku finders). This is the common case.
+- `REVIEW_TIER=specialists` → go to **step 6B** (gated specialist sub-agents).
+
+When genuinely uncertain whether a change is high-risk, prefer **specialists** — a missed vulnerability costs far more than one extra review pass. The heuristic above is intentionally broad for exactly this reason.
+
+## 6. Run the Review (parallel sub-agent calls — MANDATORY)
+
+Run **exactly one** of the two paths below, chosen by `REVIEW_TIER` from step 5. Both paths run **real, parallel, top-level sub-agents** (you are the top-level agent, so `Task` / `Agent` is available here) and both feed the same step 7. The tool is exposed under two equivalent names depending on the Claude Code SDK version (`Task` and/or `Agent`). Use whichever your SDK accepts; if one returns `No such tool available`, immediately retry the same call with the other name. If your SDK requires the plugin prefix, use `pr-reviewer:<name>` instead of the bare name.
 
 **Constraints every sub-agent prompt below must include, verbatim:**
 
-- *"Do not re-fetch git data; the diff at `$REVIEW_DIFF_FILE` is authoritative. Return findings only."* (`REVIEW_DIFF_FILE` = `review_diff_file` from the state file — in push-update mode this is already the incremental diff, in all other modes the full PR diff; the script already resolved which one.)
-- When `push_update_mode` is `true` in the state file, also include: *"This is a focused push review. Only the commits pushed since the last review are in scope — review only the diff you were given, not the full PR history."*
-- **The line-number contract:** *"For each finding, report `LINE:` as the line number **within the diff file you were given** (count from line 1 of that file) — not a file line number, not hunk-relative math. Just: which line of the file I handed you is this on."* A separate deterministic step resolves that to the real post-change file line — sub-agents must **not** attempt hunk-header arithmetic themselves. (This replaces the old contract where agents computed the post-change file line directly — that was the single most common cause of dropped/misplaced inline comments; agents already have the diff file open, so "which line of this file" is trivial and unambiguous, whereas hunk math was not.)
+- A reminder: *"Do not re-fetch git data; the diff at /tmp/pr_full_diff.patch is authoritative. Return findings only."*
+- A line-number constraint: *"Every `path/to/file.ext:NN` reference must use the POST-CHANGE file line number — the line as it appears in the new version of the file. Derive `NN` from the `@@ -old,+new @@` hunk header's `+new` start plus the offset of the flagged `+` line within that hunk. Never report the diff's own line position or an old-side line number. Findings on deleted (`-`) lines must reference the nearest surviving line."*
+- A suggestion constraint: *"For findings where the fix is a concrete, drop-in replacement (wrong identifier, missing null guard, insecure call swapped for safe equivalent, etc.), add a native GitHub suggestion block immediately after the `**Fix:**` block. Prefix it with an HTML comment that carries the line range, then a ` ```suggestion ` fenced block containing the verbatim replacement lines with indentation preserved. Example for a single-line fix: `<!-- suggestion: line NN -->` on its own line, then ` ```suggestion `, then the replacement line, then ` ``` `. For multi-line: `<!-- suggestion: lines NN-MM -->`. Do not include this for architectural improvements or fixes requiring author judgment."*
 
-> **Diff size (used by both paths):** read `diff_lines` and `review_diff_file` from the state file. If `diff_lines <= 300`, pass the diff **inline** in each sub-agent prompt (cheaper than each re-opening a shared file); otherwise pass the path `$REVIEW_DIFF_FILE`.
+> **Diff size (used by both paths):**
+> ```bash
+> DIFF_LINES=$(wc -l < /tmp/pr_full_diff.patch)
+> echo "Diff size: $DIFF_LINES lines  |  Tier: $REVIEW_TIER"
+> ```
 
 ---
 
-### 5A. Default path — two parallel Haiku finders (`review_tier == "haiku"`)
+### 6A. Default path — two parallel Haiku finders (`REVIEW_TIER=haiku`)
+
+Lowest-cost path for ordinary PRs.
 
 **Pre-load context (at most 3 `Read` calls, strict size cap).** From `/tmp/pr_changed_files.txt` pick the **top 3 highest-risk files** (business logic, data access first; skip pure test/generated files unless they are the only changes). For each:
-
 - If the file is **≤ 400 lines**, read it in full.
-- If **> 400 lines**, extract only the changed regions: `grep -n '^@@' $REVIEW_DIFF_FILE` to find hunk positions, then `sed -n '<start>,<end>p' <file>` for ±60 lines around each hunk.
+- If **> 400 lines**, extract only the changed regions: `grep -n '^@@' /tmp/pr_full_diff.patch` to find hunk positions, then `sed -n '<start>,<end>p' <file>` for ±60 lines around each hunk.
 
 Concatenate the snippets into `/tmp/pr_context.txt` (a filepath header before each). **Never read any file in its entirety if it exceeds 400 lines; never read more than 3 files.**
 
-Then emit **both Agent calls in the same assistant turn** (so they run in parallel). Both **must** set `"model": "haiku"` — use the short slug, not a dated model id. Neither agent may call `Read`, `Bash`, `Grep`, or any other tool — they work only from the two files named in the prompt.
+Then emit **both Agent calls in the same assistant turn** (so they run in parallel). Both **must** set `"model": "claude-haiku-4-5"`. Neither agent may call `Read`, `Bash`, `Grep`, or any other tool — they work only from the two files named in the prompt.
 
 **Agent 1 — Correctness & regressions**
 
 ```json
 {
   "description": "Correctness & regression finder",
-  "model": "haiku",
-  "prompt": "Read $REVIEW_DIFF_FILE then /tmp/pr_context.txt.\n\n[If push_update_mode=true, prepend: 'This is a focused push review — only review the commits pushed since the last review. Do not flag issues from earlier commits in the PR.']\n\nFind correctness bugs and behavioural regressions introduced by the diff. Focus on:\n- Logic errors in changed code paths\n- Changed conditions that now allow or block cases they shouldn't\n- Null / empty / zero edge cases on new code paths\n- Removed guards that previously protected against a bad state\n- Interface/contract mismatches between callers and the changed function\n\nFor each finding output exactly:\nFILE: <path>\nLINE: <the line number within $REVIEW_DIFF_FILE itself that you are flagging — count from line 1 of that file, do not compute a file line number>\nSEVERITY: CRITICAL | WARNING\nISSUE: <one sentence>\n\nIf you find nothing, output: NONE\nDo not call any tools."
+  "model": "claude-haiku-4-5",
+  "prompt": "Read /tmp/pr_full_diff.patch then /tmp/pr_context.txt.\n\nFind correctness bugs and behavioural regressions introduced by the diff. Focus on:\n- Logic errors in changed code paths\n- Changed conditions that now allow or block cases they shouldn't\n- Null / empty / zero edge cases on new code paths\n- Removed guards that previously protected against a bad state\n- Interface/contract mismatches between callers and the changed function\n\nFor each finding output exactly:\nFILE: <path>\nLINE: <post-change file line number from the @@ hunk header's +new start plus the offset of the flagged + line within that hunk; never the diff's own line position>\nSEVERITY: CRITICAL | WARNING\nISSUE: <one sentence>\nSUGGESTION_START_LINE: <line number, only when the fix is a concrete drop-in single-line or consecutive-block replacement; omit otherwise>\nSUGGESTION_END_LINE: <last line of the replacement block; same as SUGGESTION_START_LINE for a single-line fix; omit if no suggestion>\nSUGGESTION_CODE: <verbatim replacement lines with indentation preserved exactly; omit if no suggestion>\n\nInclude SUGGESTION_* fields only when the fix is an unambiguous drop-in swap (wrong value, missing guard, insecure call replaced by its safe equivalent). Omit for architectural or design-level fixes.\n\nIf you find nothing, output: NONE\nDo not call any tools."
 }
 ```
 
@@ -161,18 +381,18 @@ Then emit **both Agent calls in the same assistant turn** (so they run in parall
 ```json
 {
   "description": "Security & edge-case finder",
-  "model": "haiku",
-  "prompt": "Read $REVIEW_DIFF_FILE then /tmp/pr_context.txt.\n\n[If push_update_mode=true, prepend: 'This is a focused push review — only review the commits pushed since the last review. Do not flag issues from earlier commits in the PR.']\n\nFind security issues and missing edge-case handling in the diff. Focus on:\n- Input not validated before use (injection, path traversal)\n- Authentication or authorisation checks removed or weakened\n- Sensitive data written to logs\n- Exception or error paths that swallow failures silently\n- Resource leaks (connections, file handles) on error paths\n- Off-by-one errors or boundary conditions in new loops/ranges\n\nFor each finding output exactly:\nFILE: <path>\nLINE: <the line number within $REVIEW_DIFF_FILE itself that you are flagging — count from line 1 of that file, do not compute a file line number>\nSEVERITY: CRITICAL | WARNING | SUGGESTION\nISSUE: <one sentence>\n\nIf you find nothing, output: NONE\nDo not call any tools."
+  "model": "claude-haiku-4-5",
+  "prompt": "Read /tmp/pr_full_diff.patch then /tmp/pr_context.txt.\n\nFind security issues and missing edge-case handling in the diff. Focus on:\n- Input not validated before use (injection, path traversal)\n- Authentication or authorisation checks removed or weakened\n- Sensitive data written to logs\n- Exception or error paths that swallow failures silently\n- Resource leaks (connections, file handles) on error paths\n- Off-by-one errors or boundary conditions in new loops/ranges\n\nFor each finding output exactly:\nFILE: <path>\nLINE: <post-change file line number from the @@ hunk header's +new start plus the offset of the flagged + line within that hunk; never the diff's own line position>\nSEVERITY: CRITICAL | WARNING | SUGGESTION\nISSUE: <one sentence>\nSUGGESTION_START_LINE: <line number, only when the fix is a concrete drop-in single-line or consecutive-block replacement; omit otherwise>\nSUGGESTION_END_LINE: <last line of the replacement block; same as SUGGESTION_START_LINE for a single-line fix; omit if no suggestion>\nSUGGESTION_CODE: <verbatim replacement lines with indentation preserved exactly; omit if no suggestion>\n\nInclude SUGGESTION_* fields only when the fix is an unambiguous drop-in swap (wrong value, missing guard, insecure call replaced by its safe equivalent). Omit for architectural or design-level fixes.\n\nIf you find nothing, output: NONE\nDo not call any tools."
 }
 ```
 
-**Verify and compile (you are the verifier — no extra agents).** For each finding from both agents: (1) confirm the flagged diff-line is a `+` line in `$REVIEW_DIFF_FILE` (new code, not pre-existing); (2) discard pre-existing issues, linter/compiler-caught problems, pedantic style, and obvious false positives; (3) merge duplicates and **cap at 8 findings**, ranked CRITICAL → WARNING → SUGGESTION. Then go to step 6.
+**Verify and compile (you are the verifier — no extra agents).** For each finding from both agents: (1) confirm the flagged line appears in `/tmp/pr_full_diff.patch` as a `+` line (new code, not pre-existing); (2) discard pre-existing issues, linter/compiler-caught problems, pedantic style, and obvious false positives; (3) merge duplicates and **cap at 8 findings**, ranked CRITICAL → WARNING → SUGGESTION; (4) **preserve the `SUGGESTION_START_LINE` / `SUGGESTION_END_LINE` / `SUGGESTION_CODE` fields verbatim** — they will be extracted in the "Extract suggestion annotations" step before posting and are what enables the GitHub "Commit suggestion" button. Then go to step 7.
 
 ---
 
-### 5B. Escalated path — gated specialist sub-agents (`review_tier == "specialists"`)
+### 6B. Escalated path — gated specialist sub-agents (`REVIEW_TIER=specialists`)
 
-Run `code-reviewer` **always**; gate the other three by the changed-file mix so you never spawn a reviewer with nothing to do:
+Deeper coverage for high-risk diffs. Run `code-reviewer` **always**; gate the other three by the changed-file mix so you never spawn a reviewer with nothing to do:
 
 | `subagent_type` | Focus | Model tier | Run when the diff contains… | Skip when… |
 |---|---|---|---|---|
@@ -181,91 +401,223 @@ Run `code-reviewer` **always**; gate the other three by the changed-file mix so 
 | `security-reviewer` | Vulnerabilities, secrets, input validation | **risk** (frontier) | source code, auth/authz, input handling, dependencies/lockfiles, IaC, any externally-reachable surface | the diff is **only** docs/markdown/images |
 | `performance-reviewer` | Bottlenecks, inefficiencies, resource usage | **risk** (frontier) | DB queries/ORM, loops over collections, I/O, hot paths, large data structures, algorithm changes | the diff is **only** docs/config, or trivial code with no data/IO/loops |
 
-`package.json`/`*.csproj`/lockfile changes are **not** docs — they keep `security-reviewer` in scope. When uncertain whether a reviewer applies, **run it**.
+`package.json`/`*.csproj`/lockfile changes are **not** docs — they keep `security-reviewer` in scope (dependency risk). When uncertain whether a reviewer applies, **run it**.
 
-In **one assistant turn**, emit one parallel sub-agent invocation per selected reviewer (1–4). Each prompt must include, in addition to the shared constraints above:
+In **one assistant turn**, emit one parallel sub-agent invocation per selected reviewer (between 1 and 4). Each invocation prompt must include, in addition to the two shared constraints above:
 
-- `$REVIEW_DIFF_FILE` and `/tmp/pr_changed_files.txt`
-- `base_sha` and `head_sha` from the state file
-- `pr_title` and `pr_description` from the state file
-- *"When you need full file context, read only the enclosing function/class (±60 lines around each changed hunk). Do not read any file in its entirety if it exceeds 400 lines — use `Bash(sed -n '<start>,<end>p' <file>)` scoped to the changed region instead. Read at most 3 files beyond the diff."*
+- The path `/tmp/pr_full_diff.patch` and the path `/tmp/pr_changed_files.txt`
+- `BASE_SHA` and `HEAD_SHA`
+- The PR title and description (from the platform metadata fetched in step 2)
+- A file-reading constraint: *"When you need full file context, read only the enclosing function/class (±60 lines around each changed hunk). Do not read any file in its entirety if it exceeds 400 lines — use `Bash(sed -n '<start>,<end>p' <file>)` scoped to the changed region instead. Read at most 3 files beyond the diff."*
 
-> **Model selection (mixed-model tiering).** Precedence: `PR_REVIEWER_MODEL` (if set, pins **every** reviewer, ignoring tiers) > per-tier: quality tier (`code-reviewer`, `test-reviewer`) → `PR_REVIEWER_QUALITY_MODEL` or `haiku`; risk tier (`security-reviewer`, `performance-reviewer`) → `PR_REVIEWER_RISK_MODEL` or the lead's inherited model. Use short slugs (`sonnet`/`opus`/`haiku`/`fable`). When the resolved value is the sentinel `inherit`, **omit** the `model` field entirely rather than passing the literal string `inherit`.
+> **Pass-by-value vs path:** if `DIFF_LINES ≤ 300`, pass the diff **inline** in each prompt (cheaper than each sub-agent re-opening a shared file); if `DIFF_LINES > 300`, pass the path `/tmp/pr_full_diff.patch`.
 
-Wait for all selected sub-agents to return, then go to step 6.
+> **Model selection (mixed-model tiering).** The reviewers split into two model tiers so you don't pay frontier-model rates for the cheaper review dimensions. Set each sub-agent's `model` from its tier (per the table above), resolved with this precedence:
+>
+> 1. **`PR_REVIEWER_MODEL` (override).** If set, it pins **every** reviewer to that one model — backward-compatible escape hatch, ignores the tiers below.
+> 2. Otherwise, per tier:
+>    - **quality tier** (`code-reviewer`, `test-reviewer`) → `PR_REVIEWER_QUALITY_MODEL` if set, else `claude-haiku-4-5`. These are pattern/coverage tasks that a small model handles well.
+>    - **risk tier** (`security-reviewer`, `performance-reviewer`) → `PR_REVIEWER_RISK_MODEL` if set, else the lead's default/inherited model. Vulnerability and performance reasoning is where frontier accuracy actually pays off — this path was chosen *because* the diff is high-risk.
+>
+> ```bash
+> RISK_MODEL="${PR_REVIEWER_RISK_MODEL:-inherit}"          # frontier / lead's model by default
+> QUALITY_MODEL="${PR_REVIEWER_QUALITY_MODEL:-claude-haiku-4-5}"
+> if [ -n "${PR_REVIEWER_MODEL:-}" ]; then                 # override: one model for all
+>   RISK_MODEL="$PR_REVIEWER_MODEL"; QUALITY_MODEL="$PR_REVIEWER_MODEL"
+> fi
+> echo "Reviewer models — quality: $QUALITY_MODEL | risk: $RISK_MODEL"
+> ```
+>
+> Emit each reviewer in the same turn with its tier's model in the invocation (`"model": "<quality-or-risk>"`). When the resolved value is the sentinel `inherit`, **omit** the `model` field entirely so the agent's `model: inherit` frontmatter takes over (the lead's model) — do not pass the literal string `inherit` as a model slug. Reviewers in different tiers therefore run on different models within the same parallel turn — that is intended.
+
+Wait for all selected sub-agents to return, then go to step 7.
 
 ---
 
 ### What NOT to do (anti-patterns — apply to both paths)
 
-- ❌ Spawning a single `orchestrator` / "PR review" sub-agent and asking it to run the reviewers — it can't spawn sub-agents, the fan-out fails.
-- ❌ Running `Bash` with a heredoc that prints a fake "=== CODE QUALITY REVIEW ===" analysis — that's you pretending to be a reviewer. Emit a real agent call.
-- ❌ A long thinking turn followed by directly compiling the report — that pause should have been parallel sub-agent work.
-- ❌ Sequential `Task`/`Agent` calls — they MUST be in the same assistant turn so the runtime parallelizes them.
-- ❌ Passing a large diff (> 300 lines) inline when the diff file exists on disk. Pass the path.
-- ❌ Re-deriving `platform`/`api_base`/`pr_id`/`base_sha`/`head_sha` with fresh `git`/`curl` commands anywhere in this procedure — they're already in `/tmp/pr_review_state.json`, written once by step 1.
+These look like progress but are actually you **simulating** sub-agents in your own context. They double cost, double latency, and lose the benefit. **Stop the moment you catch yourself doing any of them:**
+
+- ❌ Spawning a single `orchestrator` / "PR review" sub-agent and asking it to run the reviewers. That sub-agent cannot spawn sub-agents — the fan-out fails and the review degrades to a text summary that never gets posted. Run the agents from here.
+- ❌ Running `Bash` with `cat <<'ANALYSIS' ... === CODE QUALITY REVIEW === ... ANALYSIS` — that is **you pretending to be a reviewer**, not invoking it. Delete the heredoc and emit a real agent call instead.
+- ❌ A long thinking turn (>20 s) followed by directly compiling the report. That pause is internal reasoning that should have been parallel sub-agent work.
+- ❌ Sequential `Task` / `Agent` calls — they MUST be in the same assistant turn so the runtime parallelizes them.
+- ❌ Passing a large diff (> 300 lines) inline when `/tmp/pr_full_diff.patch` exists. Pass the path.
+- ❌ `cat <<'DIFF_EOF' ... DIFF_EOF` echoing the diff back into the conversation. You already have it. Don't.
 
 ### Fallback if sub-agents are genuinely unavailable
 
-If **both** `Task` and `Agent` return `No such tool available`: perform the review yourself, inline — for the Haiku path do the two finder passes; for the specialist path do one focused pass per selected dimension — using `$REVIEW_DIFF_FILE` as the source of truth. Then **continue to steps 6–7 exactly as normal** — a degraded analysis path must still post the report and inline comments.
+If **both** `Task` and `Agent` return `No such tool available` (a stripped-down runtime that exposes neither), do not give up:
 
-### Self-check before step 6
+1. Perform the review yourself, inline — for the Haiku path do the two finder passes (correctness, security); for the specialist path do one focused pass per selected dimension — using `/tmp/pr_full_diff.patch` as the source of truth.
+2. Then **continue to steps 7 and "Posting the Review" exactly as normal** — a degraded analysis path must still post the report and inline comments. Producing a text summary and stopping is a failure.
 
-Your conversation history should contain a `Task`/`Agent` tool result in the prior turn for the path you ran. If missing and you didn't take the fallback above, you skipped the review — go back and do it.
+### Self-check before emitting the report
 
-## 6. Compile Findings and Reconcile
+Before step 7, your conversation history should contain a `Task` (or `Agent`) tool result in the prior turn for the path you ran: **two Haiku finders** (6A) or **one result per selected specialist** (6B). If those results are missing *and* you did not take the documented fallback above, you skipped the review. Go back and do it.
 
-**Resolve each finding's post-change file line — deterministically, not by hand:**
+## 7. Compile Final Report
 
-```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/resolve-line.py" "$REVIEW_DIFF_FILE" <diff-line-from-the-sub-agent>
-# prints: <file>:<post-change-line>
-```
+Aggregate all findings into the structured report format defined in `styles/report-template.md`. Read that file and follow its template exactly.
 
-**Compute each finding's `fid` — deterministically, not by hand:**
-
-```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/compute-fid.py" "<file>" "<issue summary sentence>"
-```
-
-Write the compiled, verified findings (post-`resolve-line.py` file/line, post-`compute-fid.py` fid) to `/tmp/pr_findings.json` as a JSON list, each entry: `{"file": ..., "line": ..., "severity": "critical"|"warning"|"suggestion", "fid": ..., "body": "<markdown body, e.g. '**[CRITICAL]** ...'>"}`.
-
-**Reconcile against the prior review and compute the verdict — deterministically:**
-
-```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/reconcile.py"
-```
-
-Reads `/tmp/pr_findings.json`, `/tmp/pr_review_state.json`, and `/tmp/pr_prior_findings.jsonl`; writes `/tmp/pr_reconcile.json` with `fixed`/`carried_over`/`unreviewed_carried_over`/`new` buckets and a `verdict` (`APPROVE` | `APPROVE WITH SUGGESTIONS` | `REQUEST CHANGES` | `NEEDS DISCUSSION`) computed from the open-finding severities. **Use this verdict as-is — do not invent your own verdict string or override it.** In initial mode every finding lands in `new` and the other buckets are empty; this script still runs unconditionally.
-
-**Write the report body** (`/tmp/pr_report_body.md`) following `styles/report-template.md`'s structure exactly:
-
-- Reference specific file paths and line numbers (from `/tmp/pr_findings.json`, already resolved) for every finding
+**Guidelines:**
+- Reference specific file paths and line numbers for every finding
 - Include both the problematic code snippet and a concrete fix example
 - Do not flag non-issues — only real problems and genuine improvements
-- Consider the PR's stated intent (from `pr_title`/`pr_description` in the state file) when evaluating trade-offs
+- Consider the PR's stated intent when evaluating trade-offs
 - Group related issues together rather than repeating similar findings
-- Use the **verdict from `/tmp/pr_reconcile.json`**, not your own judgment
-- In re-review mode, prepend the Re-review delta block using the counts from `/tmp/pr_reconcile.json`'s `counts` object (`fixed`, `carried_over`, `new`, and `unreviewed_carried_over` when non-zero) — do not tally these yourself
-- In initial mode, omit the delta block entirely
 
-## Applying Fixes (Fix Mode Only)
+### Assign a `fid` to every current finding
 
-Only enter this section when running in fix mode (invocation includes `--fix` or explicit fix instruction). Otherwise skip directly to step 7.
+For each finding in the compiled report, compute its `fid` with the `compute_fid` helper (see *Comment markers and finding identity*) from its file path and issue summary sentence. This is required in **both** modes — the markers written this run are what the *next* run reconciles against.
 
-1. Use `Write` or `Bash` to edit the affected files (only CRITICAL and WARNING issues — never auto-fix suggestions). Use `git show HEAD:<filepath>` or `Read` to read current content first.
-2. Commit: `git add <file> && git commit -m "fix: <short description>"` — one commit per logical fix.
-3. Push: `git push origin HEAD`.
-4. The fix summary is included automatically when you post the review in step 7 — write it into the report body.
+### Reconcile against the prior review (re-review mode only)
 
-## 7. Post the Review
+When `REVIEW_MODE=rereview`, classify by comparing the current finding set to `/tmp/pr_prior_findings.jsonl` **by `fid`**:
 
-```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/post-review.sh" /tmp/pr_report_body.md
+| Bucket | Condition | Posting action (see "Posting the Review") |
+|---|---|---|
+| **Carried-over** | prior `fid` is still in the current finding set | Leave the existing thread open. **Do not post a duplicate.** |
+| **Fixed** | prior `fid` (status `open`) is **absent** from the current finding set | Reply "resolved as of `<HEAD_SHA>`" on the existing thread and mark it resolved. |
+| **New** | current `fid` not present in the prior set | Post a new inline thread (with marker). |
+| **Already-resolved** | prior `fid` whose thread is already resolved | Ignore — no action. |
+
+Write the three actionable buckets to `/tmp/pr_reconcile.json` (`{"fixed":[...], "carried_over":[...], "new":[...]}`, each entry keyed by `fid` with its `thread_ref`/`comment_ref` from the prior file) so the posting step can act on them without recomputing.
+
+Then prepend a **Re-review delta** block to the report body (above the Summary), using the template's re-review section:
+
+```
+### Re-review delta
+Reviewed N new commit(s) since the last review (`<RANGE_BASE>`..`<HEAD_SHA>`).
+- ✅ Fixed: <count> previously-flagged issue(s) resolved
+- ⏳ Still open: <count> carried-over issue(s)
+- 🆕 New: <count> issue(s) introduced since the last review
 ```
 
-This handles everything platform-specific: mapping the verdict to a vote/review event (respecting `PR_REVIEWER_BLOCK_ON_CRITICAL` — see below), posting the summary with its marker, reconciling `fixed` threads (reply + resolve), posting one inline thread per finding in `/tmp/pr_reconcile.json`'s `new` bucket with its marker, and printing the final confirmation line using its own counters. **Do not print your own confirmation line with self-tallied numbers — echo what the script printed.**
+In **initial mode** skip reconciliation entirely — every finding is "New" and there is no delta block.
 
-> **Blocking vs non-blocking on CRITICAL findings:** by **default** `post-review.sh` posts a `REQUEST CHANGES` verdict as *non-blocking* (GitHub `--comment`, Azure DevOps vote `-5`) — advisory / shadow mode out of the box. Set `PR_REVIEWER_BLOCK_ON_CRITICAL=true` to make it blocking (GitHub `--request-changes`, Azure DevOps vote `-10`). Verdict, report body, and inline comments are identical either way — only the platform action changes.
+### Recompute the verdict from the *currently open* set
 
-If posting is not possible (generic/unknown platform), `post-review.sh` writes `pr-review-report.md` and prints `Review complete: <verdict> — report written to pr-review-report.md` itself.
+The verdict reflects the finding set at `HEAD` after reconciliation — i.e. carried-over + new findings (fixed ones no longer count). A re-review where the author fixed the last blocker should now produce `APPROVE`.
+
+---
+
+# Applying Fixes (Fix Mode Only)
+
+Only enter this section when running in fix mode (invocation includes `--fix` or explicit fix instruction). Otherwise skip directly to Posting the Review.
+
+### 1. Apply fixes locally
+
+Use `Write` or `Bash` to edit the affected files. Use `git show HEAD:<filepath>` or `Read` to read the full current file content before editing. Only fix CRITICAL and WARNING issues — do not auto-fix suggestions.
+
+### 2. Commit the changes
+
+```bash
+git add <file>
+git commit -m "fix: <short description of what was fixed>"
+```
+
+One commit per logical fix. Commit message format: `fix: <description>`.
+
+### 3. Push to the PR branch
+
+```bash
+git push origin HEAD
+```
+
+### 4. Post a fix summary comment
+
+Post a comment listing:
+- Which issues were auto-fixed (with file and line references)
+- Which issues still require manual attention
+
+Use the platform-appropriate method from the Posting the Review section below with event `COMMENT`.
+
+---
+
+# Posting the Review
+
+After compiling the report (and applying fixes if in fix mode), post it to the platform detected in Step 1 immediately without waiting for user input. Posting has the sub-steps below; all are mandatory when the platform supports them and the run is incomplete if any are skipped. Sub-step **R** runs only in re-review mode.
+
+| # | Sub-step | GitHub | Azure DevOps | Generic |
+|---|---|---|---|---|
+| A | Cast the verdict / vote | `gh pr review` flag | `PUT .../reviewers/{id}` with vote | n/a |
+| B | Post the full report body (incl. delta) as one PR-level comment, **with the summary marker** | `gh pr review --body` | `POST .../threads` (no `threadContext`) | write to `pr-review-report.md` |
+| R | **Re-review only:** reconcile prior findings — resolve **Fixed** threads (with a reply), leave **Carried-over** threads open (no duplicate) | reply + `resolveReviewThread` (GraphQL) | reply + `PATCH .../threads/{id}` `status:fixed` | n/a |
+| C | Post **one inline thread per finding** (initial mode: every finding; re-review mode: **only the New bucket**), **each with a finding marker** | `gh api .../pulls/<n>/comments` per finding | `POST .../threads` with `threadContext` per finding | n/a (skip with note) |
+
+**C is not optional** when there are findings to post (initial mode: all findings with `path/to/file.ext:NN`; re-review mode: the New bucket). The whole point of the specialized reviewers is to surface findings inline next to the offending code; collapsing them into the summary thread defeats the plugin's value. If you find yourself about to print "Review posted" without having posted the due inline comments, stop and go back to sub-step C.
+
+**Every comment the plugin posts in B and C must carry its marker** (summary marker on B, finding marker with the finding's `fid` on C — see *Comment markers and finding identity*). A run that posts comments without markers breaks the next re-review (it will re-post everything as duplicates). The provider files show exactly where the marker goes for each call.
+
+### Sub-step R — reconcile prior findings (re-review mode only)
+
+Skip in initial mode and on the generic platform. Drive this from `/tmp/pr_reconcile.json` (built in step 7):
+
+- **Fixed** (`fixed[]`): for each, post a short reply on the existing thread — e.g. `✅ Resolved as of \`<HEAD_SHA>\`` — then mark the thread resolved/fixed. Use the platform mechanics in the provider file's *Reconciling prior findings* section.
+- **Carried-over** (`carried_over[]`): take **no** action. The thread is already open; do not reply on every run (avoid notification spam) and never re-post the finding as a new thread.
+
+Track a counter (`RESOLVED_OK` / `RESOLVED_FAIL`) the same way inline posting does, and include resolved-count in the final confirmation line.
+
+### Resolve every finding to a post-change file line (do this before sub-step C)
+
+Both GitHub (`gh api .../comments --field line=NN --field side=RIGHT`) and Azure DevOps (`threadContext.rightFileStart.line`) anchor inline comments to the line number **in the new (post-change) version of the file** — not the line's position within the diff. Mis-anchored comments either land on the wrong line or are rejected (GitHub `422`, Azure DevOps `400`).
+
+For each finding before serializing it:
+
+1. Open `/tmp/pr_full_diff.patch` and find the hunk containing the finding. Hunk headers look like `@@ -<oldStart>,<oldLen> +<newStart>,<newLen> @@`.
+2. The finding's file line = `<newStart>` + (count of context ` ` and added `+` lines that precede the flagged line within that hunk). Deleted (`-`) lines do **not** advance the new-side counter.
+3. If a finding sits on a deleted line (no surviving `+`/context line), anchor it to the nearest surviving line in the same hunk and note the relocation in the comment body.
+4. Confirm the resolved `path` is repo-relative (matches an entry in `/tmp/pr_changed_files.txt`) and the line is within the file's new length.
+
+### Handle suggestion blocks (enables "Apply suggestion" / "Commit suggestion" button on GitHub)
+
+Sub-agents emit ` ```suggestion ` blocks directly in their finding output (prefixed with an `<!-- suggestion: line NN -->` or `<!-- suggestion: lines NN-MM -->` HTML comment). Include the finding body **verbatim** in the JSONL — the ` ```suggestion ` block is already in the right format for GitHub and no text transformation is needed.
+
+For each finding that contains a suggestion block:
+
+1. Parse the line range from the HTML comment immediately before the ` ```suggestion ` fence:
+   - `<!-- suggestion: line NN -->` → single-line: `suggestion_start_line = NN`, `suggestion_end_line = NN`
+   - `<!-- suggestion: lines NN-MM -->` → multi-line: `suggestion_start_line = NN`, `suggestion_end_line = MM`
+2. Include those values as `suggestion_start_line` / `suggestion_end_line` in the JSONL entry — the posting loop uses them to set `start_line` in the GitHub API call for multi-line suggestions.
+3. Copy the **entire finding body verbatim** (including the HTML comment and the ` ```suggestion ` block) into the JSONL `body` field. **Do not strip or transform it.** GitHub renders the ` ```suggestion ` block as the "Commit suggestion" button automatically.
+
+If a finding has no ` ```suggestion ` block, omit `suggestion_start_line` and `suggestion_end_line`. The body is still copied verbatim.
+
+The reviewers were already instructed (step 6) to return post-change line numbers, but verify here — a wrong line number is the single most common cause of silently dropped inline comments.
+
+Read and follow the instructions in the appropriate provider file:
+- **GitHub** → `providers/github.md`
+- **Azure DevOps** → `providers/azure-devops.md` (sub-step C is the loop in **§4 — MANDATORY**, not the one-off example)
+- **Bitbucket or Unknown Platform** → `providers/generic.md`
+
+> **Blocking vs non-blocking on CRITICAL findings:** by **default** a `REQUEST CHANGES` verdict is posted as a *non-blocking* review (GitHub `--comment`, Azure DevOps vote `-5`) so the plugin runs in advisory / shadow mode out of the box. To make `REQUEST CHANGES` *blocking* (GitHub `--request-changes`, Azure DevOps vote `-10`), set `PR_REVIEWER_BLOCK_ON_CRITICAL=true`. Verdict, report body, and inline comments are identical in both modes — only the platform-side review type changes. Provider files contain the exact mapping logic.
+
+### Post-posting self-check (do this before printing the confirmation line)
+
+Determine `EXPECTED_INLINE`: in **initial mode** it is the count of findings in the report with a `path/to/file.ext:NN` reference (sum across Critical Issues, Warnings, Suggestions); in **re-review mode** it is the size of the **New** bucket only (carried-over findings are intentionally not re-posted). Then compare against the inline-thread counter exported by the provider (`INLINE_OK` on Azure DevOps; the count of successful `gh api .../comments` POSTs on GitHub).
+
+- If `INLINE_OK` is `0` and `EXPECTED_INLINE` is `> 0`: posting failed silently. Surface the failure log (`/tmp/pr_inline_failures.log` on Azure DevOps) and treat the run as a partial failure.
+- If `INLINE_OK` is much smaller than `EXPECTED_INLINE`: read the failure log and either retry the failed ones or include them in the output diagnostic.
+
+After posting, output a single confirmation line that uses the **actual** inline count, not a hard-coded one. In re-review mode also report the reconciliation outcome:
+
+```
+# initial mode
+Review posted on PR #<number>: <verdict> — <INLINE_OK>/<EXPECTED_INLINE> inline comments — <URL>
+
+# re-review mode
+Re-review posted on PR #<number>: <verdict> — <INLINE_OK>/<EXPECTED_INLINE> new — <RESOLVED_OK> resolved — <carried_over count> still open — <URL>
+```
+
+If `INLINE_OK < EXPECTED_INLINE`, append a second line:
+
+```
+WARN: <EXPECTED_INLINE - INLINE_OK> inline comment(s) failed to post — see /tmp/pr_inline_failures.log
+```
+
+If posting is not possible (generic/unknown platform), output:
+
+```
+Review complete: <verdict> — report written to pr-review-report.md
+```

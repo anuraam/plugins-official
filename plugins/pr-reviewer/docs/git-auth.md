@@ -6,9 +6,9 @@ The `pr-review` plugin can apply code fixes and push them directly to the PR bra
 
 ## How it works
 
-The plugin uses **`GIT_CONFIG_COUNT` environment variables** (Git 2.31+) to inject a token transparently into the `git push` command that triggered the hook. This rewrites any HTTPS remote URL to use the token inline.
+The plugin uses **`GIT_CONFIG_COUNT` environment variables** (Git 2.31+) to inject a token transparently into every `git push` command for the session. This rewrites any HTTPS remote URL to use the token inline, scoped only to the current shell process.
 
-The `validate-prerequisites.sh` hook sets this up automatically before every `git push`, detecting the platform from the remote URL and injecting the correct token — but it does **not** do this via `export`. A PreToolUse hook runs as its own short-lived subprocess; anything it `export`s is gone once that subprocess exits and never reaches the separate process that actually runs the `git push` Bash tool call. Instead, the hook rewrites the command it's given via the CLI's `hookSpecificOutput.updatedInput` mechanism, prepending the `GIT_CONFIG_*` assignments directly onto the `git push` command line itself (`GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=... git push ...`) — standard POSIX "env vars scoped to one command" syntax, which *does* reach the process git push actually runs in.
+The `validate-prerequisites.sh` hook sets this up automatically before every `git push`, detecting the platform from the remote URL and injecting the correct token.
 
 ---
 

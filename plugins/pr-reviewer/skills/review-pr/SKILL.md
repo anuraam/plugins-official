@@ -9,16 +9,17 @@ Perform a comprehensive review of the pull request $ARGUMENTS.
 
 This skill is a thin alias for the `/pr-review` command. Run the full procedure documented in `commands/pr-review.md` **yourself, in the top-level context** — do not delegate it to an `orchestrator` sub-agent. A sub-agent cannot spawn the four reviewer sub-agents, so the parallel review only works when you run it directly. The procedure will:
 
-1. Run `scripts/gather-context.sh` — one atomic call that detects the hosting platform, resolves PR metadata and base/head, generates the diff, and **detects whether the plugin already reviewed this PR**. If so, the run switches to re-review mode: it reconciles prior findings (resolving the ones now fixed, leaving carried-over ones open without duplicating them), focuses on commits pushed since the last review, and posts a re-review delta. Set `PR_REVIEWER_RECONCILE=false` to force a stateless full review.
-2. Post a "review in progress" comment (`scripts/post-start-comment.sh`)
-3. Index the codebase structure (skipped on small PRs)
-4. Launch the relevant specialized sub-agent reviews in parallel (spawned by you, the top-level agent), at the tier `gather-context.sh` already decided. `code-reviewer` always runs; the other three are gated by the change type (docs-only / config-only PRs skip the reviewers that don't apply — see step 5 of `commands/pr-review.md`):
+1. Detect the hosting platform from `git remote get-url origin`
+2. Post a "review in progress" comment
+3. Gather PR context using git (diffs, commits, changed files), and **detect whether the plugin already reviewed this PR**. If so, the run switches to re-review mode: it reconciles prior findings (resolving the ones now fixed, leaving carried-over ones open without duplicating them), focuses on commits pushed since the last review, and posts a re-review delta. Set `PR_REVIEWER_RECONCILE=false` to force a stateless full review.
+4. Index the codebase structure (skipped on small PRs)
+5. Launch the relevant specialized sub-agent reviews in parallel (spawned by you, the top-level agent). `code-reviewer` always runs; the other three are gated by the change type (docs-only / config-only PRs skip the reviewers that don't apply — see step 5 of `commands/pr-review.md`):
    - **code-reviewer** — Code quality, readability, naming, duplication, error handling
    - **security-reviewer** — OWASP vulnerabilities, secrets, injection, auth issues
    - **test-reviewer** — Test coverage, edge cases, test quality
    - **performance-reviewer** — N+1 queries, algorithmic complexity, memory issues
-5. Compile findings (line numbers via `scripts/resolve-line.py`, finding ids via `scripts/compute-fid.py`), reconcile against prior findings and compute the verdict deterministically (`scripts/reconcile.py`), and write the report body (see `styles/report-template.md`)
-6. Post the review to the detected platform automatically (`scripts/post-review.sh`)
+6. Compile all findings into a structured report (see `styles/report-template.md`)
+7. Post the review to the detected platform automatically
 
 If invoked with `--fix`: apply fixes to CRITICAL and WARNING issues, commit, and push before posting.
 

@@ -92,8 +92,6 @@ For each new/modified function, method, or class:
 
 Use the language detected in the PR for all code snippets. Do not default to TypeScript.
 
-**Line-number convention:** where you cite a line (e.g. under "Test Quality Issues"), the number is **the line within the diff file you were given**, **not** the post-change file line. A separate deterministic script (`resolve-line.py`) converts diff-line to file-line afterward — do not attempt the `@@` hunk-header arithmetic yourself.
-
 ```
 ## Test Review
 
