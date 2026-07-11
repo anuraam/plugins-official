@@ -11,7 +11,7 @@ This skill is a thin alias for the `/pr-review` command. Run the full procedure 
 
 1. Detect the hosting platform from `git remote get-url origin`
 2. Post a "review in progress" comment
-3. Gather PR context using git (diffs, commits, changed files), and **detect whether the plugin already reviewed this PR**. If so, the run switches to re-review mode: it reconciles prior findings (resolving the ones now fixed, leaving carried-over ones open without duplicating them), focuses on commits pushed since the last review, and posts a re-review delta. Set `PR_REVIEWER_RECONCILE=false` to force a stateless full review.
+3. Check out the PR head itself when a PR number was given (the runner leaves the workspace on the default branch and knows nothing about PRs — the synthetic `refs/pull/<n>/head` / `refs/pull/<n>/merge` refs are how you get at the PR's commits), resolve the PR's **real target branch** from the platform metadata and **`git fetch` its current remote tip** before diffing (never diff against a possibly-stale local copy of the target — that inflates the review with commits already merged), then gather PR context using git (diffs, commits, changed files), and **detect whether the plugin already reviewed this PR**. If so, the run switches to re-review mode: it reconciles prior findings (resolving the ones now fixed, leaving carried-over ones open without duplicating them), focuses on commits pushed since the last review, and posts a re-review delta. Set `PR_REVIEWER_RECONCILE=false` to force a stateless full review.
 4. Index the codebase structure (skipped on small PRs)
 5. Launch the relevant specialized sub-agent reviews in parallel (spawned by you, the top-level agent). `code-reviewer` always runs; the other three are gated by the change type (docs-only / config-only PRs skip the reviewers that don't apply — see step 5 of `commands/pr-review.md`):
    - **code-reviewer** — Code quality, readability, naming, duplication, error handling
@@ -23,8 +23,8 @@ This skill is a thin alias for the `/pr-review` command. Run the full procedure 
 
 If invoked with `--fix`: apply fixes to CRITICAL and WARNING issues, commit, and push before posting.
 
-If a branch name is provided (e.g., `/review-pr feature/my-feature`), compare that branch against `main`.
+If a branch name is provided (e.g., `/review-pr feature/my-feature`), compare that branch against the remote's default branch (freshly fetched — see step 3 of `commands/pr-review.md`).
 
-If no argument is given, review the **current branch** against `main`.
+If no argument is given, review the **current branch** against the remote's default branch (freshly fetched).
 
 **Optional — blocking mode:** by **default** the review is posted as a *non-blocking* review even when CRITICAL issues are found (GitHub `--comment` / Azure DevOps vote `-5`), so it never gates merges out of the box. Set `PR_REVIEWER_BLOCK_ON_CRITICAL=true` in the environment to upgrade `REQUEST CHANGES` to a blocking review (GitHub `--request-changes` / Azure DevOps vote `-10`), which prevents merge under standard branch protection rules. The verdict label and report body remain unchanged. See `docs/platform-setup.md`.

@@ -1,7 +1,7 @@
 ---
 name: performance-reviewer
 description: Performance-focused code reviewer. Identifies bottlenecks, algorithmic inefficiencies, and resource waste. Use for changes that touch database queries, loops over large datasets, or frequently called code paths.
-tools: Read, Write, Grep, Glob, Bash
+tools: Read, Grep, Glob, Bash
 model: inherit
 ---
 
@@ -110,28 +110,14 @@ Use the language detected in the PR for all code snippets. Do not default to Typ
 ```
 
 If no performance issues are found, explicitly state: "No performance concerns identified in the changed code."
-```
 
 ## GitHub Suggestion Blocks
 
-For findings where the fix is a concrete, drop-in replacement, add a ` ```suggestion ` block immediately after the `**Fix:**` block. This is a GitHub-native code block that renders an "Apply suggestion" / "Commit suggestion" button directly in the PR.
+When the fix is a concrete drop-in replacement (sequential async calls → `Promise.all`/`Task.WhenAll`/`asyncio.gather`, `SELECT *` → explicit columns, string concat in a loop → array join, regex literal moved outside a loop), append after the `**Fix:**` block:
 
-**Single-line replacement** (line NN is the post-change file line number of the flagged line):
-
-    <!-- suggestion: line NN -->
+    <!-- suggestion: line NN -->          (or: lines NN-MM for a consecutive block)
     ```suggestion
-    [exact verbatim replacement for line NN, indentation preserved]
+    [exact verbatim replacement lines, indentation preserved]
     ```
 
-**Multi-line replacement** (lines NN–MM are post-change file line numbers):
-
-    <!-- suggestion: lines NN-MM -->
-    ```suggestion
-    [exact verbatim lines replacing NN through MM, indentation preserved]
-    ```
-
-The HTML comment carries the line range so the review lead can set `start_line`/`line` in the GitHub API call. It is invisible to GitHub when rendered.
-
-**Include** when: sequential async calls replaced by a parallel equivalent (`Promise.all`, `Task.WhenAll`, `asyncio.gather`), `SELECT *` replaced by explicit columns, string concatenation in a loop replaced by array join, regex literal moved outside a loop, etc.
-
-**Do not include** when: the fix requires adding an index to the database, introducing a caching layer, refactoring a data-access layer, or involves non-consecutive lines.
+`NN`/`MM` are post-change file line numbers; the HTML comment lets the review lead set `start_line`/`line` in the GitHub API call and renders invisibly. Skip the block when the fix requires adding a DB index, introducing a caching layer, refactoring a data-access layer, or spans non-consecutive lines.

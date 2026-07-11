@@ -23,17 +23,13 @@ The plugin does **not** use the GitHub MCP server. See `providers/github.md` for
 
 ### Credentials for `git push` (fix mode)
 
-When using `--fix`, the agent pushes commits. Pass the token at runtime:
+When using `--fix`, the agent pushes commits. `GITHUB_TOKEN` must be present in the container environment (injected at startup by the runner; for a local interactive run, pass it inline):
 
 ```bash
 GITHUB_TOKEN=ghp_your_token_here claude ...
 ```
 
-Or export in your shell:
-
-```bash
-export GITHUB_TOKEN=ghp_your_token_here
-```
+The push command itself carries the token via an inline `GIT_CONFIG_*` prefix — see `docs/git-auth.md`.
 
 ---
 
@@ -41,33 +37,18 @@ export GITHUB_TOKEN=ghp_your_token_here
 
 ### Prerequisites
 
-Install the Azure CLI and the Azure DevOps extension:
-
-```bash
-# Install Azure CLI: https://learn.microsoft.com/en-us/cli/azure/install-azure-cli
-az extension add --name azure-devops
-```
+Only `git` and `curl` are needed — the plugin calls the Azure DevOps REST API directly with a Personal Access Token (PAT). The `az` CLI is **not** used at runtime (the review procedure explicitly forbids `az login` — see the platform-exclusive CLI rule in `commands/pr-review.md`), so there is nothing to install.
 
 ### Authentication
 
-**Option A: Interactive login**
+The plugin authenticates with a Personal Access Token read from the `AZURE_DEVOPS_TOKEN` environment variable.
+
+Every run happens in a **temporary Docker container**, so there is nothing to persist in a shell profile — the token must be injected into the container environment at startup. In the containerized runner (e.g. the Xianix Executor), configure the secret on the runner/pipeline; it may arrive under the dashed key `AZURE-DEVOPS-TOKEN`, which the Executor re-exports as the underscored alias.
+
+For a local interactive run, pass it inline:
 
 ```bash
-az login
-az devops configure --defaults organization=https://dev.azure.com/<your-org>
-```
-
-**Option B: Personal Access Token (recommended for CI or scripted use)**
-
-```bash
-export AZURE_DEVOPS_TOKEN=<your-pat>
-echo $AZURE_DEVOPS_TOKEN | az devops login --org https://dev.azure.com/<your-org>
-```
-
-Add to `~/.zshrc` or `~/.bashrc` to persist:
-
-```bash
-export AZURE_DEVOPS_TOKEN=<your-pat>
+AZURE_DEVOPS_TOKEN=<your-pat> claude ...
 ```
 
 > **Variable-name hygiene (important):** reference the token as `AZURE_DEVOPS_TOKEN` — **underscores only**. Some CI systems and orchestrators (e.g. when reading from a YAML key like `azure-devops-token`) inject it as `AZURE-DEVOPS-TOKEN` with hyphens. Bash cannot reference hyphenated names (a dashed reference parses as `$AZURE` minus `DEVOPS-TOKEN`), so a dashed `curl -u ":..."` would silently send an empty password and every Azure DevOps API call would fail with 401. The Xianix Executor automatically re-exports any dashed env var as an underscored alias, so `AZURE_DEVOPS_TOKEN` is normally already set. If it is missing while a dashed `AZURE-DEVOPS-TOKEN` exists, the plugin's `PreToolUse` hook blocks with an actionable message; re-export under the underscore name:
@@ -77,13 +58,13 @@ export AZURE_DEVOPS_TOKEN=<your-pat>
 > ```
 
 **PAT scopes needed:**
-- `Code` → Read & Write
+- `Code` → Read & Write (`vso.code_write` — required to cast the reviewer vote and for fix-mode `git push`; Read alone is not enough)
 - `Pull Request Threads` → Read & Write
 - `User Profile` → Read (required to resolve the reviewer ID for casting the vote)
 
 ### Credentials for `git push` (fix mode)
 
-The plugin reuses `AZURE_DEVOPS_TOKEN` for `git push` credential injection automatically — no separate `GITHUB_TOKEN` is needed for Azure DevOps remotes.
+The plugin reuses `AZURE_DEVOPS_TOKEN` for `git push` — no separate `GITHUB_TOKEN` is needed for Azure DevOps remotes. The push command carries the token via an inline `GIT_CONFIG_*` prefix (see `docs/git-auth.md`).
 
 ### Generating a PAT
 

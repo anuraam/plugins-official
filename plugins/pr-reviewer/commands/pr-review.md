@@ -145,50 +145,98 @@ If posting the starting comment fails, output a single warning line and continue
 
 The diff is what matters. Resolve the base/head and pull the diff first — for small PRs (≤10 changed files), this is *all* the context the sub-agents need, and the codebase index in step 4 can be skipped entirely.
 
-### Resolve the base ref (robust to detached HEAD, missing remote-tracking refs, and non-`main` defaults)
+### Ensure the PR head is checked out (do this before any diff command)
 
-> **Important:** detached worktrees created by CI runners (e.g. the Xianix Executor) often have **zero** remote-tracking refs (`refs/remotes/origin/*`). `git show-ref | grep remotes` returns nothing. Resolving `origin/master` will fail. Always fall back to **local** branches and use `git merge-base` for the diff.
+The runner (e.g. the Xianix Executor) checks out the repository's **default branch** — it knows nothing about PRs. When the invocation carries a PR number, *you* resolve and check out the PR's head; the runner never does it for you. Skip this only when no PR number/branch argument was given (then the current checkout *is* what's under review).
 
 ```bash
-HEAD_SHA=$(git rev-parse HEAD)
-
-# Helper: does a ref exist?
-_have_ref() { git show-ref --verify --quiet "$1"; }
-
-# Try origin/HEAD, then origin/{main,master,develop}, then local {main,master,develop},
-# then any remote tracking branch, then any local branch other than the current one.
-BASE_REF=""
-for candidate in \
-  "$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null)" \
-  refs/remotes/origin/main refs/remotes/origin/master refs/remotes/origin/develop \
-  refs/heads/main refs/heads/master refs/heads/develop; do
-  [ -n "$candidate" ] && _have_ref "$candidate" && { BASE_REF="$candidate"; break; }
-done
-
-# Last-resort fallbacks
-if [ -z "$BASE_REF" ]; then
-  # First remote tracking branch that isn't HEAD
-  BASE_REF=$(git for-each-ref --format='%(refname)' refs/remotes/origin \
-    | grep -v '/HEAD$' | head -1)
+# PR_NUMBER = the numeric argument from the invocation (if any)
+if [ -n "${PR_NUMBER:-}" ]; then
+  # Both GitHub and Azure DevOps maintain a synthetic ref for every PR that
+  # outlives head-branch deletion. Try the platform's shape first, then the
+  # other, then (ADO) the real source branch from the PR metadata.
+  #   GitHub:       refs/pull/<n>/head   (the PR's head commit)
+  #   Azure DevOps: refs/pull/<n>/merge  (ADO exposes only the merge ref)
+  case "$PLATFORM" in
+    azure*) CANDIDATE_REFS="refs/pull/${PR_NUMBER}/merge refs/pull/${PR_NUMBER}/head" ;;
+    *)      CANDIDATE_REFS="refs/pull/${PR_NUMBER}/head refs/pull/${PR_NUMBER}/merge" ;;
+  esac
+  CHECKED_OUT=""
+  for ref in $CANDIDATE_REFS; do
+    if git fetch origin "$ref" 2>/dev/null; then
+      git checkout --detach FETCH_HEAD
+      CHECKED_OUT="$ref"
+      break
+    fi
+  done
+  if [ -z "$CHECKED_OUT" ]; then
+    # No synthetic ref reachable. On Azure DevOps this is EXPECTED when the PR
+    # has merge conflicts — ADO does not publish refs/pull/<n>/merge for
+    # conflicted PRs. Resolve the real source branch from the platform API and
+    # fetch it instead:
+    #   GitHub: SRC=$(gh pr view "$PR_NUMBER" --json headRefName --jq .headRefName)
+    #   ADO:    SRC=$PR_SOURCE (providers/azure-devops.md → Fetching PR Metadata)
+    # then:
+    #   git fetch origin "refs/heads/${SRC}" && git checkout --detach FETCH_HEAD
+    echo "WARN: no synthetic PR ref found — resolving the source branch via the platform API"
+  fi
+  echo "Checked out PR #${PR_NUMBER} via ${CHECKED_OUT:-<api-resolved branch>} at $(git rev-parse HEAD)"
+elif [ -n "${BRANCH_ARG:-}" ]; then
+  # A branch name was passed instead of a PR number.
+  git fetch origin "$BRANCH_ARG" && git checkout --detach FETCH_HEAD
 fi
-if [ -z "$BASE_REF" ]; then
-  # First local branch that isn't whatever HEAD points at
-  BASE_REF=$(git for-each-ref --format='%(refname)' refs/heads \
-    | grep -v -F "$(git symbolic-ref -q HEAD || echo /no/symbolic/ref)" | head -1)
-fi
-
-[ -z "$BASE_REF" ] && { echo "ERROR: could not resolve any base ref"; exit 1; }
-
-# Short label (e.g. "master") and a merge-base SHA we can diff against
-BASE=$(echo "$BASE_REF" | sed -e 's|^refs/remotes/origin/||' -e 's|^refs/heads/||')
-BASE_SHA=$(git merge-base "$BASE_REF" "$HEAD_SHA")
-
-echo "Base: $BASE ($BASE_REF -> $BASE_SHA)"
-echo "Head: $HEAD_SHA"
-export HEAD_SHA BASE BASE_REF BASE_SHA
 ```
 
-> On **Azure DevOps**, prefer the PR's real target branch as the base: fetch the PR metadata (see `providers/azure-devops.md` → *Fetching PR Metadata*) and resolve `$PR_TARGET` to a SHA the same way as above, then use that as `BASE_SHA`. The PR object is the source of truth for title/description/target.
+> On **Azure DevOps** the `/merge` ref points at the PR's *merge commit*; its first parent is the target tip **as of when ADO created the ref** and its second parent is the real PR head. When you checked out `refs/pull/<n>/merge`, every diff and metadata command must run against `HEAD^2` (the PR head) — never against the merge commit itself, which folds target-branch commits into what looks like the PR diff. The base-ref resolution below sets `HEAD_SHA` to `HEAD^2` automatically in this case.
+
+### Resolve the base ref (ALWAYS fetch the target branch fresh — never trust local refs)
+
+> **Why this matters:** a stale local `origin/main` (or a local `main` branch that hasn't been pulled) moves the merge-base backwards, so `BASE_SHA..HEAD` silently includes commits that are **already merged into the target branch** — the review then covers more commits than the PR actually contains. The only reliable base is the target branch tip **as it exists on the remote right now**. Detached CI worktrees (e.g. the Xianix Executor) often have zero remote-tracking refs anyway, so a fresh `git fetch` into `FETCH_HEAD` is both the correctness fix and the portability fix.
+
+**Step 1 — determine the PR's real target branch name** (do not guess `main`):
+
+- **GitHub with a PR number:** `BASE=$(gh pr view "$PR_NUMBER" --json baseRefName --jq '.baseRefName')`
+- **Azure DevOps with a PR number:** fetch the PR metadata (see `providers/azure-devops.md` → *Fetching PR Metadata*) and use `BASE="$PR_TARGET"`. The PR object is the source of truth for title/description/target.
+- **No PR number** (branch argument or current branch): use the remote's default branch — `BASE=$(git ls-remote --symref origin HEAD | awk '/^ref:/ {sub("refs/heads/","",$2); print $2}')` — falling back to `main`/`master` probing via `git ls-remote --heads origin main master` only if the symref query fails.
+
+**Step 2 — fetch that branch from the remote and diff against its fresh tip:**
+
+```bash
+# If refs/pull/<n>/merge was checked out (Azure DevOps), the real PR head is
+# the merge commit's second parent — never diff the merge commit itself.
+if [ "${CHECKED_OUT:-}" = "refs/pull/${PR_NUMBER:-}/merge" ]; then
+  HEAD_SHA=$(git rev-parse HEAD^2)
+else
+  HEAD_SHA=$(git rev-parse HEAD)
+fi
+
+# Fetch the CURRENT remote tip of the target branch. This works even in
+# worktrees with zero remote-tracking refs, and guarantees the base is not
+# a stale local copy.
+if git fetch origin "refs/heads/${BASE}" 2>/dev/null; then
+  BASE_TIP=$(git rev-parse FETCH_HEAD)
+else
+  # Offline / fetch-restricted fallback ONLY. Local refs may be stale — warn
+  # loudly so an inflated commit range is traceable to this fallback.
+  echo "WARN: could not fetch origin/${BASE} — falling back to local refs, base may be stale"
+  _have_ref() { git show-ref --verify --quiet "$1"; }
+  BASE_TIP=""
+  for candidate in "refs/remotes/origin/${BASE}" "refs/heads/${BASE}"; do
+    _have_ref "$candidate" && { BASE_TIP=$(git rev-parse "$candidate"); break; }
+  done
+fi
+
+[ -z "$BASE_TIP" ] && { echo "ERROR: could not resolve base branch '${BASE}'"; exit 1; }
+
+# Diff against the merge-base so target-only commits never appear in the range
+BASE_SHA=$(git merge-base "$BASE_TIP" "$HEAD_SHA")
+
+echo "Base: $BASE (tip $BASE_TIP -> merge-base $BASE_SHA)"
+echo "Head: $HEAD_SHA"
+export HEAD_SHA BASE BASE_SHA
+```
+
+**Sanity check (cheap, catches the stale-base bug immediately):** when a PR number is available, compare the commit count against the platform's own count — `git rev-list --count ${BASE_SHA}..${HEAD_SHA}` vs `gh pr view "$PR_NUMBER" --json commits --jq '.commits | length'` on GitHub (Azure DevOps: the PR commits endpoint). If git reports **more** commits than the platform, the base is wrong — do not proceed; re-fetch the target branch and re-resolve before diffing.
 
 Use `${BASE_SHA}` (not `origin/${BASE}`) in every diff command below — it works regardless of whether remote-tracking refs exist.
 
@@ -271,6 +319,8 @@ fi
 
 ## 4. Index the Codebase (skip on small PRs)
 
+Every line these commands print lands in your context and is paid for on every subsequent turn — keep the index small. The caps below are mandatory, not decorative.
+
 ```bash
 if [ "${CHANGED_COUNT:-0}" -le 10 ]; then
   echo "Small PR ($CHANGED_COUNT files) — skipping codebase index, diff alone is enough context."
@@ -278,18 +328,19 @@ else
   # Top-level layout
   ls -1
 
-  # Source tree (depth 3, ignore common noise)
+  # Source tree (depth 3, ignore common noise, HARD CAP at 200 lines)
   find . -maxdepth 3 \
-    -not -path './.git/*' \
-    -not -path './node_modules/*' \
-    -not -path './bin/*' \
-    -not -path './obj/*' \
-    -not -path './.vs/*' \
-    | sort
+    -name .git -prune -o \
+    -name node_modules -prune -o \
+    -name bin -prune -o \
+    -name obj -prune -o \
+    -name .vs -prune -o \
+    -name dist -prune -o \
+    -name build -prune -o \
+    -print | sort | head -200
 
-  # Language fingerprint
-  find . -not -path './.git/*' -type f \
-    | sed 's/.*\.//' | sort | uniq -c | sort -rn | head -20
+  # Language fingerprint (changed files only — the repo-wide walk is wasted tokens)
+  sed 's/.*\.//' /tmp/pr_changed_files.txt | sort | uniq -c | sort -rn | head -10
 
   # Entry points / build manifests
   ls *.sln *.csproj package.json go.mod Cargo.toml pom.xml build.gradle \
@@ -311,21 +362,26 @@ Before launching any agents:
 The review runs on the **cheap Haiku-finder path by default** (step 6A) and only **escalates to the full specialist reviewers** (step 6B) when the diff touches a high-risk surface. Detect high-risk changes from both the file list and the diff content:
 
 ```bash
-# 1. High-risk by file path
-HIGH_RISK_FILES=$(grep -iE \
-  '(auth|login|signin|session|password|passwd|secret|token|jwt|oauth|crypto|encrypt|decrypt|payment|billing|charge|invoice|checkout|migration|schema|\.sql$|webhook|/api/|/controllers?/|/routes?/|/handlers?/|iam|rbac|permission)' \
-  /tmp/pr_changed_files.txt || true)
+RISK_PATH_RE='(auth|login|signin|session|password|passwd|secret|token|jwt|oauth|crypto|encrypt|decrypt|payment|billing|charge|invoice|checkout|migration|schema|\.sql$|webhook|/api/|/controllers?/|/routes?/|/handlers?/|iam|rbac|permission)'
+RISK_CONTENT_RE='(password|secret|api[_-]?key|private[_-]?key|authorize|authenticate|hashpw|bcrypt|jwt|sql|exec\(|eval\(|subprocess|os\.system|pickle\.loads)'
 
-# 2. High-risk by changed content (added lines only)
-HIGH_RISK_DIFF=$(grep -iE '^\+' /tmp/pr_full_diff.patch \
-  | grep -iE '(password|secret|api[_-]?key|private[_-]?key|authorize|authenticate|hashpw|bcrypt|jwt|sql|exec\(|eval\(|subprocess|os\.system|pickle\.loads)' \
-  || true)
-
-if [ -n "$HIGH_RISK_FILES" ] || [ -n "$HIGH_RISK_DIFF" ]; then
+REVIEW_TIER="haiku"
+# 1. High-risk by file path — docs/images can never be a high-risk surface,
+#    so exclude them before matching (a filename like docs/token-guide.md must
+#    not escalate the whole run to the expensive specialist path).
+if grep -ivE '\.(md|markdown|rst|txt|png|jpg|jpeg|gif|svg)$' /tmp/pr_changed_files.txt \
+   | grep -qiE "$RISK_PATH_RE"; then
   REVIEW_TIER="specialists"
+# 2. High-risk by changed content. '^\+[^+]' matches added lines ONLY — a bare
+#    '^\+' also matches '+++ b/<path>' file headers, which escalates PRs whose
+#    filenames merely contain words like "token" or "sql".
+elif grep -E '^\+[^+]' /tmp/pr_full_diff.patch | grep -qiE "$RISK_CONTENT_RE"; then
+  REVIEW_TIER="specialists"
+fi
+
+if [ "$REVIEW_TIER" = "specialists" ]; then
   echo "High-risk surface detected — escalating to specialist reviewers."
 else
-  REVIEW_TIER="haiku"
   echo "No high-risk surface — using low-cost Haiku finder path."
 fi
 export REVIEW_TIER
@@ -366,24 +422,53 @@ Concatenate the snippets into `/tmp/pr_context.txt` (a filepath header before ea
 
 Then emit **both Agent calls in the same assistant turn** (so they run in parallel). Both **must** set `"model": "claude-haiku-4-5"`. Neither agent may call `Read`, `Bash`, `Grep`, or any other tool — they work only from the two files named in the prompt.
 
-**Agent 1 — Correctness & regressions**
+Both prompts share the same shell and tail. Compose each prompt as: the **shared header**, then the agent's **focus list** (below), then the **shared output-format tail**.
 
-```json
-{
-  "description": "Correctness & regression finder",
-  "model": "claude-haiku-4-5",
-  "prompt": "Read /tmp/pr_full_diff.patch then /tmp/pr_context.txt.\n\nFind correctness bugs and behavioural regressions introduced by the diff. Focus on:\n- Logic errors in changed code paths\n- Changed conditions that now allow or block cases they shouldn't\n- Null / empty / zero edge cases on new code paths\n- Removed guards that previously protected against a bad state\n- Interface/contract mismatches between callers and the changed function\n\nFor each finding output exactly:\nFILE: <path>\nLINE: <post-change file line number from the @@ hunk header's +new start plus the offset of the flagged + line within that hunk; never the diff's own line position>\nSEVERITY: CRITICAL | WARNING\nISSUE: <one sentence>\nSUGGESTION_START_LINE: <line number, only when the fix is a concrete drop-in single-line or consecutive-block replacement; omit otherwise>\nSUGGESTION_END_LINE: <last line of the replacement block; same as SUGGESTION_START_LINE for a single-line fix; omit if no suggestion>\nSUGGESTION_CODE: <verbatim replacement lines with indentation preserved exactly; omit if no suggestion>\n\nInclude SUGGESTION_* fields only when the fix is an unambiguous drop-in swap (wrong value, missing guard, insecure call replaced by its safe equivalent). Omit for architectural or design-level fixes.\n\nIf you find nothing, output: NONE\nDo not call any tools."
-}
+**Shared header (start of both prompts):**
+
+```
+Read /tmp/pr_full_diff.patch then /tmp/pr_context.txt.
 ```
 
-**Agent 2 — Security & edge cases**
+**Shared output-format tail (end of both prompts, verbatim):**
 
-```json
-{
-  "description": "Security & edge-case finder",
-  "model": "claude-haiku-4-5",
-  "prompt": "Read /tmp/pr_full_diff.patch then /tmp/pr_context.txt.\n\nFind security issues and missing edge-case handling in the diff. Focus on:\n- Input not validated before use (injection, path traversal)\n- Authentication or authorisation checks removed or weakened\n- Sensitive data written to logs\n- Exception or error paths that swallow failures silently\n- Resource leaks (connections, file handles) on error paths\n- Off-by-one errors or boundary conditions in new loops/ranges\n\nFor each finding output exactly:\nFILE: <path>\nLINE: <post-change file line number from the @@ hunk header's +new start plus the offset of the flagged + line within that hunk; never the diff's own line position>\nSEVERITY: CRITICAL | WARNING | SUGGESTION\nISSUE: <one sentence>\nSUGGESTION_START_LINE: <line number, only when the fix is a concrete drop-in single-line or consecutive-block replacement; omit otherwise>\nSUGGESTION_END_LINE: <last line of the replacement block; same as SUGGESTION_START_LINE for a single-line fix; omit if no suggestion>\nSUGGESTION_CODE: <verbatim replacement lines with indentation preserved exactly; omit if no suggestion>\n\nInclude SUGGESTION_* fields only when the fix is an unambiguous drop-in swap (wrong value, missing guard, insecure call replaced by its safe equivalent). Omit for architectural or design-level fixes.\n\nIf you find nothing, output: NONE\nDo not call any tools."
-}
+```
+For each finding output exactly:
+FILE: <path>
+LINE: <post-change file line number from the @@ hunk header's +new start plus the offset of the flagged + line within that hunk; never the diff's own line position>
+SEVERITY: CRITICAL | WARNING | SUGGESTION
+ISSUE: <one sentence>
+SUGGESTION_START_LINE: <line number, only when the fix is a concrete drop-in single-line or consecutive-block replacement; omit otherwise>
+SUGGESTION_END_LINE: <last line of the replacement block; same as SUGGESTION_START_LINE for a single-line fix; omit if no suggestion>
+SUGGESTION_CODE: <verbatim replacement lines with indentation preserved exactly; omit if no suggestion>
+
+Include SUGGESTION_* fields only when the fix is an unambiguous drop-in swap (wrong value, missing guard, insecure call replaced by its safe equivalent). Omit for architectural or design-level fixes.
+
+If you find nothing, output: NONE
+Do not call any tools.
+```
+
+**Agent 1 — Correctness & regressions** (`"description": "Correctness & regression finder"`), focus list:
+
+```
+Find correctness bugs and behavioural regressions introduced by the diff. Focus on:
+- Logic errors in changed code paths
+- Changed conditions that now allow or block cases they shouldn't
+- Null / empty / zero edge cases on new code paths
+- Removed guards that previously protected against a bad state
+- Interface/contract mismatches between callers and the changed function
+```
+
+**Agent 2 — Security & edge cases** (`"description": "Security & edge-case finder"`), focus list:
+
+```
+Find security issues and missing edge-case handling in the diff. Focus on:
+- Input not validated before use (injection, path traversal)
+- Authentication or authorisation checks removed or weakened
+- Sensitive data written to logs
+- Exception or error paths that swallow failures silently
+- Resource leaks (connections, file handles) on error paths
+- Off-by-one errors or boundary conditions in new loops/ranges
 ```
 
 **Verify and compile (you are the verifier — no extra agents).** For each finding from both agents: (1) confirm the flagged line appears in `/tmp/pr_full_diff.patch` as a `+` line (new code, not pre-existing); (2) discard pre-existing issues, linter/compiler-caught problems, pedantic style, and obvious false positives; (3) merge duplicates and **cap at 8 findings**, ranked CRITICAL → WARNING → SUGGESTION; (4) **preserve the `SUGGESTION_START_LINE` / `SUGGESTION_END_LINE` / `SUGGESTION_CODE` fields verbatim** — they will be extracted in the "Extract suggestion annotations" step before posting and are what enables the GitHub "Commit suggestion" button. Then go to step 7.
@@ -521,9 +606,23 @@ One commit per logical fix. Commit message format: `fix: <description>`.
 
 ### 3. Push to the PR branch
 
+The run executes in a temporary Docker container with no stored git credentials, and the `PreToolUse` hook cannot export variables into your shell (it only validates that the token exists). Carry the token **inline on the push command itself** via env-scoped git config:
+
 ```bash
+REMOTE_URL=$(git remote get-url origin)
+REMOTE_HOST=$(echo "$REMOTE_URL" | sed -E 's|^[a-z+]+://||; s|^[^@/]+@||; s|[:/].*$||')
+case "$REMOTE_URL" in
+  *dev.azure.com*|*visualstudio.com*) PUSH_TOKEN="${AZURE_DEVOPS_TOKEN}" ;;
+  *)                                  PUSH_TOKEN="${GITHUB_TOKEN}" ;;
+esac
+
+GIT_CONFIG_COUNT=1 \
+GIT_CONFIG_KEY_0="url.https://x-access-token:${PUSH_TOKEN}@${REMOTE_HOST}/.insteadOf" \
+GIT_CONFIG_VALUE_0="https://${REMOTE_HOST}/" \
 git push origin HEAD
 ```
+
+The `GIT_CONFIG_*` prefix scopes the credential to this single command — nothing is written to disk or `~/.gitconfig`, and nothing needs to persist in the throwaway container.
 
 ### 4. Post a fix summary comment
 

@@ -53,11 +53,14 @@ Called from Step 3 of `commands/pr-review.md` to decide initial vs. re-review mo
 GitHub's REST review-comments endpoint returns comment bodies and ids but **not** the review-thread node id needed to resolve a thread. GraphQL returns both, so use it:
 
 ```bash
-gh api graphql -f query='
-  query($owner:String!, $repo:String!, $pr:Int!) {
+# --paginate + --slurp follows the endCursor automatically and emits a JSON
+# array of pages, so PRs with >100 review threads are still fully reconciled.
+gh api graphql --paginate --slurp -f query='
+  query($owner:String!, $repo:String!, $pr:Int!, $endCursor:String) {
     repository(owner:$owner, name:$repo) {
       pullRequest(number:$pr) {
-        reviewThreads(first:100) {
+        reviewThreads(first:100, after:$endCursor) {
+          pageInfo { hasNextPage endCursor }
           nodes {
             id
             isResolved
@@ -71,8 +74,12 @@ gh api graphql -f query='
 # Extract our marked finding threads → /tmp/pr_prior_findings.jsonl
 python3 - <<'PY' > /tmp/pr_prior_findings.jsonl
 import json, re
-data = json.load(open('/tmp/pr_review_threads.json'))
-threads = data['data']['repository']['pullRequest']['reviewThreads']['nodes']
+pages = json.load(open('/tmp/pr_review_threads.json'))
+if isinstance(pages, dict):   # older gh without --slurp support returns one page
+    pages = [pages]
+threads = []
+for page in pages:
+    threads += page['data']['repository']['pullRequest']['reviewThreads']['nodes']
 pat = re.compile(r'<!--\s*pr-reviewer:v1\s+kind=finding\s+fid=(\S+)\s+sha=(\S+)\s*-->')
 for t in threads:
     c = (t['comments']['nodes'] or [None])[0]
@@ -89,8 +96,11 @@ for t in threads:
     }))
 PY
 
-# Most-recent summary marker sha (PR-level review/issue comments carry kind=summary)
-PRIOR_SUMMARY_SHA=$(gh api "repos/${OWNER}/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
+# Most-recent summary marker sha. The summary marker is stamped on the body of
+# the review posted with `gh pr review` — reviews live on the PULLS reviews
+# endpoint, NOT on the issue-comments endpoint (which only holds `gh pr comment`
+# output, e.g. the unmarked "review in progress" comment).
+PRIOR_SUMMARY_SHA=$(gh api "repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}/reviews" --paginate \
   --jq '.[].body' 2>/dev/null \
   | grep -oE 'pr-reviewer:v1 kind=summary[^>]*sha=[0-9a-f]+' \
   | tail -1 | grep -oE 'sha=[0-9a-f]+' | cut -d= -f2)
@@ -101,29 +111,23 @@ If `/tmp/pr_prior_findings.jsonl` is empty, the run is an **initial** review. Th
 
 ---
 
-## Posting the “review in progress” comment
+## Posting the "review in progress" comment
 
 ```bash
-PLUGIN_VERSION=$(python3 -c “
-import json, os
-for p in [
-    os.path.expanduser('~/.claude/plugins/pr-reviewer/.claude-plugin/plugin.json'),
-    os.path.expanduser('~/Library/Application Support/Claude/plugins/pr-reviewer/.claude-plugin/plugin.json'),
-]:
-    try:
-        print(json.load(open(p))['version']); break
-    except: pass
-else: print('unknown')
-“ 2>/dev/null || echo “unknown”)
+# Best-effort version stamp — cosmetic only, never spend more than one command on it.
+PLUGIN_VERSION=$(grep -hom1 '"version"[^,}]*' ~/.claude/plugins/pr-reviewer/.claude-plugin/plugin.json \
+  "$HOME/Library/Application Support/Claude/plugins/pr-reviewer/.claude-plugin/plugin.json" 2>/dev/null \
+  | cut -d'"' -f4)
+PLUGIN_VERSION=${PLUGIN_VERSION:-unknown}
 
-gh pr comment <pr-number> --body “$(cat <<EOF
+gh pr comment <pr-number> --body "$(cat <<EOF
 🔍 PR Review in Progress
 
 Claude Code is analyzing this pull request. The review will be posted here shortly.
 
 PR Reviewer (${PLUGIN_VERSION})
 EOF
-)”
+)"
 ```
 
 If posting fails, output one warning line and continue.
@@ -250,17 +254,24 @@ while IFS= read -r line; do
   [ -z "$line" ] && continue
   INLINE_TOTAL=$((INLINE_TOTAL + 1))
 
-  F_PATH=$(echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin)['file'])")
-  F_LINE=$(echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin)['line'])")
-  F_FID=$(echo "$line"  | python3 -c "import sys,json; print(json.load(sys.stdin).get('fid',''))")
-  # Body is copied verbatim — sub-agents write ```suggestion blocks directly, GitHub renders the button.
-  echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin)['body'])" > /tmp/pr_inline_body.md
+  # One python call extracts every field AND writes the body file (5 separate
+  # per-finding python invocations is pure process overhead). Body is copied
+  # verbatim — sub-agents write ```suggestion blocks directly, GitHub renders the button.
+  # printf '%s' (not echo) — echo interprets \n escapes in some shells and corrupts the JSON.
+  eval "$(printf '%s' "$line" | python3 -c "
+import sys, json, shlex
+d = json.load(sys.stdin)
+open('/tmp/pr_inline_body.md', 'w').write(d['body'])
+print('F_PATH=' + shlex.quote(str(d['file'])))
+print('F_LINE=' + shlex.quote(str(d['line'])))
+print('F_FID=' + shlex.quote(str(d.get('fid', ''))))
+print('F_SUGGEST_START=' + shlex.quote(str(d.get('suggestion_start_line', ''))))
+")"
 
   # Append the hidden finding marker so the next re-review can reconcile this comment.
   printf '\n\n<!-- pr-reviewer:v1 kind=finding fid=%s sha=%s -->\n' "$F_FID" "$COMMIT_ID" >> /tmp/pr_inline_body.md
 
   # For multi-line suggestions, pass start_line + start_side so GitHub anchors the block correctly.
-  F_SUGGEST_START=$(echo "$line" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('suggestion_start_line',''))" 2>/dev/null || true)
   SUGGESTION_ARGS=""
   if [ -n "$F_SUGGEST_START" ] && [ "$F_SUGGEST_START" != "$F_LINE" ]; then
     SUGGESTION_ARGS="--field start_line=${F_SUGGEST_START} --field start_side=RIGHT"

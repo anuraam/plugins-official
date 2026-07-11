@@ -10,7 +10,7 @@ Required environment variable:
 
 | Variable | Purpose |
 |---|---|
-| `AZURE_DEVOPS_TOKEN` | Azure DevOps PAT — must have `Code (Read)`, `Pull Request Threads (Read & Write)`, and `User Profile (Read)` scopes |
+| `AZURE_DEVOPS_TOKEN` | Azure DevOps PAT — must have `Code (Read & Write)` (`vso.code_write` — casting the reviewer vote and fix-mode `git push` need write; plain `Code (Read)` cannot vote), `Pull Request Threads (Read & Write)`, and `User Profile (Read)` scopes |
 
 > **Note on var-name hygiene:** reference the token as `AZURE_DEVOPS_TOKEN` (**underscores**) everywhere in bash. The framework may inject the secret under the dashed key `AZURE-DEVOPS-TOKEN`; bash cannot reference hyphenated names (a dashed reference parses as `$AZURE` minus `DEVOPS-TOKEN`) and would silently send an empty password. The Xianix Executor re-exports any dashed env var as an underscored alias, so `AZURE_DEVOPS_TOKEN` is the referenceable name. If it is empty but a dashed `AZURE-DEVOPS-TOKEN` exists, the plugin's `PreToolUse` hook blocks with a re-export command.
 
@@ -41,6 +41,19 @@ Use the parser below — it anchors on the `_git` segment (always exactly one po
 
 ```bash
 REMOTE=$(git remote get-url origin)
+
+# Normalise SSH remotes to the canonical https shape first, so the _git-anchored
+# parser below only has to handle one format. SSH shapes in the wild:
+#   git@ssh.dev.azure.com:v3/{org}/{project}/{repo}
+#   ssh://git@ssh.dev.azure.com/v3/{org}/{project}/{repo}
+#   {org}@vs-ssh.visualstudio.com:v3/{org}/{project}/{repo}
+if echo "$REMOTE" | grep -qE '(ssh\.dev\.azure\.com|vs-ssh\.visualstudio\.com)'; then
+  V3_PATH=$(echo "$REMOTE" | sed -E 's|^ssh://||; s|^[^@]+@||; s|^[^:/]+[:/]+||')
+  V3_ORG=$(echo "$V3_PATH" | cut -d/ -f2)
+  V3_PROJECT=$(echo "$V3_PATH" | cut -d/ -f3)
+  V3_REPO=$(echo "$V3_PATH" | cut -d/ -f4)
+  REMOTE="https://dev.azure.com/${V3_ORG}/${V3_PROJECT}/_git/${V3_REPO}"
+fi
 
 # Strip optional "user@" basic-auth prefix and any trailing .git
 REMOTE_CLEAN=$(echo "$REMOTE" | sed -E 's|https?://[^@]+@|https://|; s|\.git$||')
@@ -149,7 +162,7 @@ PY
 # 3. POST and check status
 RESP=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
   -H "Content-Type: application/json" \
-  -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 -w0)" \
+  -u ":${AZURE_DEVOPS_TOKEN}" \
   -X POST \
   --data @/tmp/pr_thread_payload.json \
   "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads?api-version=7.1")
@@ -186,7 +199,7 @@ PY
 
 Then POST exactly as in step 3 above.
 
-> **Authentication note:** Both `-u ":${AZURE_DEVOPS_TOKEN}"` and `-H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 -w0)"` work for Azure DevOps PAT auth. The `-H` form is shown above because it makes the auth header visible in `curl -v` traces and is what the model converges on in practice.
+> **Authentication note:** always use `curl -u ":${AZURE_DEVOPS_TOKEN}"` — curl builds the Basic header itself and it is portable. Do **not** hand-roll the header with `base64 -w0`: the `-w` flag is GNU-only and fails on macOS/BSD (`base64: invalid option -- w`), silently sending a broken header. If you must construct the header manually, use `printf '%s' ":${AZURE_DEVOPS_TOKEN}" | base64 | tr -d '\n'`.
 
 ---
 
@@ -232,7 +245,7 @@ PR_AUTHOR_EMAIL=$(echo "$PR_JSON" | python3 -c "import sys,json; d=json.load(sys
 export PR_TITLE PR_DESC PR_SOURCE PR_TARGET PR_AUTHOR PR_AUTHOR_EMAIL
 ```
 
-Use `$PR_TARGET` as the **base branch** for diffs. Resolve it to a concrete SHA the same way Step 3 of `commands/pr-review.md` does — try `refs/remotes/origin/${PR_TARGET}` first, then fall back to `refs/heads/${PR_TARGET}` (worktrees may not have remote-tracking refs), then take `git merge-base` against `HEAD`.
+Use `$PR_TARGET` as the **base branch** for diffs. Resolve it to a concrete SHA the same way Step 3 of `commands/pr-review.md` does — **always `git fetch origin "refs/heads/${PR_TARGET}"` first and use `FETCH_HEAD` as the base tip** (local `refs/remotes/origin/${PR_TARGET}` or `refs/heads/${PR_TARGET}` may be stale and would inflate the diff with commits already merged into the target), then take `git merge-base` against the PR head. Remember: if `refs/pull/<n>/merge` was checked out, the PR head is `HEAD^2`, not `HEAD`.
 
 ---
 
@@ -309,17 +322,11 @@ The posting pattern above includes this on every call.
 Before running any analysis, post a plain PR comment thread to inform the author that a review is underway. This fires as the very first action on Azure DevOps, before sub-agents are launched.
 
 ```bash
-PLUGIN_VERSION=$(python3 -c "
-import json, os
-for p in [
-    os.path.expanduser('~/.claude/plugins/pr-reviewer/.claude-plugin/plugin.json'),
-    os.path.expanduser('~/Library/Application Support/Claude/plugins/pr-reviewer/.claude-plugin/plugin.json'),
-]:
-    try:
-        print(json.load(open(p))['version']); break
-    except: pass
-else: print('unknown')
-" 2>/dev/null || echo "unknown")
+# Best-effort version stamp — cosmetic only, never spend more than one command on it.
+PLUGIN_VERSION=$(grep -hom1 '"version"[^,}]*' ~/.claude/plugins/pr-reviewer/.claude-plugin/plugin.json \
+  "$HOME/Library/Application Support/Claude/plugins/pr-reviewer/.claude-plugin/plugin.json" 2>/dev/null \
+  | cut -d'"' -f4)
+PLUGIN_VERSION=${PLUGIN_VERSION:-unknown}
 
 cat > /tmp/pr_thread_body.md <<BODY
 🔍 PR Review in Progress
@@ -341,7 +348,7 @@ PY
 
 curl -sS -w "\nHTTP_STATUS:%{http_code}\n" \
   -H "Content-Type: application/json" \
-  -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 -w0)" \
+  -u ":${AZURE_DEVOPS_TOKEN}" \
   -X POST --data @/tmp/pr_thread_payload.json \
   "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads?api-version=7.1"
 ```
@@ -412,7 +419,7 @@ esac
 
 ```bash
 REVIEWER_ID=$(curl -sS \
-  -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 -w0)" \
+  -u ":${AZURE_DEVOPS_TOKEN}" \
   "https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1" \
   | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))")
 
@@ -421,7 +428,7 @@ if [ -z "$REVIEWER_ID" ]; then
 else
   VOTE_RESP=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
     -H "Content-Type: application/json" \
-    -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 -w0)" \
+    -u ":${AZURE_DEVOPS_TOKEN}" \
     -X PUT \
     "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/reviewers/${REVIEWER_ID}?api-version=7.1" \
     -d "{\"vote\": ${VOTE}, \"id\": \"${REVIEWER_ID}\"}")
@@ -439,10 +446,10 @@ fi
 
 ### 3. Post the full report as a PR thread
 
+Write the **compiled report text itself** into `/tmp/pr_thread_body.md` (with the `Write` tool or a heredoc containing the actual markdown). Do not write a `${REPORT_BODY}` placeholder inside a quoted (`<<'EOF'`) heredoc — quoting suppresses expansion and the literal string `${REPORT_BODY}` gets posted to the PR.
+
 ```bash
-cat > /tmp/pr_thread_body.md <<'REPORT'
-${REPORT_BODY}
-REPORT
+# /tmp/pr_thread_body.md now contains the full compiled report markdown
 
 HEAD_SHA=$(git rev-parse HEAD) python3 - <<'PY' > /tmp/pr_thread_payload.json
 import json, os
@@ -460,12 +467,12 @@ PY
 
 curl -sS -w "\nHTTP_STATUS:%{http_code}\n" \
   -H "Content-Type: application/json" \
-  -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 -w0)" \
+  -u ":${AZURE_DEVOPS_TOKEN}" \
   -X POST --data @/tmp/pr_thread_payload.json \
   "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads?api-version=7.1"
 ```
 
-> The `pr-reviewer.kind` / `pr-reviewer.sha` properties are the summary marker — they let the next run find this thread and read the head it was generated against. The re-review delta block is already in `${REPORT_BODY}` from step 7. Each re-review posts a fresh summary thread; the prior summary stays as history.
+> The `pr-reviewer.kind` / `pr-reviewer.sha` properties are the summary marker — they let the next run find this thread and read the head it was generated against. The re-review delta block is already in the compiled report body from step 7. Each re-review posts a fresh summary thread; the prior summary stays as history.
 
 ### 4. Post inline comments (one thread per finding) — MANDATORY
 
@@ -533,7 +540,7 @@ PY
 
   RESP=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
     -H "Content-Type: application/json" \
-    -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 -w0)" \
+    -u ":${AZURE_DEVOPS_TOKEN}" \
     -X POST --data @/tmp/pr_thread_payload.json \
     "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads?api-version=7.1")
 
@@ -600,14 +607,14 @@ print(json.dumps({"content": open('/tmp/pr_resolve_body.md').read(), "commentTyp
 PY
   curl -sS -o /dev/null \
     -H "Content-Type: application/json" \
-    -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 -w0)" \
+    -u ":${AZURE_DEVOPS_TOKEN}" \
     -X POST --data @/tmp/pr_resolve_payload.json \
     "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads/${THREAD_ID}/comments?api-version=7.1"
 
   # 2. Set thread status to fixed
   RESP=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
     -H "Content-Type: application/json" \
-    -H "Authorization: Basic $(echo -n ":${AZURE_DEVOPS_TOKEN}" | base64 -w0)" \
+    -u ":${AZURE_DEVOPS_TOKEN}" \
     -X PATCH -d '{"status":"fixed"}' \
     "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads/${THREAD_ID}?api-version=7.1")
   STATUS=$(echo "$RESP" | sed -n 's/^HTTP_STATUS://p')
