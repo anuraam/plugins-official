@@ -164,8 +164,8 @@ The verdict label in the report body, the Critical Issues section, and the inlin
 
 ```bash
 # Detect self-review (author == authenticated user) — GitHub blocks --approve on own PRs
-PR_AUTHOR=$(gh pr view "$PR_NUMBER" --json author --jq -r '.author.login')
-CURRENT_USER=$(gh api user --jq -r '.login' 2>/dev/null || echo "")
+PR_AUTHOR=$(gh pr view "$PR_NUMBER" --json author --jq '.author.login')
+CURRENT_USER=$(gh api user --jq '.login' 2>/dev/null || echo "")
 SELF_REVIEW=false
 if [ -n "$CURRENT_USER" ] && [ "$PR_AUTHOR" = "$CURRENT_USER" ]; then
   SELF_REVIEW=true

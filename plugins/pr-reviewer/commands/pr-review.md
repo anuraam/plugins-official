@@ -180,7 +180,7 @@ if [ -n "${PR_NUMBER:-}" ]; then
         exit 1
         ;;
       *)
-        SRC=$(gh pr view "$PR_NUMBER" --json headRefName --jq -r '.headRefName')
+        SRC=$(gh pr view "$PR_NUMBER" --json headRefName --jq '.headRefName')
         git fetch origin "refs/heads/${SRC}"
         git checkout --detach FETCH_HEAD
         CHECKED_OUT="refs/heads/${SRC}"
@@ -295,19 +295,20 @@ awk '
 echo "Annotated diff written: $(wc -l < /tmp/pr_full_diff_numbered.patch) lines"
 
 # --- 7. Persist state for later tool calls ---
-cat > /tmp/pr_state.env <<EOF
-HEAD_SHA=$HEAD_SHA
-BASE_SHA=$BASE_SHA
-BASE=$BASE
-BASE_TIP=$BASE_TIP
-CHANGED_COUNT=$CHANGED_COUNT
-CHECKED_OUT=$CHECKED_OUT
-CURRENT_BRANCH=$CURRENT_BRANCH
-PR_TITLE=$(printf '%s' "${PR_TITLE:-}" | sed "s/'/'\\\\''/g")
-PR_BODY=$(printf '%s' "${PR_BODY:-}" | sed "s/'/'\\\\''/g")
-PR_AUTHOR=$(printf '%s' "${PR_AUTHOR:-}" | sed "s/'/'\\\\''/g")
-PR_HEAD_BRANCH=$(printf '%s' "${PR_HEAD_BRANCH:-}" | sed "s/'/'\\\\''/g")
-EOF
+# Use printf %q so titles/bodies with spaces, quotes, or newlines survive `source`.
+{
+  echo "HEAD_SHA=$HEAD_SHA"
+  echo "BASE_SHA=$BASE_SHA"
+  echo "BASE=$BASE"
+  echo "BASE_TIP=$BASE_TIP"
+  echo "CHANGED_COUNT=$CHANGED_COUNT"
+  echo "CHECKED_OUT=$CHECKED_OUT"
+  printf 'CURRENT_BRANCH=%q\n' "${CURRENT_BRANCH:-}"
+  printf 'PR_TITLE=%q\n' "${PR_TITLE:-}"
+  printf 'PR_BODY=%q\n' "${PR_BODY:-}"
+  printf 'PR_AUTHOR=%q\n' "${PR_AUTHOR:-}"
+  printf 'PR_HEAD_BRANCH=%q\n' "${PR_HEAD_BRANCH:-}"
+} > /tmp/pr_state.env
 echo "State written to /tmp/pr_state.env"
 ```
 
