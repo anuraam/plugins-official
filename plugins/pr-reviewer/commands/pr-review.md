@@ -268,6 +268,37 @@ export CHANGED_COUNT
 
 Writing the diff to `/tmp/pr_full_diff.patch` lets you pass it by **path** to sub-agents instead of by value — much smaller prompts when the diff is large.
 
+### Annotate the diff with real post-change line numbers (do this now — it is what stops out-of-range line numbers)
+
+> **Why this exists.** The single most common review defect is a finding that cites a line number **larger than the file** (or simply the wrong line). It happens because a model asked to *compute* a post-change line number from a `@@ -old,+new @@` header — "the `+new` start plus the offset of the flagged line" — gets the arithmetic wrong or hallucinates. The fix is to never make the model do that arithmetic: pre-compute the real new-side line number for every line and print it in the margin, so the reviewer just copies the number it sees.
+
+Produce `/tmp/pr_full_diff_numbered.patch`, a copy of the full diff where every context and added (`+`) line is prefixed with its **actual line number in the new version of the file**. Deleted (`-`) lines get a `-` marker and no number (they don't exist post-change). This annotated file — not the raw patch — is the authoritative input the reviewers read for line numbers.
+
+```bash
+# Walk the unified diff, tracking the new-side line counter from each hunk
+# header, and prefix every kept line with its post-change file line number.
+# `s + 0` parses the leading integer of "<newStart>,<len> @@ ..."; index(s,"+")
+# finds the new-range marker (the old range uses "-"), so this is portable awk
+# (no gawk-only 3-arg match()).
+awk '
+  /^@@/ {
+    s = substr($0, index($0, "+") + 1); newln = s + 0
+    print "      | " $0; next
+  }
+  /^(diff |index |--- |\+\+\+ |new file|deleted file|similarity|rename |Binary )/ {
+    print "      | " $0; next
+  }
+  /^\+/ { printf "%5d |+%s\n", newln, substr($0, 2); newln++; next }
+  /^ /  { printf "%5d | %s\n", newln, substr($0, 2); newln++; next }
+  /^-/  { printf "    - |-%s\n", substr($0, 2); next }
+  { print "      | " $0 }
+' /tmp/pr_full_diff.patch > /tmp/pr_full_diff_numbered.patch
+
+echo "Annotated diff written: $(wc -l < /tmp/pr_full_diff_numbered.patch) lines"
+```
+
+Each kept line now looks like `  147 |+    var x = ParseSubject(dn);` — the number left of the `|` is the exact line to cite. A reviewer physically cannot emit a line number past the end of the file, because the largest number the annotator ever prints equals the file's new length. Reviewers must **copy** this number, never recompute it.
+
 > **Anti-pattern:** Do NOT `cat <<'DIFF_EOF' ... DIFF_EOF` the diff back to yourself in a subsequent `Bash` call. The diff is already in your conversation history once you ran `git diff`. Echoing it back wastes a turn and tokens; if you need it as a file, you already wrote it to `/tmp/pr_full_diff.patch` above.
 
 Use `git show ${HEAD_SHA}:<filepath>` or the `Read` tool to read the full content of any file that requires deeper analysis beyond the patch.
@@ -398,8 +429,8 @@ Run **exactly one** of the two paths below, chosen by `REVIEW_TIER` from step 5.
 
 **Constraints every sub-agent prompt below must include, verbatim:**
 
-- A reminder: *"Do not re-fetch git data; the diff at /tmp/pr_full_diff.patch is authoritative. Return findings only."*
-- A line-number constraint: *"Every `path/to/file.ext:NN` reference must use the POST-CHANGE file line number — the line as it appears in the new version of the file. Derive `NN` from the `@@ -old,+new @@` hunk header's `+new` start plus the offset of the flagged `+` line within that hunk. Never report the diff's own line position or an old-side line number. Findings on deleted (`-`) lines must reference the nearest surviving line."*
+- A reminder: *"Do not re-fetch git data; the annotated diff at /tmp/pr_full_diff_numbered.patch is authoritative. Return findings only."*
+- A line-number constraint: *"Every `path/to/file.ext:NN` reference must be the POST-CHANGE file line number, and you must READ it — never compute it. In /tmp/pr_full_diff_numbered.patch every context and added (`+`) line is prefixed with `<lineno> |`; `NN` is exactly that number for the flagged line. Copy it verbatim. Never do hunk-header arithmetic, never report the diff's own line position, and never emit a number larger than the file. Findings on deleted (`-`) lines (marked `- |`) have no post-change line — reference the nearest surviving numbered line instead."*
 - A suggestion constraint: *"For findings where the fix is a concrete, drop-in replacement (wrong identifier, missing null guard, insecure call swapped for safe equivalent, etc.), add a native GitHub suggestion block immediately after the `**Fix:**` block. Prefix it with an HTML comment that carries the line range, then a ` ```suggestion ` fenced block containing the verbatim replacement lines with indentation preserved. Example for a single-line fix: `<!-- suggestion: line NN -->` on its own line, then ` ```suggestion `, then the replacement line, then ` ``` `. For multi-line: `<!-- suggestion: lines NN-MM -->`. Do not include this for architectural improvements or fixes requiring author judgment."*
 
 > **Diff size (used by both paths):**
@@ -427,7 +458,7 @@ Both prompts share the same shell and tail. Compose each prompt as: the **shared
 **Shared header (start of both prompts):**
 
 ```
-Read /tmp/pr_full_diff.patch then /tmp/pr_context.txt.
+Read /tmp/pr_full_diff_numbered.patch then /tmp/pr_context.txt. The numbered diff prefixes every context/added line with its real post-change file line number (`<lineno> |`); use those numbers for LINE — never compute a line number.
 ```
 
 **Shared output-format tail (end of both prompts, verbatim):**
@@ -435,7 +466,7 @@ Read /tmp/pr_full_diff.patch then /tmp/pr_context.txt.
 ```
 For each finding output exactly:
 FILE: <path>
-LINE: <post-change file line number from the @@ hunk header's +new start plus the offset of the flagged + line within that hunk; never the diff's own line position>
+LINE: <the number printed left of the `|` on the flagged line in /tmp/pr_full_diff_numbered.patch — copied verbatim, never computed, never the diff's own line position, never larger than the file>
 SEVERITY: CRITICAL | WARNING | SUGGESTION
 ISSUE: <one sentence>
 SUGGESTION_START_LINE: <line number, only when the fix is a concrete drop-in single-line or consecutive-block replacement; omit otherwise>
@@ -471,7 +502,7 @@ Find security issues and missing edge-case handling in the diff. Focus on:
 - Off-by-one errors or boundary conditions in new loops/ranges
 ```
 
-**Verify and compile (you are the verifier — no extra agents).** For each finding from both agents: (1) confirm the flagged line appears in `/tmp/pr_full_diff.patch` as a `+` line (new code, not pre-existing); (2) discard pre-existing issues, linter/compiler-caught problems, pedantic style, and obvious false positives; (3) merge duplicates and **cap at 8 findings**, ranked CRITICAL → WARNING → SUGGESTION; (4) **preserve the `SUGGESTION_START_LINE` / `SUGGESTION_END_LINE` / `SUGGESTION_CODE` fields verbatim** — they will be extracted in the "Extract suggestion annotations" step before posting and are what enables the GitHub "Commit suggestion" button. Then go to step 7.
+**Verify and compile (you are the verifier — no extra agents).** For each finding from both agents: (1) confirm the flagged line appears in `/tmp/pr_full_diff_numbered.patch` as a `+` line (new code, not pre-existing) and that the reported `LINE` matches the number printed in that line's margin — **if the line number is missing, does not match the margin, or exceeds the file's length, correct it to the margin number of the flagged code before keeping the finding** (this is the guard against out-of-range citations like `:466` on a 322-line file); (2) discard pre-existing issues, linter/compiler-caught problems, pedantic style, and obvious false positives; (3) merge duplicates and **cap at 8 findings**, ranked CRITICAL → WARNING → SUGGESTION; (4) **preserve the `SUGGESTION_START_LINE` / `SUGGESTION_END_LINE` / `SUGGESTION_CODE` fields verbatim** — they will be extracted in the "Extract suggestion annotations" step before posting and are what enables the GitHub "Commit suggestion" button. Then go to step 7.
 
 ---
 
@@ -490,12 +521,12 @@ Deeper coverage for high-risk diffs. Run `code-reviewer` **always**; gate the ot
 
 In **one assistant turn**, emit one parallel sub-agent invocation per selected reviewer (between 1 and 4). Each invocation prompt must include, in addition to the two shared constraints above:
 
-- The path `/tmp/pr_full_diff.patch` and the path `/tmp/pr_changed_files.txt`
+- The path `/tmp/pr_full_diff_numbered.patch` (the line-number-annotated diff — the authoritative source for `NN`) and the path `/tmp/pr_changed_files.txt`
 - `BASE_SHA` and `HEAD_SHA`
 - The PR title and description (from the platform metadata fetched in step 2)
 - A file-reading constraint: *"When you need full file context, read only the enclosing function/class (±60 lines around each changed hunk). Do not read any file in its entirety if it exceeds 400 lines — use `Bash(sed -n '<start>,<end>p' <file>)` scoped to the changed region instead. Read at most 3 files beyond the diff."*
 
-> **Pass-by-value vs path:** if `DIFF_LINES ≤ 300`, pass the diff **inline** in each prompt (cheaper than each sub-agent re-opening a shared file); if `DIFF_LINES > 300`, pass the path `/tmp/pr_full_diff.patch`.
+> **Pass-by-value vs path:** if `DIFF_LINES ≤ 300`, paste the contents of `/tmp/pr_full_diff_numbered.patch` **inline** in each prompt (cheaper than each sub-agent re-opening a shared file) — inline the *numbered* diff, not the raw one, so the line numbers travel with it; if `DIFF_LINES > 300`, pass the path `/tmp/pr_full_diff_numbered.patch`.
 
 > **Model selection (mixed-model tiering).** The reviewers split into two model tiers so you don't pay frontier-model rates for the cheaper review dimensions. Set each sub-agent's `model` from its tier (per the table above), resolved with this precedence:
 >
@@ -551,6 +582,18 @@ Aggregate all findings into the structured report format defined in `styles/repo
 - Do not flag non-issues — only real problems and genuine improvements
 - Consider the PR's stated intent when evaluating trade-offs
 - Group related issues together rather than repeating similar findings
+
+### Validate every finding's line number against the file (MANDATORY — do this before writing the report)
+
+This is the guard that keeps the **summary body** honest. Inline comments get a second chance to be corrected (GitHub `422`, Azure DevOps `400`, and the "Resolve every finding to a post-change file line" step), but the summary embeds the reviewer's `file:NN` text as-is — so an over-shot number like `:466` on a 322-line file sails straight into the report unless you check it here. Do the check **once**, and use the result for **both** the summary and the inline JSONL so they never disagree.
+
+For each finding:
+
+1. Compute the file's new-side length: `LINES=$(git show ${HEAD_SHA}:<file> | wc -l)`.
+2. If `NN > LINES`, or the code at `<file>:NN` (`git show ${HEAD_SHA}:<file> | sed -n "${NN}p"`) does not contain the snippet the finding describes, the number is wrong. Re-anchor it: find the flagged line in `/tmp/pr_full_diff_numbered.patch` and use the number printed in its margin. If the finding is genuinely unlocatable in the new file (e.g. it only described deleted code), drop it rather than cite a fabricated line.
+3. Carry the corrected `NN` into the report body **and** the inline JSONL — the summary line reference and the inline comment for the same finding must be identical.
+
+A finding whose line cannot be validated to a real, in-range line in the changed file must not appear in the report with a made-up number.
 
 ### Assign a `fid` to every current finding
 
@@ -662,12 +705,11 @@ Track a counter (`RESOLVED_OK` / `RESOLVED_FAIL`) the same way inline posting do
 
 Both GitHub (`gh api .../comments --field line=NN --field side=RIGHT`) and Azure DevOps (`threadContext.rightFileStart.line`) anchor inline comments to the line number **in the new (post-change) version of the file** — not the line's position within the diff. Mis-anchored comments either land on the wrong line or are rejected (GitHub `422`, Azure DevOps `400`).
 
-For each finding before serializing it:
+In most cases the number is already correct and validated — it was read from the margin of `/tmp/pr_full_diff_numbered.patch` by the reviewers and checked again in step 7's "Validate every finding's line number" step. Do **not** recompute it with hunk arithmetic. Only fall back to manual resolution when a finding somehow arrived without a validated line:
 
-1. Open `/tmp/pr_full_diff.patch` and find the hunk containing the finding. Hunk headers look like `@@ -<oldStart>,<oldLen> +<newStart>,<newLen> @@`.
-2. The finding's file line = `<newStart>` + (count of context ` ` and added `+` lines that precede the flagged line within that hunk). Deleted (`-`) lines do **not** advance the new-side counter.
-3. If a finding sits on a deleted line (no surviving `+`/context line), anchor it to the nearest surviving line in the same hunk and note the relocation in the comment body.
-4. Confirm the resolved `path` is repo-relative (matches an entry in `/tmp/pr_changed_files.txt`) and the line is within the file's new length.
+1. Find the flagged line in `/tmp/pr_full_diff_numbered.patch`; the number printed left of the `|` **is** the post-change file line. (The annotator already did the `<newStart>` + offset counting for you, so there is no arithmetic to redo.)
+2. If a finding sits on a deleted line (marked `- |`, no surviving `+`/context line), anchor it to the nearest surviving numbered line in the same hunk and note the relocation in the comment body.
+3. Confirm the resolved `path` is repo-relative (matches an entry in `/tmp/pr_changed_files.txt`) and the line is within the file's new length (`git show ${HEAD_SHA}:<file> | wc -l`).
 
 ### Handle suggestion blocks (enables "Apply suggestion" / "Commit suggestion" button on GitHub)
 
