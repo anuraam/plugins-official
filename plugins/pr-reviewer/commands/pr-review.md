@@ -145,23 +145,26 @@ If posting the starting comment fails, output a single warning line and continue
 
 The diff is what matters. Resolve the base/head and pull the diff first — for small PRs (≤10 changed files), this is *all* the context the sub-agents need, and the codebase index in step 4 can be skipped entirely.
 
-### Ensure the PR head is checked out (do this before any diff command)
+### Run the setup script (ONE bash call — mandatory)
 
-The runner (e.g. the Xianix Executor) checks out the repository's **default branch** — it knows nothing about PRs. When the invocation carries a PR number, *you* resolve and check out the PR's head; the runner never does it for you. Skip this only when no PR number/branch argument was given (then the current checkout *is* what's under review).
+> **Shell state does not persist between tool calls.** Each `Bash` invocation starts a fresh shell — variables like `HEAD_SHA` from a prior call are **gone**. This script resolves checkout, base/head SHAs, diffs, and the numbered patch in one shot, then writes everything to `/tmp/pr_state.env`. In any later bash block that needs these values, run `source /tmp/pr_state.env` first. Never assume a variable from a prior tool call still exists.
+
+> **Xianix Executor / CI worktrees:** the runner checks out the repo's **default branch** only — it knows nothing about PRs. When a PR number is provided, this script is a **hard gate**. You must see `Checked out PR #<n> at <sha>` (or branch checkout) in the output before proceeding. If `HEAD_SHA` does not match the platform's `headRefOid`, the script exits with an error.
+
+Set `PR_NUMBER` (numeric argument, if any), `PLATFORM` (`github`, `azure`, or `generic`), and `BRANCH_ARG` (branch name argument, if any) before running. Then execute this **entire** script as a single `Bash` call:
 
 ```bash
-# PR_NUMBER = the numeric argument from the invocation (if any)
+set -euo pipefail
+
+: "${PLATFORM:=github}"
+CHECKED_OUT=""
+
+# --- 1. Checkout the revision under review ---
 if [ -n "${PR_NUMBER:-}" ]; then
-  # Both GitHub and Azure DevOps maintain a synthetic ref for every PR that
-  # outlives head-branch deletion. Try the platform's shape first, then the
-  # other, then (ADO) the real source branch from the PR metadata.
-  #   GitHub:       refs/pull/<n>/head   (the PR's head commit)
-  #   Azure DevOps: refs/pull/<n>/merge  (ADO exposes only the merge ref)
   case "$PLATFORM" in
     azure*) CANDIDATE_REFS="refs/pull/${PR_NUMBER}/merge refs/pull/${PR_NUMBER}/head" ;;
     *)      CANDIDATE_REFS="refs/pull/${PR_NUMBER}/head refs/pull/${PR_NUMBER}/merge" ;;
   esac
-  CHECKED_OUT=""
   for ref in $CANDIDATE_REFS; do
     if git fetch origin "$ref" 2>/dev/null; then
       git checkout --detach FETCH_HEAD
@@ -170,116 +173,112 @@ if [ -n "${PR_NUMBER:-}" ]; then
     fi
   done
   if [ -z "$CHECKED_OUT" ]; then
-    # No synthetic ref reachable. On Azure DevOps this is EXPECTED when the PR
-    # has merge conflicts — ADO does not publish refs/pull/<n>/merge for
-    # conflicted PRs. Resolve the real source branch from the platform API and
-    # fetch it instead:
-    #   GitHub: SRC=$(gh pr view "$PR_NUMBER" --json headRefName --jq .headRefName)
-    #   ADO:    SRC=$PR_SOURCE (providers/azure-devops.md → Fetching PR Metadata)
-    # then:
-    #   git fetch origin "refs/heads/${SRC}" && git checkout --detach FETCH_HEAD
-    echo "WARN: no synthetic PR ref found — resolving the source branch via the platform API"
+    echo "WARN: no synthetic PR ref found — resolving source branch via platform API"
+    case "$PLATFORM" in
+      azure*)
+        echo "ERROR: resolve PR_SOURCE from providers/azure-devops.md and re-run checkout"
+        exit 1
+        ;;
+      *)
+        SRC=$(gh pr view "$PR_NUMBER" --json headRefName --jq -r '.headRefName')
+        git fetch origin "refs/heads/${SRC}"
+        git checkout --detach FETCH_HEAD
+        CHECKED_OUT="refs/heads/${SRC}"
+        ;;
+    esac
   fi
-  echo "Checked out PR #${PR_NUMBER} via ${CHECKED_OUT:-<api-resolved branch>} at $(git rev-parse HEAD)"
+  echo "Checked out PR #${PR_NUMBER} via ${CHECKED_OUT} at $(git rev-parse HEAD)"
 elif [ -n "${BRANCH_ARG:-}" ]; then
-  # A branch name was passed instead of a PR number.
-  git fetch origin "$BRANCH_ARG" && git checkout --detach FETCH_HEAD
+  git fetch origin "$BRANCH_ARG"
+  git checkout --detach FETCH_HEAD
+  CHECKED_OUT="refs/heads/${BRANCH_ARG}"
+  echo "Checked out branch ${BRANCH_ARG} at $(git rev-parse HEAD)"
 fi
-```
 
-> On **Azure DevOps** the `/merge` ref points at the PR's *merge commit*; its first parent is the target tip **as of when ADO created the ref** and its second parent is the real PR head. When you checked out `refs/pull/<n>/merge`, every diff and metadata command must run against `HEAD^2` (the PR head) — never against the merge commit itself, which folds target-branch commits into what looks like the PR diff. The base-ref resolution below sets `HEAD_SHA` to `HEAD^2` automatically in this case.
+# --- 2. Resolve target branch name ---
+if [ -n "${PR_NUMBER:-}" ]; then
+  case "$PLATFORM" in
+    azure*)
+      echo "ERROR: set BASE from PR_TARGET per providers/azure-devops.md before running this script"
+      exit 1
+      ;;
+    *)
+      PR_METADATA=$(gh pr view "$PR_NUMBER" --json baseRefName,headRefName,headRefOid,title,body,author)
+      BASE=$(echo "$PR_METADATA" | jq -r '.baseRefName')
+      PR_HEAD_BRANCH=$(echo "$PR_METADATA" | jq -r '.headRefName')
+      PR_TITLE=$(echo "$PR_METADATA" | jq -r '.title')
+      PR_BODY=$(echo "$PR_METADATA" | jq -r '.body // ""')
+      PR_AUTHOR=$(echo "$PR_METADATA" | jq -r '.author.login')
+      EXPECTED_HEAD=$(echo "$PR_METADATA" | jq -r '.headRefOid')
+      ;;
+  esac
+else
+  BASE=$(git ls-remote --symref origin HEAD 2>/dev/null | awk '/^ref:/ {sub("refs/heads/","",$2); print $2}')
+  : "${BASE:=main}"
+  PR_TITLE=""
+  PR_BODY=""
+  PR_AUTHOR=""
+  EXPECTED_HEAD=""
+fi
 
-### Resolve the base ref (ALWAYS fetch the target branch fresh — never trust local refs)
-
-> **Why this matters:** a stale local `origin/main` (or a local `main` branch that hasn't been pulled) moves the merge-base backwards, so `BASE_SHA..HEAD` silently includes commits that are **already merged into the target branch** — the review then covers more commits than the PR actually contains. The only reliable base is the target branch tip **as it exists on the remote right now**. Detached CI worktrees (e.g. the Xianix Executor) often have zero remote-tracking refs anyway, so a fresh `git fetch` into `FETCH_HEAD` is both the correctness fix and the portability fix.
-
-**Step 1 — determine the PR's real target branch name** (do not guess `main`):
-
-- **GitHub with a PR number:** `BASE=$(gh pr view "$PR_NUMBER" --json baseRefName --jq '.baseRefName')`
-- **Azure DevOps with a PR number:** fetch the PR metadata (see `providers/azure-devops.md` → *Fetching PR Metadata*) and use `BASE="$PR_TARGET"`. The PR object is the source of truth for title/description/target.
-- **No PR number** (branch argument or current branch): use the remote's default branch — `BASE=$(git ls-remote --symref origin HEAD | awk '/^ref:/ {sub("refs/heads/","",$2); print $2}')` — falling back to `main`/`master` probing via `git ls-remote --heads origin main master` only if the symref query fails.
-
-**Step 2 — fetch that branch from the remote and diff against its fresh tip:**
-
-```bash
-# If refs/pull/<n>/merge was checked out (Azure DevOps), the real PR head is
-# the merge commit's second parent — never diff the merge commit itself.
+# --- 3. Resolve HEAD_SHA and fetch fresh base tip ---
 if [ "${CHECKED_OUT:-}" = "refs/pull/${PR_NUMBER:-}/merge" ]; then
   HEAD_SHA=$(git rev-parse HEAD^2)
 else
   HEAD_SHA=$(git rev-parse HEAD)
 fi
 
-# Fetch the CURRENT remote tip of the target branch. This works even in
-# worktrees with zero remote-tracking refs, and guarantees the base is not
-# a stale local copy.
+if [ -n "${PR_NUMBER:-}" ] && [ -n "${EXPECTED_HEAD:-}" ] && [ "$HEAD_SHA" != "$EXPECTED_HEAD" ]; then
+  echo "ERROR: checked-out HEAD ($HEAD_SHA) does not match PR headRefOid ($EXPECTED_HEAD) — checkout failed"
+  exit 1
+fi
+
 if git fetch origin "refs/heads/${BASE}" 2>/dev/null; then
   BASE_TIP=$(git rev-parse FETCH_HEAD)
 else
-  # Offline / fetch-restricted fallback ONLY. Local refs may be stale — warn
-  # loudly so an inflated commit range is traceable to this fallback.
   echo "WARN: could not fetch origin/${BASE} — falling back to local refs, base may be stale"
-  _have_ref() { git show-ref --verify --quiet "$1"; }
   BASE_TIP=""
   for candidate in "refs/remotes/origin/${BASE}" "refs/heads/${BASE}"; do
-    _have_ref "$candidate" && { BASE_TIP=$(git rev-parse "$candidate"); break; }
+    git show-ref --verify --quiet "$candidate" && { BASE_TIP=$(git rev-parse "$candidate"); break; }
   done
 fi
+[ -n "$BASE_TIP" ] || { echo "ERROR: could not resolve base branch '${BASE}'"; exit 1; }
 
-[ -z "$BASE_TIP" ] && { echo "ERROR: could not resolve base branch '${BASE}'"; exit 1; }
-
-# Diff against the merge-base so target-only commits never appear in the range
 BASE_SHA=$(git merge-base "$BASE_TIP" "$HEAD_SHA")
-
 echo "Base: $BASE (tip $BASE_TIP -> merge-base $BASE_SHA)"
 echo "Head: $HEAD_SHA"
-export HEAD_SHA BASE BASE_SHA
-```
 
-**Sanity check (cheap, catches the stale-base bug immediately):** when a PR number is available, compare the commit count against the platform's own count — `git rev-list --count ${BASE_SHA}..${HEAD_SHA}` vs `gh pr view "$PR_NUMBER" --json commits --jq '.commits | length'` on GitHub (Azure DevOps: the PR commits endpoint). If git reports **more** commits than the platform, the base is wrong — do not proceed; re-fetch the target branch and re-resolve before diffing.
-
-Use `${BASE_SHA}` (not `origin/${BASE}`) in every diff command below — it works regardless of whether remote-tracking refs exist.
-
-### Resolve the source branch name (handles detached HEAD)
-
-```bash
-CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-if [ "$CURRENT_BRANCH" = "HEAD" ]; then
-  CURRENT_BRANCH=$(git branch --contains "$HEAD_SHA" \
-    | sed 's|^[* ] *||' | grep -v '^(' | head -1)
+# --- 4. Sanity check commit count (when PR number available) ---
+if [ -n "${PR_NUMBER:-}" ] && [ "$PLATFORM" != "azure" ]; then
+  GIT_COMMIT_COUNT=$(git rev-list --count "${BASE_SHA}..${HEAD_SHA}")
+  GH_COMMIT_COUNT=$(gh pr view "$PR_NUMBER" --json commits --jq '.commits | length')
+  echo "Git commit count: $GIT_COMMIT_COUNT"
+  echo "GitHub commit count: $GH_COMMIT_COUNT"
+  if [ "$GIT_COMMIT_COUNT" -gt "$GH_COMMIT_COUNT" ]; then
+    echo "ERROR: git reports more commits than GitHub — base is stale; re-fetch origin/${BASE} and retry"
+    exit 1
+  fi
+  echo "✓ Commit count OK (git=$GIT_COMMIT_COUNT, github=$GH_COMMIT_COUNT)"
 fi
-export CURRENT_BRANCH
-```
 
-### Diff and metadata commands (use `BASE_SHA`, not `origin/${BASE}`)
-
-```bash
-git log --oneline ${BASE_SHA}..${HEAD_SHA}
-git diff --stat ${BASE_SHA}...${HEAD_SHA}
-git diff --name-only ${BASE_SHA}...${HEAD_SHA} | tee /tmp/pr_changed_files.txt
-git diff ${BASE_SHA}...${HEAD_SHA} > /tmp/pr_full_diff.patch
-git log -1 --format="%an <%ae>" ${HEAD_SHA}
-git log --format="%s%n%b" ${BASE_SHA}..${HEAD_SHA}
+# --- 5. Generate diffs and metadata ---
+git log --oneline "${BASE_SHA}..${HEAD_SHA}"
+git diff --stat "${BASE_SHA}"..."${HEAD_SHA}"
+git diff --name-only "${BASE_SHA}"..."${HEAD_SHA}" | tee /tmp/pr_changed_files.txt
+git diff "${BASE_SHA}"..."${HEAD_SHA}" > /tmp/pr_full_diff.patch
+git log -1 --format="%an <%ae>" "${HEAD_SHA}"
+git log --format="%s%n%b" "${BASE_SHA}..${HEAD_SHA}"
 
 CHANGED_COUNT=$(wc -l < /tmp/pr_changed_files.txt | tr -d ' ')
 echo "Changed files: $CHANGED_COUNT"
-export CHANGED_COUNT
-```
 
-Writing the diff to `/tmp/pr_full_diff.patch` lets you pass it by **path** to sub-agents instead of by value — much smaller prompts when the diff is large.
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [ "$CURRENT_BRANCH" = "HEAD" ]; then
+  CURRENT_BRANCH=$(git branch --contains "$HEAD_SHA" \
+    | sed 's|^[* ] *||' | grep -v '^(' | head -1 || true)
+fi
 
-### Annotate the diff with real post-change line numbers (do this now — it is what stops out-of-range line numbers)
-
-> **Why this exists.** The single most common review defect is a finding that cites a line number **larger than the file** (or simply the wrong line). It happens because a model asked to *compute* a post-change line number from a `@@ -old,+new @@` header — "the `+new` start plus the offset of the flagged line" — gets the arithmetic wrong or hallucinates. The fix is to never make the model do that arithmetic: pre-compute the real new-side line number for every line and print it in the margin, so the reviewer just copies the number it sees.
-
-Produce `/tmp/pr_full_diff_numbered.patch`, a copy of the full diff where every context and added (`+`) line is prefixed with its **actual line number in the new version of the file**. Deleted (`-`) lines get a `-` marker and no number (they don't exist post-change). This annotated file — not the raw patch — is the authoritative input the reviewers read for line numbers.
-
-```bash
-# Walk the unified diff, tracking the new-side line counter from each hunk
-# header, and prefix every kept line with its post-change file line number.
-# `s + 0` parses the leading integer of "<newStart>,<len> @@ ..."; index(s,"+")
-# finds the new-range marker (the old range uses "-"), so this is portable awk
-# (no gawk-only 3-arg match()).
+# --- 6. Annotate diff with post-change line numbers ---
 awk '
   /^@@/ {
     s = substr($0, index($0, "+") + 1); newln = s + 0
@@ -293,15 +292,34 @@ awk '
   /^-/  { printf "    - |-%s\n", substr($0, 2); next }
   { print "      | " $0 }
 ' /tmp/pr_full_diff.patch > /tmp/pr_full_diff_numbered.patch
-
 echo "Annotated diff written: $(wc -l < /tmp/pr_full_diff_numbered.patch) lines"
+
+# --- 7. Persist state for later tool calls ---
+cat > /tmp/pr_state.env <<EOF
+HEAD_SHA=$HEAD_SHA
+BASE_SHA=$BASE_SHA
+BASE=$BASE
+BASE_TIP=$BASE_TIP
+CHANGED_COUNT=$CHANGED_COUNT
+CHECKED_OUT=$CHECKED_OUT
+CURRENT_BRANCH=$CURRENT_BRANCH
+PR_TITLE=$(printf '%s' "${PR_TITLE:-}" | sed "s/'/'\\\\''/g")
+PR_BODY=$(printf '%s' "${PR_BODY:-}" | sed "s/'/'\\\\''/g")
+PR_AUTHOR=$(printf '%s' "${PR_AUTHOR:-}" | sed "s/'/'\\\\''/g")
+PR_HEAD_BRANCH=$(printf '%s' "${PR_HEAD_BRANCH:-}" | sed "s/'/'\\\\''/g")
+EOF
+echo "State written to /tmp/pr_state.env"
 ```
 
-Each kept line now looks like `  147 |+    var x = ParseSubject(dn);` — the number left of the `|` is the exact line to cite. A reviewer physically cannot emit a line number past the end of the file, because the largest number the annotator ever prints equals the file's new length. Reviewers must **copy** this number, never recompute it.
+> On **Azure DevOps** the `/merge` ref points at the PR's *merge commit*; its second parent (`HEAD^2`) is the real PR head. The script sets `HEAD_SHA` accordingly when `CHECKED_OUT=refs/pull/<n>/merge`.
 
-> **Anti-pattern:** Do NOT `cat <<'DIFF_EOF' ... DIFF_EOF` the diff back to yourself in a subsequent `Bash` call. The diff is already in your conversation history once you ran `git diff`. Echoing it back wastes a turn and tokens; if you need it as a file, you already wrote it to `/tmp/pr_full_diff.patch` above.
+Writing the diff to `/tmp/pr_full_diff.patch` lets you pass it by **path** to sub-agents instead of by value — much smaller prompts when the diff is large.
 
-Use `git show ${HEAD_SHA}:<filepath>` or the `Read` tool to read the full content of any file that requires deeper analysis beyond the patch.
+Each kept line in `/tmp/pr_full_diff_numbered.patch` looks like `  147 |+    var x = ParseSubject(dn);` — the number left of the `|` is the exact line to cite. Reviewers must **copy** this number, never recompute it.
+
+> **Anti-pattern:** Do NOT `cat <<'DIFF_EOF' ... DIFF_EOF` the diff back to yourself in a subsequent `Bash` call. The diff is already in your conversation history once you ran the setup script. Echoing it back wastes a turn and tokens.
+
+Use `git show ${HEAD_SHA}:<filepath>` or the `Read` tool to read the full content of any file that requires deeper analysis beyond the patch. Always `source /tmp/pr_state.env` first so `HEAD_SHA` is defined.
 
 **Platform CLIs are not used in this diff step.** Use **`gh`** only when posting to GitHub and **`curl`/Azure DevOps REST** only when posting to Azure DevOps (see the provider docs and "Posting the Review" below).
 
@@ -316,6 +334,7 @@ This is the one place reading platform PR comments is required, because it deter
 2. Decide the mode:
 
 ```bash
+source /tmp/pr_state.env
 # /tmp/pr_prior_findings.jsonl is written by the provider helper: one JSON object per
 # prior marked finding thread: {fid, status(open|resolved), thread_ref[, comment_ref]}.
 # Matching is by fid alone, so file/line are not needed here.
@@ -339,6 +358,7 @@ export REVIEW_MODE RANGE_BASE
 3. Capture the **incremental** diff (commits pushed since the last review) in addition to the full PR diff — it is what you skim first in re-review mode and what populates the "changed since last review" line in the delta:
 
 ```bash
+source /tmp/pr_state.env
 if [ "$REVIEW_MODE" = "rereview" ] && [ "$RANGE_BASE" != "$BASE_SHA" ]; then
   git log --oneline ${RANGE_BASE}..${HEAD_SHA}
   git diff ${RANGE_BASE}...${HEAD_SHA} > /tmp/pr_incremental_diff.patch
@@ -353,6 +373,7 @@ fi
 Every line these commands print lands in your context and is paid for on every subsequent turn — keep the index small. The caps below are mandatory, not decorative.
 
 ```bash
+source /tmp/pr_state.env
 if [ "${CHANGED_COUNT:-0}" -le 10 ]; then
   echo "Small PR ($CHANGED_COUNT files) — skipping codebase index, diff alone is enough context."
 else
@@ -393,6 +414,7 @@ Before launching any agents:
 The review runs on the **cheap Haiku-finder path by default** (step 6A) and only **escalates to the full specialist reviewers** (step 6B) when the diff touches a high-risk surface. Detect high-risk changes from both the file list and the diff content:
 
 ```bash
+source /tmp/pr_state.env
 RISK_PATH_RE='(auth|login|signin|session|password|passwd|secret|token|jwt|oauth|crypto|encrypt|decrypt|payment|billing|charge|invoice|checkout|migration|schema|\.sql$|webhook|/api/|/controllers?/|/routes?/|/handlers?/|iam|rbac|permission)'
 RISK_CONTENT_RE='(password|secret|api[_-]?key|private[_-]?key|authorize|authenticate|hashpw|bcrypt|jwt|sql|exec\(|eval\(|subprocess|os\.system|pickle\.loads)'
 
@@ -425,7 +447,11 @@ When genuinely uncertain whether a change is high-risk, prefer **specialists** �
 
 ## 6. Run the Review (parallel sub-agent calls — MANDATORY)
 
-Run **exactly one** of the two paths below, chosen by `REVIEW_TIER` from step 5. Both paths run **real, parallel, top-level sub-agents** (you are the top-level agent, so `Task` / `Agent` is available here) and both feed the same step 7. The tool is exposed under two equivalent names depending on the Claude Code SDK version (`Task` and/or `Agent`). Use whichever your SDK accepts; if one returns `No such tool available`, immediately retry the same call with the other name. If your SDK requires the plugin prefix, use `pr-reviewer:<name>` instead of the bare name.
+Run **exactly one** of the two paths below, chosen by `REVIEW_TIER` from step 5. Both paths run **real, parallel, top-level sub-agents** (you are the top-level agent, so `Task` / `Agent` is available here) and both feed the same step 7. The tool is exposed under two equivalent names depending on the Claude Code SDK version (`Task` and/or `Agent`). Use whichever your SDK accepts; if one returns `No such tool available`, immediately retry the same call with the other name.
+
+> **Registered agents.** The four specialist reviewers are registered in `plugin.json` (`code-reviewer`, `security-reviewer`, `test-reviewer`, `performance-reviewer`). Always set `"subagent_type"` to the reviewer name — do **not** hand-write a generic `Agent` prompt without `subagent_type`. If your SDK requires the plugin prefix, use `pr-reviewer:code-reviewer` etc.
+
+> **Agent `model` field — valid slugs only.** The `Task`/`Agent` tool accepts **only** `sonnet`, `opus`, `haiku`, or `fable`. Values like `claude-haiku-4-5` are rejected with `InputValidationError`. Map env overrides to these slugs before passing them (see model-selection block in 6B). For the lead's inherited model, **omit** the `model` field entirely.
 
 **Constraints every sub-agent prompt below must include, verbatim:**
 
@@ -451,7 +477,7 @@ Lowest-cost path for ordinary PRs.
 
 Concatenate the snippets into `/tmp/pr_context.txt` (a filepath header before each). **Never read any file in its entirety if it exceeds 400 lines; never read more than 3 files.**
 
-Then emit **both Agent calls in the same assistant turn** (so they run in parallel). Both **must** set `"model": "claude-haiku-4-5"`. Neither agent may call `Read`, `Bash`, `Grep`, or any other tool — they work only from the two files named in the prompt.
+Then emit **both Agent calls in the same assistant turn** (so they run in parallel). Both **must** set `"model": "haiku"`. Neither agent may call `Read`, `Bash`, `Grep`, or any other tool — they work only from the two files named in the prompt.
 
 Both prompts share the same shell and tail. Compose each prompt as: the **shared header**, then the agent's **focus list** (below), then the **shared output-format tail**.
 
@@ -512,12 +538,12 @@ Deeper coverage for high-risk diffs. Run `code-reviewer` **always**; gate the ot
 
 | `subagent_type` | Focus | Model tier | Run when the diff contains… | Skip when… |
 |---|---|---|---|---|
-| `code-reviewer` | Code quality, readability, maintainability | **quality** (cheap) | **always** | never |
-| `test-reviewer` | Test coverage and test quality | **quality** (cheap) | source code with behaviour (functions/methods/classes) | the diff is **only** docs, config, or pure formatting/rename |
-| `security-reviewer` | Vulnerabilities, secrets, input validation | **risk** (frontier) | source code, auth/authz, input handling, dependencies/lockfiles, IaC, any externally-reachable surface | the diff is **only** docs/markdown/images |
-| `performance-reviewer` | Bottlenecks, inefficiencies, resource usage | **risk** (frontier) | DB queries/ORM, loops over collections, I/O, hot paths, large data structures, algorithm changes | the diff is **only** docs/config, or trivial code with no data/IO/loops |
+| `code-reviewer` | Code quality, readability, maintainability | **quality** (`haiku`) | **always** | never |
+| `test-reviewer` | Test coverage and test quality | **quality** (`haiku`) | source code with behaviour (functions/methods/classes) | the diff is **only** docs, config, or pure formatting/rename |
+| `security-reviewer` | Vulnerabilities, secrets, input validation | **risk** (omit `model` / inherit) | source code, auth/authz, input handling, dependencies/lockfiles, IaC, any externally-reachable surface | the diff is **only** docs/markdown/images |
+| `performance-reviewer` | Bottlenecks, inefficiencies, resource usage | **risk** (omit `model` / inherit) | DB queries/ORM, loops over collections, I/O, hot paths, caching layers, auth handlers with async/DB lookups, large data structures, algorithm changes | the diff is **only** docs/config with no executable code |
 
-`package.json`/`*.csproj`/lockfile changes are **not** docs — they keep `security-reviewer` in scope (dependency risk). When uncertain whether a reviewer applies, **run it**.
+`package.json`/`*.csproj`/lockfile changes are **not** docs — they keep `security-reviewer` in scope (dependency risk). Paths matching `auth`, `cache`, or `handler` keep `performance-reviewer` in scope (request-path latency). When uncertain whether a reviewer applies, **run it**. For `REVIEW_TIER=specialists` on auth/security code, expect **four** agent results unless you document a skip reason.
 
 In **one assistant turn**, emit one parallel sub-agent invocation per selected reviewer (between 1 and 4). Each invocation prompt must include, in addition to the two shared constraints above:
 
@@ -532,21 +558,47 @@ In **one assistant turn**, emit one parallel sub-agent invocation per selected r
 >
 > 1. **`PR_REVIEWER_MODEL` (override).** If set, it pins **every** reviewer to that one model — backward-compatible escape hatch, ignores the tiers below.
 > 2. Otherwise, per tier:
->    - **quality tier** (`code-reviewer`, `test-reviewer`) → `PR_REVIEWER_QUALITY_MODEL` if set, else `claude-haiku-4-5`. These are pattern/coverage tasks that a small model handles well.
->    - **risk tier** (`security-reviewer`, `performance-reviewer`) → `PR_REVIEWER_RISK_MODEL` if set, else the lead's default/inherited model. Vulnerability and performance reasoning is where frontier accuracy actually pays off — this path was chosen *because* the diff is high-risk.
+>    - **quality tier** (`code-reviewer`, `test-reviewer`) → `PR_REVIEWER_QUALITY_MODEL` if set, else `haiku`. These are pattern/coverage tasks that a small model handles well.
+>    - **risk tier** (`security-reviewer`, `performance-reviewer`) → `PR_REVIEWER_RISK_MODEL` if set, else inherit (omit `model`). Vulnerability and performance reasoning is where frontier accuracy actually pays off — this path was chosen *because* the diff is high-risk.
 >
 > ```bash
-> RISK_MODEL="${PR_REVIEWER_RISK_MODEL:-inherit}"          # frontier / lead's model by default
-> QUALITY_MODEL="${PR_REVIEWER_QUALITY_MODEL:-claude-haiku-4-5}"
-> if [ -n "${PR_REVIEWER_MODEL:-}" ]; then                 # override: one model for all
+> source /tmp/pr_state.env
+> map_model_slug() {
+>   case "$1" in
+>     inherit|"") echo "" ;;
+>     sonnet|opus|haiku|fable) echo "$1" ;;
+>     *haiku*) echo "haiku" ;;
+>     *sonnet*) echo "sonnet" ;;
+>     *opus*) echo "opus" ;;
+>     *) echo "haiku" ;;
+>   esac
+> }
+> RISK_MODEL="${PR_REVIEWER_RISK_MODEL:-inherit}"
+> QUALITY_MODEL="${PR_REVIEWER_QUALITY_MODEL:-haiku}"
+> if [ -n "${PR_REVIEWER_MODEL:-}" ]; then
 >   RISK_MODEL="$PR_REVIEWER_MODEL"; QUALITY_MODEL="$PR_REVIEWER_MODEL"
 > fi
-> echo "Reviewer models — quality: $QUALITY_MODEL | risk: $RISK_MODEL"
+> QUALITY_SLUG=$(map_model_slug "$QUALITY_MODEL")
+> RISK_SLUG=$(map_model_slug "$RISK_MODEL")
+> echo "Reviewer models — quality: ${QUALITY_SLUG:-inherit} | risk: ${RISK_SLUG:-inherit}"
 > ```
 >
-> Emit each reviewer in the same turn with its tier's model in the invocation (`"model": "<quality-or-risk>"`). When the resolved value is the sentinel `inherit`, **omit** the `model` field entirely so the agent's `model: inherit` frontmatter takes over (the lead's model) — do not pass the literal string `inherit` as a model slug. Reviewers in different tiers therefore run on different models within the same parallel turn — that is intended.
+> Emit each reviewer in the **same assistant turn** with `subagent_type` set. Pass `"model": "<slug>"` only when the mapped slug is non-empty (`haiku` for quality tier; omit entirely for risk tier when `RISK_SLUG` is empty). **Never** pass `claude-haiku-4-5`, `inherit`, or any other string — those cause `InputValidationError`.
+>
+> **Invocation template (6B — copy per selected reviewer, adjust `subagent_type` and `model`):**
+>
+> ```json
+> {
+>   "subagent_type": "code-reviewer",
+>   "model": "haiku",
+>   "description": "Code quality review",
+>   "prompt": "<shared constraints from step 6> + paths /tmp/pr_full_diff_numbered.patch and /tmp/pr_changed_files.txt + BASE_SHA/HEAD_SHA from /tmp/pr_state.env + PR title/description + file-reading constraint"
+> }
+> ```
+>
+> For `security-reviewer` and `performance-reviewer`, omit `"model"` so they inherit the lead's model. Launch all selected reviewers in one turn — never sequentially.
 
-Wait for all selected sub-agents to return, then go to step 7.
+Wait for all selected sub-agents to return, then go to step 7. **Do not** run `sed`/`git show`/`Read` on changed files yourself while waiting — that is simulating the reviewers (see anti-patterns below).
 
 ---
 
@@ -558,8 +610,12 @@ These look like progress but are actually you **simulating** sub-agents in your 
 - ❌ Running `Bash` with `cat <<'ANALYSIS' ... === CODE QUALITY REVIEW === ... ANALYSIS` — that is **you pretending to be a reviewer**, not invoking it. Delete the heredoc and emit a real agent call instead.
 - ❌ A long thinking turn (>20 s) followed by directly compiling the report. That pause is internal reasoning that should have been parallel sub-agent work.
 - ❌ Sequential `Task` / `Agent` calls — they MUST be in the same assistant turn so the runtime parallelizes them.
+- ❌ Launching agents without `"subagent_type"` — hand-written prompts bypass the registered reviewer definitions and lose checklist coverage.
+- ❌ Passing `"model": "claude-haiku-4-5"` or `"model": "inherit"` — use `haiku` or omit the field; invalid slugs fail the whole parallel batch.
+- ❌ Running `sed`/`git show`/`Read` on changed files **after** launching specialists but **before** step 7 — you are duplicating reviewer work. If you have more than 3 such calls in that window, stop and wait for sub-agent results.
 - ❌ Passing a large diff (> 300 lines) inline when `/tmp/pr_full_diff.patch` exists. Pass the path.
 - ❌ `cat <<'DIFF_EOF' ... DIFF_EOF` echoing the diff back into the conversation. You already have it. Don't.
+- ❌ Printing "Review posted successfully" when `gh pr review` or inline posting failed — check exit codes and `INLINE_OK` first.
 
 ### Fallback if sub-agents are genuinely unavailable
 
@@ -580,6 +636,7 @@ Aggregate all findings into the structured report format defined in `styles/repo
 - Reference specific file paths and line numbers for every finding
 - Include both the problematic code snippet and a concrete fix example
 - Do not flag non-issues — only real problems and genuine improvements
+- Tag findings that exist in the base branch (not introduced by this PR) as **pre-existing** — they may warrant a WARNING but must not alone drive a `REQUEST CHANGES` verdict
 - Consider the PR's stated intent when evaluating trade-offs
 - Group related issues together rather than repeating similar findings
 

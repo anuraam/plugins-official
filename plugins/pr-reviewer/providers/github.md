@@ -163,6 +163,15 @@ The `PR_REVIEWER_BLOCK_ON_CRITICAL` environment variable controls this:
 The verdict label in the report body, the Critical Issues section, and the inline comments are identical in both modes — only the GitHub review *type* changes.
 
 ```bash
+# Detect self-review (author == authenticated user) — GitHub blocks --approve on own PRs
+PR_AUTHOR=$(gh pr view "$PR_NUMBER" --json author --jq -r '.author.login')
+CURRENT_USER=$(gh api user --jq -r '.login' 2>/dev/null || echo "")
+SELF_REVIEW=false
+if [ -n "$CURRENT_USER" ] && [ "$PR_AUTHOR" = "$CURRENT_USER" ]; then
+  SELF_REVIEW=true
+  echo "INFO: self-review detected (author=$PR_AUTHOR) — will post as --comment, not --approve/--request-changes"
+fi
+
 # Map verdict + PR_REVIEWER_BLOCK_ON_CRITICAL to the gh flag
 case "${PR_REVIEWER_BLOCK_ON_CRITICAL:-false}" in
   true|True|TRUE|1|yes|Yes|YES) BLOCK_ON_CRITICAL=true ;;
@@ -171,9 +180,18 @@ esac
 
 case "${VERDICT}" in
   "APPROVE"|"APPROVE WITH SUGGESTIONS")
-    REVIEW_FLAG="--approve" ;;
+    if [ "$SELF_REVIEW" = "true" ]; then
+      REVIEW_FLAG="--comment"
+      echo "INFO: self-review — posting APPROVE verdict as non-blocking comment review"
+    else
+      REVIEW_FLAG="--approve"
+    fi
+    ;;
   "REQUEST CHANGES")
-    if [ "$BLOCK_ON_CRITICAL" = "true" ]; then
+    if [ "$SELF_REVIEW" = "true" ]; then
+      REVIEW_FLAG="--comment"
+      echo "INFO: self-review — posting REQUEST CHANGES verdict as non-blocking comment review"
+    elif [ "$BLOCK_ON_CRITICAL" = "true" ]; then
       REVIEW_FLAG="--request-changes"
     else
       REVIEW_FLAG="--comment"
@@ -184,14 +202,20 @@ case "${VERDICT}" in
     REVIEW_FLAG="--comment" ;;
 esac
 
-gh pr review <pr-number> $REVIEW_FLAG --body "$(cat /tmp/pr_review_body.md)"
+source /tmp/pr_state.env 2>/dev/null || HEAD_SHA=$(git rev-parse HEAD)
+printf '\n\n<!-- pr-reviewer:v1 kind=summary sha=%s -->\n' "$HEAD_SHA" >> /tmp/pr_review_body.md
+
+if ! gh pr review "$PR_NUMBER" $REVIEW_FLAG --body "$(cat /tmp/pr_review_body.md)" 2>/tmp/pr_review_err.txt; then
+  echo "WARN: gh pr review failed: $(cat /tmp/pr_review_err.txt)"
+  echo "WARN: falling back to gh pr comment for the summary body"
+  gh pr comment "$PR_NUMBER" --body "$(cat /tmp/pr_review_body.md)" || {
+    echo "ERROR: could not post review summary — see /tmp/pr_review_err.txt"
+    exit 1
+  }
+fi
 ```
 
-> **Stamp the summary marker.** Before posting, append the summary marker to `/tmp/pr_review_body.md` so the next run can find this review and read the head it was generated against:
-> ```bash
-> printf '\n\n<!-- pr-reviewer:v1 kind=summary sha=%s -->\n' "$(git rev-parse HEAD)" >> /tmp/pr_review_body.md
-> ```
-> Each re-review posts a *new* review event (idiomatic on GitHub — reviews are timestamped), with the re-review delta block already at the top of the body from step 7. There is no need to edit the previous review.
+> **Stamp the summary marker.** The posting script above appends `<!-- pr-reviewer:v1 kind=summary sha=<HEAD_SHA> -->` to `/tmp/pr_review_body.md` before calling `gh pr review`, using `HEAD_SHA` from `/tmp/pr_state.env`. Each re-review posts a *new* review event (idiomatic on GitHub — reviews are timestamped), with the re-review delta block already at the top of the body from step 7. There is no need to edit the previous review.
 
 ### Inline comments (one thread per finding) — MANDATORY
 
@@ -321,7 +345,7 @@ If POSTs fail, read `/tmp/pr_inline_failures.log` and check the `gh api` error:
 | `422` (`line must be part of the diff`) | The line is not on the diff's right side — usually a diff-position or old-side line number leaked through. | Re-resolve the finding to its post-change file line per `commands/pr-review.md`. As a fallback, attach the comment to the nearest changed line in the same hunk. |
 | `422` (`commit_id` mismatch) | `commit_id` is not the PR head. | Use `git rev-parse HEAD`; ensure the branch is the PR head, not a stale checkout. |
 | `404` | Wrong `OWNER`/`REPO`/`PR_NUMBER`, or token lacks `repo` scope. | Re-parse the remote URL; confirm token scopes. |
-| `403` | Acting as the PR author with a self-review restriction, or rate-limited. | Inline review *comments* are allowed on your own PR; if rate-limited, retry the failed entries from the log. |
+| `403` | Acting as the PR author attempting `--approve`/`--request-changes` on your own PR, or rate-limited. | Detect self-review before posting (see above) and use `--comment`. Inline review *comments* via `gh api .../pulls/comments` are still allowed on your own PR. If rate-limited, retry the failed entries from the log. |
 
 ---
 

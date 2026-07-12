@@ -13,11 +13,11 @@ This skill is a thin alias for the `/pr-review` command. Run the full procedure 
 2. Post a "review in progress" comment
 3. Check out the PR head itself when a PR number was given (the runner leaves the workspace on the default branch and knows nothing about PRs — the synthetic `refs/pull/<n>/head` / `refs/pull/<n>/merge` refs are how you get at the PR's commits), resolve the PR's **real target branch** from the platform metadata and **`git fetch` its current remote tip** before diffing (never diff against a possibly-stale local copy of the target — that inflates the review with commits already merged), then gather PR context using git (diffs, commits, changed files), and **detect whether the plugin already reviewed this PR**. If so, the run switches to re-review mode: it reconciles prior findings (resolving the ones now fixed, leaving carried-over ones open without duplicating them), focuses on commits pushed since the last review, and posts a re-review delta. Set `PR_REVIEWER_RECONCILE=false` to force a stateless full review.
 4. Index the codebase structure (skipped on small PRs)
-5. Launch the relevant specialized sub-agent reviews in parallel (spawned by you, the top-level agent). `code-reviewer` always runs; the other three are gated by the change type (docs-only / config-only PRs skip the reviewers that don't apply — see step 5 of `commands/pr-review.md`):
-   - **code-reviewer** — Code quality, readability, naming, duplication, error handling
-   - **security-reviewer** — OWASP vulnerabilities, secrets, injection, auth issues
-   - **test-reviewer** — Test coverage, edge cases, test quality
-   - **performance-reviewer** — N+1 queries, algorithmic complexity, memory issues
+5. Choose the review tier (step 5 of `commands/pr-review.md`), then launch the applicable specialist sub-agents **in parallel** with `subagent_type` set (`code-reviewer` always; `security-reviewer`, `test-reviewer`, and `performance-reviewer` gated by change type — see step 6B gating table):
+   - **code-reviewer** — Code quality, readability, naming, duplication, error handling (`model: haiku`)
+   - **security-reviewer** — OWASP vulnerabilities, secrets, injection, auth issues (omit `model`)
+   - **test-reviewer** — Test coverage, edge cases, test quality (`model: haiku`)
+   - **performance-reviewer** — N+1 queries, algorithmic complexity, memory issues (omit `model`)
 6. Compile all findings into a structured report (see `styles/report-template.md`)
 7. Post the review to the detected platform automatically
 
