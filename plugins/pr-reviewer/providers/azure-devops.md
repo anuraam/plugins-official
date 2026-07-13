@@ -533,7 +533,9 @@ If posting the starting comment fails, output a single warning line and continue
 
 ## Posting the Review
 
-**Run the self-contained script below as a single `Bash` call.** It loads `/tmp/pr_azure.env`, casts the vote, posts the summary thread, and loops inline findings. Set `VERDICT` before running. Do **not** hand-build `curl` URLs or invent `AZURE_DEVOPS_*` variables — that is the #1 cause of 401/404 posting failures.
+**Run the self-contained script below as a single `Bash` call.** It loads `/tmp/pr_azure.env`, casts the vote, posts the summary thread, and loops inline findings. Set `VERDICT` to exactly one of: `APPROVE`, `APPROVE WITH SUGGESTIONS`, `REQUEST CHANGES`, `NEEDS DISCUSSION` (aliases like `waitForAuthor` are normalized). Do **not** invent a shortened script, hand-build `curl` URLs, or invent `AZURE_DEVOPS_*` variables — that is the #1 cause of 401/404 posting failures and of vote steps aborting under `set -e`.
+
+Copy the script **verbatim** from this section. Do not rewrite Step A / B / C yourself.
 
 **Inputs (written by earlier steps):**
 - `/tmp/pr_thread_body.md` — full compiled report (fallback: `/tmp/pr_review_summary.md`)
@@ -634,6 +636,13 @@ PY
 mv /tmp/pr_inline_findings.normalized.jsonl /tmp/pr_inline_findings.jsonl
 
 # --- 3. Map verdict → vote ---
+# Normalize agent/platform aliases to the plugin's four verdict strings.
+case "${VERDICT}" in
+  waitForAuthor|Waiting*|"WAITING FOR AUTHOR") VERDICT="REQUEST CHANGES" ;;
+  Rejected|REJECT|"REQUEST_CHANGES"|"CHANGES REQUESTED") VERDICT="REQUEST CHANGES" ;;
+  Approved|APPROVED|LGTM) VERDICT="APPROVE" ;;
+  COMMENT) VERDICT="NEEDS DISCUSSION" ;;
+esac
 case "${PR_REVIEWER_BLOCK_ON_CRITICAL:-false}" in
   true|True|TRUE|1|yes|Yes|YES) BLOCK_ON_CRITICAL=true ;;
   *)                              BLOCK_ON_CRITICAL=false ;;
@@ -649,11 +658,30 @@ case "${VERDICT}" in
 esac
 
 # --- 4. Cast vote ---
-REVIEWER_ID=$(curl -sS -u ":${AZURE_DEVOPS_TOKEN}" \
-  "https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1" \
-  | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || true)
+# Prefer connectionData (works with PATs). profiles/me often returns HTML for PAT
+# auth and crashes naive json parsers — never let that abort the rest of posting.
+REVIEWER_ID=""
+if [ -n "${AZURE_ORG:-}" ]; then
+  REVIEWER_ID=$(curl -sS -u ":${AZURE_DEVOPS_TOKEN}" \
+    "https://dev.azure.com/${AZURE_ORG}/_apis/connectionData?api-version=7.1-preview.1" \
+    | python3 -c "import sys,json
+try:
+  d=json.load(sys.stdin)
+  print((d.get('authenticatedUser') or d.get('authorizedUser') or {}).get('id',''))
+except Exception:
+  print('')" 2>/dev/null || true)
+fi
 if [ -z "$REVIEWER_ID" ]; then
-  echo "WARN: could not resolve reviewer ID — vote will not be cast" >&2
+  REVIEWER_ID=$(curl -sS -u ":${AZURE_DEVOPS_TOKEN}" \
+    "https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1" \
+    | python3 -c "import sys,json
+try:
+  print(json.load(sys.stdin).get('id',''))
+except Exception:
+  print('')" 2>/dev/null || true)
+fi
+if [ -z "$REVIEWER_ID" ]; then
+  echo "WARN: could not resolve reviewer ID — vote will not be cast; continuing with summary + inline" >&2
 else
   VOTE_BODY=$(printf '{"vote": %s, "id": "%s"}' "$VOTE" "$REVIEWER_ID")
   VOTE_RESP=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
@@ -673,7 +701,7 @@ else
     if echo "${ADD_STATUS:-}" | grep -qE '^2'; then
       echo "Vote ${VOTE} cast via reviewer add (HTTP $ADD_STATUS)"
     else
-      echo "WARN: vote failed PUT HTTP ${VOTE_STATUS:-?} and POST HTTP ${ADD_STATUS:-?}" >&2
+      echo "WARN: vote failed PUT HTTP ${VOTE_STATUS:-?} and POST HTTP ${ADD_STATUS:-?} — continuing" >&2
     fi
   else
     echo "Vote ${VOTE} cast (HTTP $VOTE_STATUS)"
@@ -860,13 +888,29 @@ esac
 
 ### 2. Resolve the reviewer ID and post the vote (mandatory)
 
-> **Important:** the documented `reviewers/me` alias does **not** work with PAT authentication — it returns an HTML error page that breaks JSON parsers. Resolve the actual profile ID first.
+> **Important:** do **not** use the `reviewers/me` alias with PAT authentication — it returns an HTML error page. Prefer **`/_apis/connectionData`** on the org host (works with PATs). Fall back to `app.vssps.visualstudio.com/.../profiles/me` only if connectionData fails. Always wrap JSON parsing in try/except so a non-JSON body never aborts the rest of posting.
 
 ```bash
-REVIEWER_ID=$(curl -sS \
-  -u ":${AZURE_DEVOPS_TOKEN}" \
-  "https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1" \
-  | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))")
+REVIEWER_ID=""
+if [ -n "${AZURE_ORG:-}" ]; then
+  REVIEWER_ID=$(curl -sS -u ":${AZURE_DEVOPS_TOKEN}" \
+    "https://dev.azure.com/${AZURE_ORG}/_apis/connectionData?api-version=7.1-preview.1" \
+    | python3 -c "import sys,json
+try:
+  d=json.load(sys.stdin)
+  print((d.get('authenticatedUser') or d.get('authorizedUser') or {}).get('id',''))
+except Exception:
+  print('')" 2>/dev/null || true)
+fi
+if [ -z "$REVIEWER_ID" ]; then
+  REVIEWER_ID=$(curl -sS -u ":${AZURE_DEVOPS_TOKEN}" \
+    "https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1" \
+    | python3 -c "import sys,json
+try:
+  print(json.load(sys.stdin).get('id',''))
+except Exception:
+  print('')" 2>/dev/null || true)
+fi
 
 if [ -z "$REVIEWER_ID" ]; then
   echo "WARN: could not resolve reviewer ID — vote will not be cast" >&2
