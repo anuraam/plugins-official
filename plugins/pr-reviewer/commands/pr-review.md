@@ -132,12 +132,12 @@ Do **not** probe other CLIs ("just to check"). The hook layer will block obvious
 
 Immediately after platform detection, post a comment so the PR author knows the review has started. **Do not read any files, do not run `find`/`ls`, do not index the codebase before this step.**
 
-Use the platform-appropriate method:
-- **GitHub:** `gh pr comment` — see `providers/github.md`
-- **Azure DevOps:** REST API — see `providers/azure-devops.md` (Posting the Starting Comment section)
+Use the platform-appropriate method — each provider's starting-comment block is **self-contained** (run it as one `Bash` call; do not invent a shortened version):
+- **GitHub:** `gh pr comment` — see `providers/github.md` → *Posting the "review in progress" comment*
+- **Azure DevOps:** run the **entire** script in `providers/azure-devops.md` → *Posting the Starting Comment* (it parses the remote, resolves `PR_ID`, posts the thread, and writes `/tmp/pr_azure.env`). Set `PR_NUMBER` from the numeric argument first when one was provided.
 - **Generic / unknown platform:** Skip — no API available
 
-Resolve the PR number from the argument first; only fall back to a CLI lookup (`gh pr list` on GitHub, `pullrequests?searchCriteria.sourceRefName=...` on Azure DevOps) if it was not provided.
+Resolve the PR number from the argument first; only fall back to a CLI lookup (`gh pr list` on GitHub, or the branch lookup inside the Azure starting-comment script) if it was not provided.
 
 If posting the starting comment fails, output a single warning line and continue — do not stop the review.
 
@@ -151,12 +151,21 @@ The diff is what matters. Resolve the base/head and pull the diff first — for 
 
 > **Xianix Executor / CI worktrees:** the runner checks out the repo's **default branch** only — it knows nothing about PRs. When a PR number is provided, this script is a **hard gate**. You must see `Checked out PR #<n> at <sha>` (or branch checkout) in the output before proceeding. If `HEAD_SHA` does not match the platform's `headRefOid`, the script exits with an error.
 
-Set `PR_NUMBER` (numeric argument, if any), `PLATFORM` (`github`, `azure`, or `generic`), and `BRANCH_ARG` (branch name argument, if any) before running. Then execute this **entire** script as a single `Bash` call:
+Set `PR_NUMBER` (numeric argument, if any), `PLATFORM` (`github`, `azure`, or `generic` — auto-detected below if unset), and `BRANCH_ARG` (branch name argument, if any) before running. Then execute this **entire** script as a single `Bash` call:
 
 ```bash
 set -euo pipefail
 
-: "${PLATFORM:=github}"
+# --- 0. Auto-detect platform from remote (do not default to github on Azure remotes) ---
+if [ -z "${PLATFORM:-}" ]; then
+  REMOTE_URL=$(git remote get-url origin 2>/dev/null || echo "")
+  case "$REMOTE_URL" in
+    *github.com*) PLATFORM=github ;;
+    *dev.azure.com*|*visualstudio.com*) PLATFORM=azure ;;
+    *) PLATFORM=generic ;;
+  esac
+  echo "Auto-detected PLATFORM=${PLATFORM} from origin"
+fi
 CHECKED_OUT=""
 
 # --- 1. Checkout the revision under review ---
@@ -176,8 +185,50 @@ if [ -n "${PR_NUMBER:-}" ]; then
     echo "WARN: no synthetic PR ref found — resolving source branch via platform API"
     case "$PLATFORM" in
       azure*)
-        echo "ERROR: resolve PR_SOURCE from providers/azure-devops.md and re-run checkout"
-        exit 1
+        if [ -f /tmp/pr_azure.env ]; then
+          # shellcheck disable=SC1091
+          source /tmp/pr_azure.env
+        fi
+        if [ -z "${API_BASE:-}" ] || [ -z "${AZURE_REPO:-}" ]; then
+          REMOTE=$(git remote get-url origin)
+          if echo "$REMOTE" | grep -qE '(ssh\.dev\.azure\.com|vs-ssh\.visualstudio\.com)'; then
+            V3_PATH=$(echo "$REMOTE" | sed -E 's|^ssh://||; s|^[^@]+@||; s|^[^:/]+[:/]+||')
+            REMOTE="https://dev.azure.com/$(echo "$V3_PATH" | cut -d/ -f2)/$(echo "$V3_PATH" | cut -d/ -f3)/_git/$(echo "$V3_PATH" | cut -d/ -f4)"
+          fi
+          REMOTE_CLEAN=$(echo "$REMOTE" | sed -E 's|https?://[^@]+@|https://|; s|\.git$||')
+          AZURE_HOST=$(echo "$REMOTE_CLEAN" | awk -F/ '{print $3}')
+          PATH_PARTS=$(echo "$REMOTE_CLEAN" | awk -F/ '{for (i=4; i<=NF; i++) print $i}')
+          GIT_LINE=$(echo "$PATH_PARTS" | grep -nx '_git' | head -1 | cut -d: -f1 || true)
+          [ -n "$GIT_LINE" ] || { echo "ERROR: not an Azure DevOps git URL"; exit 1; }
+          AZURE_PROJECT=$(echo "$PATH_PARTS" | sed -n "$((GIT_LINE - 1))p")
+          AZURE_REPO=$(echo    "$PATH_PARTS" | sed -n "$((GIT_LINE + 1))p")
+          if [ "$AZURE_HOST" = "dev.azure.com" ]; then
+            AZURE_ORG=$(echo "$PATH_PARTS" | sed -n '1p'); PREFIX_START=2
+            HOST_AND_ORG_PATH="https://dev.azure.com/${AZURE_ORG}"
+          else
+            AZURE_ORG=$(echo "$AZURE_HOST" | cut -d'.' -f1); PREFIX_START=1
+            HOST_AND_ORG_PATH="https://${AZURE_HOST}"
+          fi
+          PROJECT_LINE=$((GIT_LINE - 1))
+          if [ "$PROJECT_LINE" -gt "$PREFIX_START" ]; then
+            AZURE_COLLECTION=$(echo "$PATH_PARTS" | sed -n "${PREFIX_START},$((PROJECT_LINE - 1))p" | tr '\n' '/' | sed 's|/$||')
+            API_BASE="${HOST_AND_ORG_PATH}/${AZURE_COLLECTION}/${AZURE_PROJECT}"
+          else
+            API_BASE="${HOST_AND_ORG_PATH}/${AZURE_PROJECT}"
+          fi
+        fi
+        PR_ID="${PR_ID:-${PR_NUMBER:-}}"
+        if [ -z "$PR_ID" ] || [ -z "${API_BASE:-}" ] || [ -z "${AZURE_REPO:-}" ]; then
+          echo "ERROR: Azure checkout fallback needs PR_NUMBER and a parsed API_BASE/AZURE_REPO"
+          exit 1
+        fi
+        SRC=$(curl -sS -u ":${AZURE_DEVOPS_TOKEN}" \
+          "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests/${PR_ID}?api-version=7.1" \
+          | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('sourceRefName','').replace('refs/heads/',''))")
+        [ -n "$SRC" ] || { echo "ERROR: could not resolve Azure PR source branch for PR #${PR_ID}"; exit 1; }
+        git fetch origin "refs/heads/${SRC}"
+        git checkout --detach FETCH_HEAD
+        CHECKED_OUT="refs/heads/${SRC}"
         ;;
       *)
         SRC=$(gh pr view "$PR_NUMBER" --json headRefName --jq '.headRefName')
@@ -199,8 +250,52 @@ fi
 if [ -n "${PR_NUMBER:-}" ]; then
   case "$PLATFORM" in
     azure*)
-      echo "ERROR: set BASE from PR_TARGET per providers/azure-devops.md before running this script"
-      exit 1
+      if [ -f /tmp/pr_azure.env ]; then
+        # shellcheck disable=SC1091
+        source /tmp/pr_azure.env
+      fi
+      if [ -z "${API_BASE:-}" ] || [ -z "${AZURE_REPO:-}" ]; then
+        echo "WARN: /tmp/pr_azure.env incomplete — re-parsing remote for Azure metadata"
+        REMOTE=$(git remote get-url origin)
+        if echo "$REMOTE" | grep -qE '(ssh\.dev\.azure\.com|vs-ssh\.visualstudio\.com)'; then
+          V3_PATH=$(echo "$REMOTE" | sed -E 's|^ssh://||; s|^[^@]+@||; s|^[^:/]+[:/]+||')
+          REMOTE="https://dev.azure.com/$(echo "$V3_PATH" | cut -d/ -f2)/$(echo "$V3_PATH" | cut -d/ -f3)/_git/$(echo "$V3_PATH" | cut -d/ -f4)"
+        fi
+        REMOTE_CLEAN=$(echo "$REMOTE" | sed -E 's|https?://[^@]+@|https://|; s|\.git$||')
+        AZURE_HOST=$(echo "$REMOTE_CLEAN" | awk -F/ '{print $3}')
+        PATH_PARTS=$(echo "$REMOTE_CLEAN" | awk -F/ '{for (i=4; i<=NF; i++) print $i}')
+        GIT_LINE=$(echo "$PATH_PARTS" | grep -nx '_git' | head -1 | cut -d: -f1 || true)
+        [ -n "$GIT_LINE" ] || { echo "ERROR: not an Azure DevOps git URL"; exit 1; }
+        AZURE_PROJECT=$(echo "$PATH_PARTS" | sed -n "$((GIT_LINE - 1))p")
+        AZURE_REPO=$(echo    "$PATH_PARTS" | sed -n "$((GIT_LINE + 1))p")
+        if [ "$AZURE_HOST" = "dev.azure.com" ]; then
+          AZURE_ORG=$(echo "$PATH_PARTS" | sed -n '1p'); PREFIX_START=2
+          HOST_AND_ORG_PATH="https://dev.azure.com/${AZURE_ORG}"
+        else
+          AZURE_ORG=$(echo "$AZURE_HOST" | cut -d'.' -f1); PREFIX_START=1
+          HOST_AND_ORG_PATH="https://${AZURE_HOST}"
+        fi
+        PROJECT_LINE=$((GIT_LINE - 1))
+        if [ "$PROJECT_LINE" -gt "$PREFIX_START" ]; then
+          AZURE_COLLECTION=$(echo "$PATH_PARTS" | sed -n "${PREFIX_START},$((PROJECT_LINE - 1))p" | tr '\n' '/' | sed 's|/$||')
+          API_BASE="${HOST_AND_ORG_PATH}/${AZURE_COLLECTION}/${AZURE_PROJECT}"
+        else
+          API_BASE="${HOST_AND_ORG_PATH}/${AZURE_PROJECT}"
+        fi
+      fi
+      PR_ID="${PR_ID:-${PR_NUMBER}}"
+      if [ -z "$PR_ID" ] || [ -z "${API_BASE:-}" ] || [ -z "${AZURE_REPO:-}" ]; then
+        echo "ERROR: Azure metadata needs PR_NUMBER and a parsed API_BASE/AZURE_REPO"
+        exit 1
+      fi
+      PR_JSON=$(curl -sS -u ":${AZURE_DEVOPS_TOKEN}" \
+        "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests/${PR_ID}?api-version=7.1")
+      BASE=$(echo "$PR_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('targetRefName','').replace('refs/heads/',''))")
+      PR_HEAD_BRANCH=$(echo "$PR_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('sourceRefName','').replace('refs/heads/',''))")
+      EXPECTED_HEAD=$(echo "$PR_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('lastMergeSourceCommit',{}).get('commitId',''))")
+      PR_TITLE=$(echo "$PR_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('title',''))")
+      PR_BODY=$(echo "$PR_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('description','') or '')")
+      PR_AUTHOR=$(echo "$PR_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('createdBy',{}).get('displayName',''))")
       ;;
     *)
       PR_METADATA=$(gh pr view "$PR_NUMBER" --json baseRefName,headRefName,headRefOid,title,body,author)
@@ -633,6 +728,8 @@ Before step 7, your conversation history should contain a `Task` (or `Agent`) to
 
 Aggregate all findings into the structured report format defined in `styles/report-template.md`. Read that file and follow its template exactly.
 
+**Before posting (all platforms):** write the compiled report markdown to `/tmp/pr_thread_body.md` and serialize every finding to post as one JSON object per line in `/tmp/pr_inline_findings.jsonl` (fields: `file`, `line`, `body`, `fid`). Do **not** use alternate names like `pr_review_summary.md` or `pr_findings.jsonl` — the Azure posting script only auto-corrects those as a fallback.
+
 **Guidelines:**
 - Reference specific file paths and line numbers for every finding
 - Include both the problematic code snippet and a concrete fix example
@@ -787,7 +884,7 @@ The reviewers were already instructed (step 6) to return post-change line number
 
 Read and follow the instructions in the appropriate provider file:
 - **GitHub** → `providers/github.md`
-- **Azure DevOps** → `providers/azure-devops.md` (sub-step C is the loop in **§4 — MANDATORY**, not the one-off example)
+- **Azure DevOps** → run the **entire self-contained script** in `providers/azure-devops.md` → *Posting the Review* (set `VERDICT` and `REVIEW_MODE` from step 3, ensure `/tmp/pr_thread_body.md` and `/tmp/pr_inline_findings.jsonl` exist, then execute as **one** `Bash` call). The script runs reconcile (sub-step R) when `REVIEW_MODE=rereview`. **Never** hand-build URLs with `AZURE_DEVOPS_ORG` / `PR_NUMBER` — use `source /tmp/pr_azure.env` and `PR_ID` inside the script.
 - **Bitbucket or Unknown Platform** → `providers/generic.md`
 
 > **Blocking vs non-blocking on CRITICAL findings:** by **default** a `REQUEST CHANGES` verdict is posted as a *non-blocking* review (GitHub `--comment`, Azure DevOps vote `-5`) so the plugin runs in advisory / shadow mode out of the box. To make `REQUEST CHANGES` *blocking* (GitHub `--request-changes`, Azure DevOps vote `-10`), set `PR_REVIEWER_BLOCK_ON_CRITICAL=true`. Verdict, report body, and inline comments are identical in both modes — only the platform-side review type changes. Provider files contain the exact mapping logic.

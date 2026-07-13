@@ -35,10 +35,13 @@ Do not ask for confirmation at any point. Execute all steps autonomously and pro
 
    **Azure DevOps:**
    ```bash
-   curl -s -u ":${AZURE_DEVOPS_TOKEN}" \
-     "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests/${PR_NUMBER}?api-version=7.1"
+   # Run Step 2 starting-comment script first if /tmp/pr_azure.env is missing.
+   source /tmp/pr_azure.env
+   PR_ID="${PR_ID:-${PR_NUMBER}}"
+   curl -sS -u ":${AZURE_DEVOPS_TOKEN}" \
+     "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests/${PR_ID}?api-version=7.1"
    ```
-   Parse org, project, repo, and `API_BASE` from `git remote get-url origin` as described in `providers/azure-devops.md`.
+   `API_BASE`, `AZURE_REPO`, and `PR_ID` come from `/tmp/pr_azure.env` (written in Step 2). Do **not** use `AZURE_DEVOPS_ORG`, `AZURE_DEVOPS_PROJECT`, or `PR_NUMBER` in REST paths.
 
    If the PR does not exist or is already completed/abandoned, stop and output a single error line — do not ask the user what to do.
 
@@ -65,7 +68,7 @@ Do not ask for confirmation at any point. Execute all steps autonomously and pro
    Follow the instructions in the appropriate provider file:
 
    - **GitHub** → `providers/github.md`
-   - **Azure DevOps** → `providers/azure-devops.md` — inline loop is in **§4 (MANDATORY)**, not the one-off example
+   - **Azure DevOps** → run the **entire self-contained script** in `providers/azure-devops.md` → *Posting the Review* (one `Bash` call; set `VERDICT` first)
    - **Generic / unknown** → `providers/generic.md`
 
 5. **Output result**

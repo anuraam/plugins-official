@@ -22,7 +22,25 @@ Optional — used to override values parsed from the remote URL:
 | `AZURE_PROJECT` | Parsed from remote URL |
 | `AZURE_REPO` | Parsed from remote URL |
 
----
+### Variable names — use ONLY these for API calls
+
+| Use | Do NOT invent |
+|---|---|
+| `API_BASE` | `https://dev.azure.com/${AZURE_DEVOPS_ORG}/...` hand-built URLs |
+| `AZURE_REPO` | `AZURE_DEVOPS_REPO` |
+| `PR_ID` | `PR_NUMBER` in REST paths (set `PR_ID` from the argument, then use `PR_ID` everywhere) |
+| `AZURE_ORG`, `AZURE_PROJECT` | `AZURE_DEVOPS_ORG`, `AZURE_DEVOPS_PROJECT` |
+
+`source /tmp/pr_azure.env` (written in Step 2) restores all of the above. **Never** hard-code org/project/repo from the PR title or argument — always parse from `git remote get-url origin`.
+
+### Input files — use ONLY these names
+
+| Purpose | Path |
+|---|---|
+| Full report body | `/tmp/pr_thread_body.md` |
+| Inline findings (JSONL) | `/tmp/pr_inline_findings.jsonl` |
+
+The posting script below accepts common agent mistakes (`/tmp/pr_review_summary.md`, `/tmp/pr_findings.jsonl`) as fallbacks, but always **write** the canonical paths when compiling the report.
 
 ## Parsing the Remote URL
 
@@ -37,7 +55,9 @@ Azure DevOps uses **four** URL shapes in the wild. **All must be handled** — t
 | 3 | `{org}.visualstudio.com/{project}/_git/{repo}` | `https://contoso.visualstudio.com/Web/_git/api` |
 | 4 | `{org}.visualstudio.com/{collection}/{project}/_git/{repo}` | `https://contoso.visualstudio.com/DefaultCollection/Web/_git/api` |
 
-Use the parser below — it anchors on the `_git` segment (always exactly one position before the repo and one position after the project), so it works for all four shapes:
+Use the parser below — it anchors on the `_git` segment (always exactly one position before the repo and one position after the project), so it works for all four shapes.
+
+> **Shortcut:** if Step 2 already ran the starting-comment script, `source /tmp/pr_azure.env` restores `API_BASE`, `AZURE_REPO`, `PR_ID`, etc. Re-run the parser only when that file is missing.
 
 ```bash
 REMOTE=$(git remote get-url origin)
@@ -210,12 +230,16 @@ If no PR number was passed as an argument, find the active PR for the current br
 In a detached-HEAD worktree (which is how the Xianix Executor runs the plugin), `git rev-parse --abbrev-ref HEAD` returns the literal string `HEAD`. Resolve the source branch from `git branch --contains` instead, or pass the branch name explicitly.
 
 ```bash
-if [ "$(git rev-parse --abbrev-ref HEAD)" = "HEAD" ]; then
-  BRANCH=$(git branch --contains "$(git rev-parse HEAD)" \
-    | sed 's|^[* ] *||' | grep -v '^(' | head -1)
-else
-  BRANCH=$(git rev-parse --abbrev-ref HEAD)
+BRANCH="${BRANCH_ARG:-}"
+if [ -z "$BRANCH" ]; then
+  if [ "$(git rev-parse --abbrev-ref HEAD)" = "HEAD" ]; then
+    BRANCH=$(git branch --contains "$(git rev-parse HEAD)" \
+      | sed 's|^[* ] *||' | grep -v '^(' | head -1)
+  else
+    BRANCH=$(git rev-parse --abbrev-ref HEAD)
+  fi
 fi
+BRANCH="${BRANCH#refs/heads/}"
 
 PR_ID=$(curl -sS -u ":${AZURE_DEVOPS_TOKEN}" \
   "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests?searchCriteria.sourceRefName=refs/heads/${BRANCH}&searchCriteria.status=active&api-version=7.1" \
@@ -253,10 +277,40 @@ Use `$PR_TARGET` as the **base branch** for diffs. Resolve it to a concrete SHA 
 
 Called from Step 3 of `commands/pr-review.md` to decide initial vs. re-review mode. On Azure DevOps the plugin's identity metadata lives in thread **`properties`** (HTML comments are not reliably hidden in the web UI), so detection reads `properties["pr-reviewer.fid"]` rather than scanning comment text.
 
+**Prerequisites:** `source /tmp/pr_azure.env` (or run the Step 2 starting-comment script first). Thread listing is paginated — the helper below follows `x-ms-continuationtoken` until all pages are merged.
+
 ```bash
-curl -sS -u ":${AZURE_DEVOPS_TOKEN}" \
-  "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads?api-version=7.1" \
-  > /tmp/pr_threads.json
+# shellcheck disable=SC1091
+[ -f /tmp/pr_azure.env ] && source /tmp/pr_azure.env
+PR_ID="${PR_ID:-${PR_NUMBER:-}}"
+[ -n "$PR_ID" ] && [ -n "${API_BASE:-}" ] && [ -n "${AZURE_REPO:-}" ] || {
+  echo "ERROR: detect prior review needs /tmp/pr_azure.env (API_BASE, AZURE_REPO, PR_ID)" >&2; exit 1; }
+
+: > /tmp/pr_threads_pages.jsonl
+CONTINUATION=""
+while :; do
+  URL="${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads?api-version=7.1"
+  [ -n "$CONTINUATION" ] && URL="${URL}&continuationToken=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$CONTINUATION")"
+  HEADERS=$(mktemp)
+  BODY=$(curl -sS -D "$HEADERS" -u ":${AZURE_DEVOPS_TOKEN}" "$URL")
+  echo "$BODY" >> /tmp/pr_threads_pages.jsonl
+  CONTINUATION=$(grep -i '^x-ms-continuationtoken:' "$HEADERS" | cut -d' ' -f2- | tr -d '\r' || true)
+  rm -f "$HEADERS"
+  [ -n "$CONTINUATION" ] || break
+done
+
+python3 - <<'PY' > /tmp/pr_threads.json
+import json
+threads = []
+for line in open('/tmp/pr_threads_pages.jsonl'):
+    line = line.strip()
+    if not line:
+        continue
+    data = json.loads(line)
+    threads.extend(data.get("value", []))
+json.dump({"value": threads}, open('/tmp/pr_threads.json', 'w'))
+print(f"Loaded {len(threads)} thread(s)")
+PY
 
 # Our marked finding threads → /tmp/pr_prior_findings.jsonl
 python3 - <<'PY' > /tmp/pr_prior_findings.jsonl
@@ -283,17 +337,24 @@ for t in data.get("value", []):
     }))
 PY
 
-# Most-recent summary marker sha (a thread with pr-reviewer.kind=summary)
+# Most-recent summary marker sha (summary thread with latest publishedDate)
 PRIOR_SUMMARY_SHA=$(python3 - <<'PY'
 import json
 data = json.load(open('/tmp/pr_threads.json'))
 def prop(props, key):
     v = (props or {}).get(key)
     return v.get("$value") if isinstance(v, dict) else v
-shas = [prop(t.get("properties") or {}, "pr-reviewer.sha")
-        for t in data.get("value", [])
-        if prop(t.get("properties") or {}, "pr-reviewer.kind") == "summary"]
-print([s for s in shas if s][-1] if any(shas) else "")
+summaries = []
+for t in data.get("value", []):
+    if prop(t.get("properties") or {}, "pr-reviewer.kind") != "summary":
+        continue
+    sha = prop(t.get("properties") or {}, "pr-reviewer.sha")
+    if not sha:
+        continue
+    published = (t.get("comments") or [{}])[0].get("publishedDate", "")
+    summaries.append((published, sha))
+summaries.sort()
+print(summaries[-1][1] if summaries else "")
 PY
 )
 export PRIOR_SUMMARY_SHA
@@ -321,14 +382,120 @@ The posting pattern above includes this on every call.
 
 Before running any analysis, post a plain PR comment thread to inform the author that a review is underway. This fires as the very first action on Azure DevOps, before sub-agents are launched.
 
+**This block is self-contained.** Run it as a **single** `Bash` call immediately after platform detection — do **not** assume `API_BASE` / `PR_ID` already exist (shell state does not persist between tool calls). Set `PR_NUMBER` from the invocation argument when a numeric PR id was given; set `BRANCH_ARG` when the executor passes a branch ref (e.g. `feat/foo` or `refs/heads/feat/foo`); leave both empty to resolve from the current branch.
+
 ```bash
-# Best-effort version stamp — cosmetic only, never spend more than one command on it.
+set -euo pipefail
+
+# --- 0. Token ---
+if [ -z "${AZURE_DEVOPS_TOKEN:-}" ]; then
+  echo "WARN: AZURE_DEVOPS_TOKEN unset — skipping review-in-progress comment" >&2
+  exit 0
+fi
+
+# --- 1. Parse remote → API_BASE / AZURE_REPO (same rules as "Parsing the Remote URL") ---
+REMOTE=$(git remote get-url origin)
+if echo "$REMOTE" | grep -qE '(ssh\.dev\.azure\.com|vs-ssh\.visualstudio\.com)'; then
+  V3_PATH=$(echo "$REMOTE" | sed -E 's|^ssh://||; s|^[^@]+@||; s|^[^:/]+[:/]+||')
+  REMOTE="https://dev.azure.com/$(echo "$V3_PATH" | cut -d/ -f2)/$(echo "$V3_PATH" | cut -d/ -f3)/_git/$(echo "$V3_PATH" | cut -d/ -f4)"
+fi
+REMOTE_CLEAN=$(echo "$REMOTE" | sed -E 's|https?://[^@]+@|https://|; s|\.git$||')
+AZURE_HOST=$(echo "$REMOTE_CLEAN" | awk -F/ '{print $3}')
+PATH_PARTS=$(echo "$REMOTE_CLEAN" | awk -F/ '{for (i=4; i<=NF; i++) print $i}')
+GIT_LINE=$(echo "$PATH_PARTS" | grep -nx '_git' | head -1 | cut -d: -f1 || true)
+if [ -z "$GIT_LINE" ]; then
+  echo "WARN: not an Azure DevOps git URL — skipping review-in-progress comment" >&2
+  exit 0
+fi
+AZURE_PROJECT=$(echo "$PATH_PARTS" | sed -n "$((GIT_LINE - 1))p")
+AZURE_REPO=$(echo    "$PATH_PARTS" | sed -n "$((GIT_LINE + 1))p")
+if [ "$AZURE_HOST" = "dev.azure.com" ]; then
+  AZURE_ORG=$(echo "$PATH_PARTS" | sed -n '1p')
+  PREFIX_START=2
+else
+  AZURE_ORG=$(echo "$AZURE_HOST" | cut -d'.' -f1)
+  PREFIX_START=1
+fi
+PROJECT_LINE=$((GIT_LINE - 1))
+if [ "$PROJECT_LINE" -gt "$PREFIX_START" ]; then
+  AZURE_COLLECTION=$(echo "$PATH_PARTS" | sed -n "${PREFIX_START},$((PROJECT_LINE - 1))p" | tr '\n' '/' | sed 's|/$||')
+else
+  AZURE_COLLECTION=""
+fi
+if [ "$AZURE_HOST" = "dev.azure.com" ]; then
+  HOST_AND_ORG_PATH="https://dev.azure.com/${AZURE_ORG}"
+else
+  HOST_AND_ORG_PATH="https://${AZURE_HOST}"
+fi
+if [ -n "$AZURE_COLLECTION" ]; then
+  API_BASE="${HOST_AND_ORG_PATH}/${AZURE_COLLECTION}/${AZURE_PROJECT}"
+else
+  API_BASE="${HOST_AND_ORG_PATH}/${AZURE_PROJECT}"
+fi
+case "$AZURE_PROJECT" in
+  ""|"_git"|"DefaultCollection"|"https:")
+    echo "WARN: bad AZURE_PROJECT='${AZURE_PROJECT}' from $REMOTE_CLEAN — skipping review-in-progress comment" >&2
+    exit 0
+    ;;
+esac
+if [ -z "$AZURE_ORG" ] || [ -z "$AZURE_REPO" ]; then
+  echo "WARN: could not parse org/repo from $REMOTE_CLEAN — skipping review-in-progress comment" >&2
+  exit 0
+fi
+
+# Persist parse results immediately so Step 3 / posting can proceed even if the
+# progress comment is skipped (no PR id yet, soft-fail later, etc.).
+write_azure_env() {
+  export AZURE_HOST AZURE_ORG AZURE_COLLECTION AZURE_PROJECT AZURE_REPO API_BASE PR_ID
+  {
+    echo "export AZURE_HOST=$(printf %q "$AZURE_HOST")"
+    echo "export AZURE_ORG=$(printf %q "$AZURE_ORG")"
+    echo "export AZURE_COLLECTION=$(printf %q "${AZURE_COLLECTION:-}")"
+    echo "export AZURE_PROJECT=$(printf %q "$AZURE_PROJECT")"
+    echo "export AZURE_REPO=$(printf %q "$AZURE_REPO")"
+    echo "export API_BASE=$(printf %q "$API_BASE")"
+    echo "export PR_ID=$(printf %q "${PR_ID:-}")"
+  } > /tmp/pr_azure.env
+}
+PR_ID=""
+write_azure_env
+echo "Azure DevOps target: org=${AZURE_ORG} project=${AZURE_PROJECT} repo=${AZURE_REPO}"
+echo "API_BASE=${API_BASE}"
+
+# --- 2. Resolve PR_ID (argument first, else active PR for current branch) ---
+PR_ID="${PR_NUMBER:-}"
+if [ -z "$PR_ID" ]; then
+  BRANCH="${BRANCH_ARG:-}"
+  if [ -z "$BRANCH" ] && [ "$(git rev-parse --abbrev-ref HEAD)" = "HEAD" ]; then
+    BRANCH=$(git branch --contains "$(git rev-parse HEAD)" \
+      | sed 's|^[* ] *||' | grep -v '^(' | head -1 || true)
+  elif [ -z "$BRANCH" ]; then
+    BRANCH=$(git rev-parse --abbrev-ref HEAD)
+  fi
+  # Strip refs/heads/ if the executor passed a full ref
+  BRANCH="${BRANCH#refs/heads/}"
+  if [ -z "${BRANCH:-}" ] || [ "$BRANCH" = "HEAD" ]; then
+    echo "WARN: no PR number and could not resolve branch — skipping review-in-progress comment" >&2
+    exit 0
+  fi
+  PR_ID=$(curl -sS -u ":${AZURE_DEVOPS_TOKEN}" \
+    "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests?searchCriteria.sourceRefName=refs/heads/${BRANCH}&searchCriteria.status=active&api-version=7.1" \
+    | python3 -c "import sys,json; prs=json.load(sys.stdin).get('value',[]); print(prs[0]['pullRequestId'] if prs else '')" 2>/dev/null || true)
+fi
+if [ -z "$PR_ID" ]; then
+  echo "WARN: no open PR found — skipping review-in-progress comment" >&2
+  exit 0
+fi
+write_azure_env
+echo "PR=#${PR_ID}"
+
+# --- 3. Post the progress thread ---
 PLUGIN_VERSION=$(grep -hom1 '"version"[^,}]*' ~/.claude/plugins/pr-reviewer/.claude-plugin/plugin.json \
   "$HOME/Library/Application Support/Claude/plugins/pr-reviewer/.claude-plugin/plugin.json" 2>/dev/null \
-  | cut -d'"' -f4)
+  | cut -d'"' -f4 || true)
 PLUGIN_VERSION=${PLUGIN_VERSION:-unknown}
 
-cat > /tmp/pr_thread_body.md <<BODY
+cat > /tmp/pr_progress_body.md <<BODY
 🔍 PR Review in Progress
 
 Claude Code is analyzing this pull request. The review will be posted here shortly.
@@ -338,7 +505,7 @@ BODY
 
 python3 - <<'PY' > /tmp/pr_thread_payload.json
 import json
-body = open('/tmp/pr_thread_body.md').read()
+body = open('/tmp/pr_progress_body.md').read()
 print(json.dumps({
     "comments": [{"content": body, "commentType": 1}],
     "status": "active",
@@ -346,18 +513,296 @@ print(json.dumps({
 }))
 PY
 
-curl -sS -w "\nHTTP_STATUS:%{http_code}\n" \
+RESP=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
   -H "Content-Type: application/json" \
   -u ":${AZURE_DEVOPS_TOKEN}" \
   -X POST --data @/tmp/pr_thread_payload.json \
-  "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads?api-version=7.1"
+  "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads?api-version=7.1" \
+  || true)
+STATUS=$(echo "$RESP" | sed -n 's/^HTTP_STATUS://p')
+if echo "${STATUS:-}" | grep -qE '^2'; then
+  echo "Review-in-progress comment posted on PR #${PR_ID} (HTTP $STATUS)"
+else
+  echo "WARN: review-in-progress comment failed HTTP ${STATUS:-curl-error} — body: $(echo "$RESP" | sed '$d')" >&2
+fi
 ```
 
-If posting the starting comment fails, output a single warning line and continue — do not stop the review.
+If posting the starting comment fails, output a single warning line and continue — do not stop the review. Later steps that need `API_BASE` / `PR_ID` should `source /tmp/pr_azure.env` (written above) or re-run the remote-URL parser.
 
 ---
 
 ## Posting the Review
+
+**Run the self-contained script below as a single `Bash` call.** It loads `/tmp/pr_azure.env`, casts the vote, posts the summary thread, and loops inline findings. Set `VERDICT` before running. Do **not** hand-build `curl` URLs or invent `AZURE_DEVOPS_*` variables — that is the #1 cause of 401/404 posting failures.
+
+**Inputs (written by earlier steps):**
+- `/tmp/pr_thread_body.md` — full compiled report (fallback: `/tmp/pr_review_summary.md`)
+- `/tmp/pr_inline_findings.jsonl` — one JSON object per finding (fallback: `/tmp/pr_findings.jsonl`)
+
+```bash
+set -euo pipefail
+
+: "${VERDICT:=NEEDS DISCUSSION}"
+
+# --- 0. Token ---
+if [ -z "${AZURE_DEVOPS_TOKEN:-}" ]; then
+  echo "ERROR: AZURE_DEVOPS_TOKEN unset — cannot post review" >&2
+  exit 1
+fi
+
+# --- 1. Load API targets (from Step 2) or re-parse remote ---
+if [ -f /tmp/pr_azure.env ]; then
+  # shellcheck disable=SC1091
+  source /tmp/pr_azure.env
+else
+  echo "WARN: /tmp/pr_azure.env missing — re-parsing remote" >&2
+  REMOTE=$(git remote get-url origin)
+  if echo "$REMOTE" | grep -qE '(ssh\.dev\.azure\.com|vs-ssh\.visualstudio\.com)'; then
+    V3_PATH=$(echo "$REMOTE" | sed -E 's|^ssh://||; s|^[^@]+@||; s|^[^:/]+[:/]+||')
+    REMOTE="https://dev.azure.com/$(echo "$V3_PATH" | cut -d/ -f2)/$(echo "$V3_PATH" | cut -d/ -f3)/_git/$(echo "$V3_PATH" | cut -d/ -f4)"
+  fi
+  REMOTE_CLEAN=$(echo "$REMOTE" | sed -E 's|https?://[^@]+@|https://|; s|\.git$||')
+  AZURE_HOST=$(echo "$REMOTE_CLEAN" | awk -F/ '{print $3}')
+  PATH_PARTS=$(echo "$REMOTE_CLEAN" | awk -F/ '{for (i=4; i<=NF; i++) print $i}')
+  GIT_LINE=$(echo "$PATH_PARTS" | grep -nx '_git' | head -1 | cut -d: -f1 || true)
+  [ -n "$GIT_LINE" ] || { echo "ERROR: not an Azure DevOps git URL" >&2; exit 1; }
+  AZURE_PROJECT=$(echo "$PATH_PARTS" | sed -n "$((GIT_LINE - 1))p")
+  AZURE_REPO=$(echo    "$PATH_PARTS" | sed -n "$((GIT_LINE + 1))p")
+  if [ "$AZURE_HOST" = "dev.azure.com" ]; then
+    AZURE_ORG=$(echo "$PATH_PARTS" | sed -n '1p'); PREFIX_START=2
+    HOST_AND_ORG_PATH="https://dev.azure.com/${AZURE_ORG}"
+  else
+    AZURE_ORG=$(echo "$AZURE_HOST" | cut -d'.' -f1); PREFIX_START=1
+    HOST_AND_ORG_PATH="https://${AZURE_HOST}"
+  fi
+  PROJECT_LINE=$((GIT_LINE - 1))
+  if [ "$PROJECT_LINE" -gt "$PREFIX_START" ]; then
+    AZURE_COLLECTION=$(echo "$PATH_PARTS" | sed -n "${PREFIX_START},$((PROJECT_LINE - 1))p" | tr '\n' '/' | sed 's|/$||')
+    API_BASE="${HOST_AND_ORG_PATH}/${AZURE_COLLECTION}/${AZURE_PROJECT}"
+  else
+    AZURE_COLLECTION=""
+    API_BASE="${HOST_AND_ORG_PATH}/${AZURE_PROJECT}"
+  fi
+fi
+PR_ID="${PR_ID:-${PR_NUMBER:-}}"
+if [ -z "$PR_ID" ]; then
+  echo "ERROR: PR_ID unset — pass PR number as argument and set PR_NUMBER before posting" >&2
+  exit 1
+fi
+echo "Posting to ${API_BASE}/_git/${AZURE_REPO}/pullrequest/${PR_ID}"
+
+# --- 2. Normalize input files ---
+if [ ! -f /tmp/pr_thread_body.md ] && [ -f /tmp/pr_review_summary.md ]; then
+  cp /tmp/pr_review_summary.md /tmp/pr_thread_body.md
+fi
+if [ ! -f /tmp/pr_inline_findings.jsonl ] && [ -f /tmp/pr_findings.jsonl ]; then
+  cp /tmp/pr_findings.jsonl /tmp/pr_inline_findings.jsonl
+fi
+[ -f /tmp/pr_thread_body.md ] || { echo "ERROR: /tmp/pr_thread_body.md missing" >&2; exit 1; }
+touch /tmp/pr_inline_findings.jsonl
+# Normalize pretty-printed / array / concatenated JSON into one-object-per-line JSONL
+python3 - <<'PY'
+import json
+from pathlib import Path
+src = Path('/tmp/pr_inline_findings.jsonl')
+text = src.read_text().strip()
+out = Path('/tmp/pr_inline_findings.normalized.jsonl')
+findings = []
+if text:
+    try:
+        data = json.loads(text)
+        if isinstance(data, list):
+            findings = data
+        elif isinstance(data, dict):
+            findings = [data]
+    except json.JSONDecodeError:
+        dec = json.JSONDecoder()
+        i = 0
+        while i < len(text):
+            while i < len(text) and text[i].isspace():
+                i += 1
+            if i >= len(text):
+                break
+            obj, end = dec.raw_decode(text, i)
+            findings.append(obj)
+            i = end
+with out.open('w') as f:
+    for item in findings:
+        f.write(json.dumps(item) + '\n')
+print(f"Normalized {len(findings)} finding(s) for inline posting")
+PY
+mv /tmp/pr_inline_findings.normalized.jsonl /tmp/pr_inline_findings.jsonl
+
+# --- 3. Map verdict → vote ---
+case "${PR_REVIEWER_BLOCK_ON_CRITICAL:-false}" in
+  true|True|TRUE|1|yes|Yes|YES) BLOCK_ON_CRITICAL=true ;;
+  *)                              BLOCK_ON_CRITICAL=false ;;
+esac
+case "${VERDICT}" in
+  "APPROVE")                     VOTE=10  ;;
+  "APPROVE WITH SUGGESTIONS")    VOTE=5   ;;
+  "REQUEST CHANGES")
+    if [ "$BLOCK_ON_CRITICAL" = "true" ]; then VOTE=-10; else VOTE=-5; fi
+    ;;
+  "NEEDS DISCUSSION")            VOTE=-5  ;;
+  *)                             echo "WARN: unknown verdict '${VERDICT}' — defaulting to -5" >&2; VOTE=-5 ;;
+esac
+
+# --- 4. Cast vote ---
+REVIEWER_ID=$(curl -sS -u ":${AZURE_DEVOPS_TOKEN}" \
+  "https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || true)
+if [ -z "$REVIEWER_ID" ]; then
+  echo "WARN: could not resolve reviewer ID — vote will not be cast" >&2
+else
+  VOTE_BODY=$(printf '{"vote": %s, "id": "%s"}' "$VOTE" "$REVIEWER_ID")
+  VOTE_RESP=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
+    -H "Content-Type: application/json" -u ":${AZURE_DEVOPS_TOKEN}" -X PUT \
+    -d "$VOTE_BODY" \
+    "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/reviewers/${REVIEWER_ID}?api-version=7.1" \
+    || true)
+  VOTE_STATUS=$(echo "$VOTE_RESP" | sed -n 's/^HTTP_STATUS://p')
+  if ! echo "${VOTE_STATUS:-}" | grep -qE '^2'; then
+    # Reviewer may not be on the PR yet — add them with the vote in one POST
+    ADD_RESP=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
+      -H "Content-Type: application/json" -u ":${AZURE_DEVOPS_TOKEN}" -X POST \
+      -d "[${VOTE_BODY}]" \
+      "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/reviewers?api-version=7.1" \
+      || true)
+    ADD_STATUS=$(echo "$ADD_RESP" | sed -n 's/^HTTP_STATUS://p')
+    if echo "${ADD_STATUS:-}" | grep -qE '^2'; then
+      echo "Vote ${VOTE} cast via reviewer add (HTTP $ADD_STATUS)"
+    else
+      echo "WARN: vote failed PUT HTTP ${VOTE_STATUS:-?} and POST HTTP ${ADD_STATUS:-?}" >&2
+    fi
+  else
+    echo "Vote ${VOTE} cast (HTTP $VOTE_STATUS)"
+  fi
+fi
+
+# --- 5. Post summary thread ---
+HEAD_SHA=$(git rev-parse HEAD)
+export HEAD_SHA
+python3 - <<'PY' > /tmp/pr_thread_payload.json
+import json, os
+body = open('/tmp/pr_thread_body.md').read()
+print(json.dumps({
+    "comments": [{"content": body, "commentType": 1}],
+    "status": "active",
+    "properties": {
+        "Microsoft.TeamFoundation.Discussion.SupportsMarkdown": 1,
+        "pr-reviewer.kind": "summary",
+        "pr-reviewer.sha": os.environ["HEAD_SHA"],
+    },
+}))
+PY
+SUM_RESP=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
+  -H "Content-Type: application/json" -u ":${AZURE_DEVOPS_TOKEN}" -X POST \
+  --data @/tmp/pr_thread_payload.json \
+  "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads?api-version=7.1" \
+  || true)
+SUM_STATUS=$(echo "$SUM_RESP" | sed -n 's/^HTTP_STATUS://p')
+if echo "${SUM_STATUS:-}" | grep -qE '^2'; then
+  echo "Summary thread posted (HTTP $SUM_STATUS)"
+else
+  echo "WARN: summary thread failed HTTP ${SUM_STATUS:-curl-error} — body: $(echo "$SUM_RESP" | sed '$d')" >&2
+fi
+
+# --- 5b. Re-review: reconcile fixed findings (sub-step R) ---
+if [ "${REVIEW_MODE:-initial}" = "rereview" ] && [ -f /tmp/pr_reconcile.json ]; then
+  RESOLVED_OK=0
+  RESOLVED_FAIL=0
+  : > /tmp/pr_resolved.log
+  HEAD_SHA=$(git rev-parse HEAD)
+  python3 -c "import json; [print(json.dumps(x)) for x in json.load(open('/tmp/pr_reconcile.json')).get('fixed',[])]" \
+  | while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    THREAD_ID=$(echo "$f" | python3 -c "import sys,json; print(json.load(sys.stdin)['thread_ref'])")
+    cat > /tmp/pr_resolve_body.md <<BODY
+✅ Resolved as of \`${HEAD_SHA}\`. This finding no longer reproduces against the current head.
+BODY
+    python3 - <<'PY' > /tmp/pr_resolve_payload.json
+import json
+print(json.dumps({"content": open('/tmp/pr_resolve_body.md').read(), "commentType": 1}))
+PY
+    curl -sS -o /dev/null -H "Content-Type: application/json" -u ":${AZURE_DEVOPS_TOKEN}" -X POST \
+      --data @/tmp/pr_resolve_payload.json \
+      "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads/${THREAD_ID}/comments?api-version=7.1" || true
+    RESP=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" -H "Content-Type: application/json" \
+      -u ":${AZURE_DEVOPS_TOKEN}" -X PATCH -d '{"status":"fixed"}' \
+      "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads/${THREAD_ID}?api-version=7.1" || true)
+    STATUS=$(echo "$RESP" | sed -n 's/^HTTP_STATUS://p')
+    if echo "${STATUS:-}" | grep -qE '^2'; then echo ok >> /tmp/pr_resolved.log; else echo "fail $THREAD_ID HTTP ${STATUS:-?}" >> /tmp/pr_resolved.log; fi
+  done
+  RESOLVED_OK=$(grep -c '^ok' /tmp/pr_resolved.log 2>/dev/null || echo 0)
+  RESOLVED_FAIL=$(grep -c '^fail' /tmp/pr_resolved.log 2>/dev/null || echo 0)
+  export RESOLVED_OK RESOLVED_FAIL
+  echo "Reconciled: ${RESOLVED_OK} prior finding(s) resolved (${RESOLVED_FAIL} failed)"
+fi
+
+# --- 6. Post inline findings (one thread per JSONL line) ---
+INLINE_TOTAL=0
+INLINE_OK=0
+INLINE_FAIL=0
+: > /tmp/pr_inline_failures.log
+
+while IFS= read -r line; do
+  [ -z "$line" ] && continue
+  INLINE_TOTAL=$((INLINE_TOTAL + 1))
+  echo "$line" > /tmp/pr_inline_finding.json
+  if ! HEAD_SHA=$(git rev-parse HEAD) python3 - <<'PY' > /tmp/pr_thread_payload.json 2>>/tmp/pr_inline_failures.log
+import json, os
+f = json.load(open('/tmp/pr_inline_finding.json'))
+file_path = f.get("file") or f.get("path") or ""
+line_no = int(f.get("line") or f.get("line_number") or 0)
+body = f.get("body") or f.get("comment") or ""
+if not file_path or not line_no or not body:
+    raise SystemExit("missing file/line/body in finding")
+print(json.dumps({
+    "comments": [{"content": body, "commentType": 1}],
+    "status": "active",
+    "properties": {
+        "Microsoft.TeamFoundation.Discussion.SupportsMarkdown": 1,
+        "pr-reviewer.kind": "finding",
+        "pr-reviewer.fid": f.get("fid", ""),
+        "pr-reviewer.sha": os.environ["HEAD_SHA"],
+    },
+    "threadContext": {
+        "filePath": "/" + file_path.lstrip("/"),
+        "rightFileStart": {"line": line_no, "offset": 1},
+        "rightFileEnd":   {"line": line_no, "offset": 1},
+    },
+}))
+PY
+  then
+    INLINE_FAIL=$((INLINE_FAIL + 1))
+    { echo "---"; echo "finding: $line"; echo "payload build failed"; } >> /tmp/pr_inline_failures.log
+    continue
+  fi
+  RESP=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
+    -H "Content-Type: application/json" -u ":${AZURE_DEVOPS_TOKEN}" -X POST \
+    --data @/tmp/pr_thread_payload.json \
+    "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads?api-version=7.1" \
+    || true)
+  STATUS=$(echo "$RESP" | sed -n 's/^HTTP_STATUS://p')
+  if echo "${STATUS:-}" | grep -qE '^2'; then
+    INLINE_OK=$((INLINE_OK + 1))
+  else
+    INLINE_FAIL=$((INLINE_FAIL + 1))
+    { echo "---"; echo "finding: $line"; echo "HTTP ${STATUS:-?}:"; echo "$RESP" | sed '$d'; } >> /tmp/pr_inline_failures.log
+  fi
+done < /tmp/pr_inline_findings.jsonl
+
+echo "Inline comments: ${INLINE_OK}/${INLINE_TOTAL} posted (${INLINE_FAIL} failed)"
+if [ "$INLINE_FAIL" -gt 0 ]; then
+  echo "WARN: see /tmp/pr_inline_failures.log" >&2
+  head -40 /tmp/pr_inline_failures.log >&2
+fi
+export INLINE_OK INLINE_FAIL INLINE_TOTAL
+echo "Review posted on PR #${PR_ID}: ${VERDICT} — ${INLINE_OK}/${INLINE_TOTAL} inline — ${API_BASE}/_git/${AZURE_REPO}/pullrequest/${PR_ID}"
+```
+
+The subsections below explain each step. **Do not reimplement them as separate one-off `curl` calls** — use the script above.
 
 ### 1. Map verdict to Azure DevOps vote
 
