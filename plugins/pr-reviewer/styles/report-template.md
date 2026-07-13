@@ -31,6 +31,15 @@ Reviewed [N] new commit(s) since the last review (`[prior sha]`..`[current sha]`
 
 ---
 
+### Existing review threads
+> Include when `/tmp/pr_open_threads.jsonl` was non-empty (initial or re-review). Omit entirely when there were no open threads to consider.
+
+- ✅ Appears addressed: [count] open thread(s) — will reply, leave open for original author
+- ⏳ Still open: [count] open thread(s) — no reply (avoid spam)
+- 🔇 Duplicates avoided: [count] finding(s) not re-posted
+
+---
+
 ### Summary
 [2-3 sentence overall assessment of the change]
 

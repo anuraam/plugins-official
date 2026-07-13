@@ -275,7 +275,7 @@ Use `$PR_TARGET` as the **base branch** for diffs. Resolve it to a concrete SHA 
 
 ## Detecting a prior review (re-review awareness)
 
-Called from Step 3 of `commands/pr-review.md` to decide initial vs. re-review mode. On Azure DevOps the plugin's identity metadata lives in thread **`properties`** (HTML comments are not reliably hidden in the web UI), so detection reads `properties["pr-reviewer.fid"]` rather than scanning comment text.
+Called from Step 3 of `commands/pr-review.md` to decide initial vs. re-review mode. On Azure DevOps the plugin's identity metadata lives in thread **`properties`** (HTML comments are not reliably hidden in the web UI), so detection reads `properties["pr-reviewer.fid"]` rather than scanning comment text. The same thread listing also writes **all open inline threads** (humans, bots, and this plugin) to `/tmp/pr_open_threads.jsonl` for external-thread awareness, dedup, and reply-only validation.
 
 **Prerequisites:** `source /tmp/pr_azure.env` (or run the Step 2 starting-comment script first). Thread listing is paginated — the helper below follows `x-ms-continuationtoken` until all pages are merged.
 
@@ -313,7 +313,8 @@ print(f"Loaded {len(threads)} thread(s)")
 PY
 
 # Our marked finding threads → /tmp/pr_prior_findings.jsonl
-python3 - <<'PY' > /tmp/pr_prior_findings.jsonl
+# AND all open inline threads → /tmp/pr_open_threads.jsonl
+python3 - <<'PY'
 import json
 data = json.load(open('/tmp/pr_threads.json'))
 def prop(props, key):
@@ -321,20 +322,50 @@ def prop(props, key):
     if isinstance(v, dict):      # PropertiesCollection form: {"$type":..,"$value":..}
         return v.get("$value")
     return v
+RESOLVED = ("fixed", "closed", "wontFix", "byDesign")
+prior = open('/tmp/pr_prior_findings.jsonl', 'w')
+open_threads = open('/tmp/pr_open_threads.jsonl', 'w')
 for t in data.get("value", []):
     props = t.get("properties") or {}
-    if prop(props, "pr-reviewer.kind") != "finding":
-        continue
     fid = prop(props, "pr-reviewer.fid")
-    if not fid:
-        continue
+    is_plugin = prop(props, "pr-reviewer.kind") == "finding" and bool(fid)
     # Azure status enum: active|fixed|wontFix|closed|byDesign|pending
     status = t.get("status", "active")
-    print(json.dumps({
-        "fid": fid,
-        "status": "resolved" if status in ("fixed", "closed", "wontFix", "byDesign") else "open",
-        "thread_ref": t["id"],   # numeric thread id — used for PATCH + reply
-    }))
+    resolved = status in RESOLVED
+    if is_plugin:
+        prior.write(json.dumps({
+            "fid": fid,
+            "status": "resolved" if resolved else "open",
+            "thread_ref": t["id"],   # numeric thread id — used for PATCH + reply
+        }) + '\n')
+    # Open inline threads only (threadContext.filePath = file-anchored)
+    ctx = t.get("threadContext") or {}
+    file_path = ctx.get("filePath") or ""
+    if resolved or not file_path:
+        continue
+    comments = t.get("comments") or []
+    first = comments[0] if comments else {}
+    body = first.get("content") or ""
+    author = ((first.get("author") or {}) or {}).get("displayName") or \
+             ((first.get("author") or {}) or {}).get("uniqueName") or ""
+    # Prefer right-side (new) line; fall back to left-side
+    line = None
+    for side in ("rightFileStart", "leftFileStart"):
+        loc = ctx.get(side) or {}
+        if loc.get("line"):
+            line = loc["line"]
+            break
+    open_threads.write(json.dumps({
+        "file": file_path.lstrip("/"),  # Azure often prefixes with /
+        "line": line,
+        "body": body,
+        "author": author,
+        "is_plugin": is_plugin,
+        "thread_ref": t["id"],
+        "comment_ref": first.get("id"),
+    }) + '\n')
+prior.close()
+open_threads.close()
 PY
 
 # Most-recent summary marker sha (summary thread with latest publishedDate)
@@ -360,7 +391,7 @@ PY
 export PRIOR_SUMMARY_SHA
 ```
 
-If `/tmp/pr_prior_findings.jsonl` is empty, the run is an **initial** review. Reconciliation matches on `fid` only, so `file`/`line` are not needed here.
+If `/tmp/pr_prior_findings.jsonl` is empty, the run is an **initial** review. Plugin reconciliation matches on `fid` only, so `file`/`line` are not needed on prior findings. `/tmp/pr_open_threads.jsonl` may still be non-empty when other reviewers left open inline comments (used for dedup and external-thread replies even on the first plugin run).
 
 ---
 
@@ -768,6 +799,36 @@ PY
   echo "Reconciled: ${RESOLVED_OK} prior finding(s) resolved (${RESOLVED_FAIL} failed)"
 fi
 
+# --- 5c. Reply on addressed external threads (sub-step E) — never resolve ---
+EXTERNAL_REPLY_OK=0
+EXTERNAL_REPLY_FAIL=0
+: > /tmp/pr_external_replies.log
+if [ -f /tmp/pr_external_reconcile.json ]; then
+  HEAD_SHA=$(git rev-parse HEAD)
+  python3 -c "import json; [print(json.dumps(x)) for x in json.load(open('/tmp/pr_external_reconcile.json')).get('addressed',[])]" \
+  | while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    THREAD_ID=$(echo "$f" | python3 -c "import sys,json; print(json.load(sys.stdin).get('thread_ref') or '')")
+    [ -n "$THREAD_ID" ] || { echo "fail missing thread_ref" >> /tmp/pr_external_replies.log; continue; }
+    cat > /tmp/pr_external_reply_body.md <<BODY
+Looks addressed as of \`${HEAD_SHA}\` — leaving this thread open for the original author to resolve.
+BODY
+    python3 - <<'PY' > /tmp/pr_external_reply_payload.json
+import json
+print(json.dumps({"content": open('/tmp/pr_external_reply_body.md').read(), "commentType": 1}))
+PY
+    RESP=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" -H "Content-Type: application/json" \
+      -u ":${AZURE_DEVOPS_TOKEN}" -X POST --data @/tmp/pr_external_reply_payload.json \
+      "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads/${THREAD_ID}/comments?api-version=7.1" || true)
+    STATUS=$(echo "$RESP" | sed -n 's/^HTTP_STATUS://p')
+    if echo "${STATUS:-}" | grep -qE '^2'; then echo ok >> /tmp/pr_external_replies.log; else echo "fail $THREAD_ID HTTP ${STATUS:-?}" >> /tmp/pr_external_replies.log; fi
+  done
+  EXTERNAL_REPLY_OK=$(grep -c '^ok' /tmp/pr_external_replies.log 2>/dev/null || echo 0)
+  EXTERNAL_REPLY_FAIL=$(grep -c '^fail' /tmp/pr_external_replies.log 2>/dev/null || echo 0)
+  export EXTERNAL_REPLY_OK EXTERNAL_REPLY_FAIL
+  echo "External replies: ${EXTERNAL_REPLY_OK} addressed thread(s) acknowledged (${EXTERNAL_REPLY_FAIL} failed) — threads left open"
+fi
+
 # --- 6. Post inline findings (one thread per JSONL line) ---
 INLINE_TOTAL=0
 INLINE_OK=0
@@ -1120,16 +1181,56 @@ echo "Reconciled: ${RESOLVED_OK} prior finding(s) resolved (${RESOLVED_FAIL} fai
 
 ---
 
+## Replying on addressed external threads (sub-step E)
+
+Runs when `/tmp/pr_external_reconcile.json` exists and `addressed` is non-empty (initial **or** re-review). Reply only — **never** PATCH the thread status. Resolution stays with the original author. (The self-contained *Posting the Review* script already includes this as step 5c; the block below is the standalone reference.)
+
+```bash
+EXTERNAL_REPLY_OK=0
+EXTERNAL_REPLY_FAIL=0
+HEAD_SHA=$(git rev-parse HEAD)
+: > /tmp/pr_external_replies.log
+
+if [ -f /tmp/pr_external_reconcile.json ]; then
+  python3 -c "import json,sys; [print(json.dumps(x)) for x in json.load(open('/tmp/pr_external_reconcile.json')).get('addressed',[])]" \
+  | while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    THREAD_ID=$(echo "$f" | python3 -c "import sys,json; print(json.load(sys.stdin).get('thread_ref') or '')")
+    [ -n "$THREAD_ID" ] || { echo "fail missing thread_ref" >> /tmp/pr_external_replies.log; continue; }
+    cat > /tmp/pr_external_reply_body.md <<BODY
+Looks addressed as of \`${HEAD_SHA}\` — leaving this thread open for the original author to resolve.
+BODY
+    python3 - <<'PY' > /tmp/pr_external_reply_payload.json
+import json
+print(json.dumps({"content": open('/tmp/pr_external_reply_body.md').read(), "commentType": 1}))
+PY
+    RESP=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
+      -H "Content-Type: application/json" \
+      -u ":${AZURE_DEVOPS_TOKEN}" \
+      -X POST --data @/tmp/pr_external_reply_payload.json \
+      "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads/${THREAD_ID}/comments?api-version=7.1")
+    STATUS=$(echo "$RESP" | sed -n 's/^HTTP_STATUS://p')
+    if echo "$STATUS" | grep -qE '^2'; then echo ok >> /tmp/pr_external_replies.log; else echo "fail $THREAD_ID HTTP $STATUS" >> /tmp/pr_external_replies.log; fi
+  done
+  EXTERNAL_REPLY_OK=$(grep -c '^ok' /tmp/pr_external_replies.log 2>/dev/null || echo 0)
+  EXTERNAL_REPLY_FAIL=$(grep -c '^fail' /tmp/pr_external_replies.log 2>/dev/null || echo 0)
+fi
+export EXTERNAL_REPLY_OK EXTERNAL_REPLY_FAIL
+echo "External replies: ${EXTERNAL_REPLY_OK} addressed thread(s) acknowledged (${EXTERNAL_REPLY_FAIL} failed) — threads left open"
+```
+
+---
+
 ## Output
 
 On completion, use the counters from the inline-comment loop in step 4 (`$INLINE_OK` / `$INLINE_TOTAL`) — do **not** print a hard-coded number.
 
 ```
 # initial mode
-Review posted on PR #<id>: <verdict> — ${INLINE_OK}/${INLINE_TOTAL} inline comments — ${API_BASE}/_git/${AZURE_REPO}/pullrequest/<id>
+Review posted on PR #<id>: <verdict> — ${INLINE_OK}/${INLINE_TOTAL} inline comments — ${EXTERNAL_REPLY_OK} external replies — ${API_BASE}/_git/${AZURE_REPO}/pullrequest/<id>
 
 # re-review mode (add reconciliation counters)
-Re-review posted on PR #<id>: <verdict> — ${INLINE_OK}/${INLINE_TOTAL} new — ${RESOLVED_OK} resolved — ${API_BASE}/_git/${AZURE_REPO}/pullrequest/<id>
+Re-review posted on PR #<id>: <verdict> — ${INLINE_OK}/${INLINE_TOTAL} new — ${RESOLVED_OK} resolved — ${EXTERNAL_REPLY_OK} external replies — ${API_BASE}/_git/${AZURE_REPO}/pullrequest/<id>
 ```
 
 If `INLINE_OK == 0` but the report had findings with file:line references, treat the run as a partial failure and surface the first few lines of `/tmp/pr_inline_failures.log` in the output so the user knows the inline step did not actually deliver.

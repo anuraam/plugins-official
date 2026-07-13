@@ -48,7 +48,7 @@ REPO=$(echo "$REMOTE"  | sed 's|https://github.com/||;s|git@github.com:||' | cut
 
 ## Detecting a prior review (re-review awareness)
 
-Called from Step 3 of `commands/pr-review.md` to decide initial vs. re-review mode. It reads the plugin's **own** previous comments (identified by the `<!-- pr-reviewer:v1 ... -->` marker) and writes a normalised prior-findings file the reconciliation step consumes.
+Called from Step 3 of `commands/pr-review.md` to decide initial vs. re-review mode. It reads the plugin's **own** previous comments (identified by the `<!-- pr-reviewer:v1 ... -->` marker) and writes a normalised prior-findings file the reconciliation step consumes. The same GraphQL fetch also writes **all open inline threads** (humans, bots, and this plugin) to `/tmp/pr_open_threads.jsonl` for external-thread awareness, dedup, and reply-only validation.
 
 GitHub's REST review-comments endpoint returns comment bodies and ids but **not** the review-thread node id needed to resolve a thread. GraphQL returns both, so use it:
 
@@ -64,7 +64,15 @@ gh api graphql --paginate --slurp -f query='
           nodes {
             id
             isResolved
-            comments(first:1) { nodes { databaseId body } }
+            path
+            line
+            comments(first:1) {
+              nodes {
+                databaseId
+                body
+                author { login }
+              }
+            }
           }
         }
       }
@@ -72,7 +80,8 @@ gh api graphql --paginate --slurp -f query='
   }' -F owner="$OWNER" -F repo="$REPO" -F pr="$PR_NUMBER" > /tmp/pr_review_threads.json
 
 # Extract our marked finding threads → /tmp/pr_prior_findings.jsonl
-python3 - <<'PY' > /tmp/pr_prior_findings.jsonl
+# AND all open inline threads → /tmp/pr_open_threads.jsonl
+python3 - <<'PY'
 import json, re
 pages = json.load(open('/tmp/pr_review_threads.json'))
 if isinstance(pages, dict):   # older gh without --slurp support returns one page
@@ -81,19 +90,38 @@ threads = []
 for page in pages:
     threads += page['data']['repository']['pullRequest']['reviewThreads']['nodes']
 pat = re.compile(r'<!--\s*pr-reviewer:v1\s+kind=finding\s+fid=(\S+)\s+sha=(\S+)\s*-->')
+
+prior = open('/tmp/pr_prior_findings.jsonl', 'w')
+open_threads = open('/tmp/pr_open_threads.jsonl', 'w')
 for t in threads:
     c = (t['comments']['nodes'] or [None])[0]
     if not c:
         continue
-    m = pat.search(c['body'] or '')
-    if not m:
+    body = c['body'] or ''
+    m = pat.search(body)
+    is_plugin = bool(m)
+    if m:
+        prior.write(json.dumps({
+            "fid": m.group(1),
+            "status": "resolved" if t['isResolved'] else "open",
+            "thread_ref": t['id'],            # GraphQL node id — used by resolveReviewThread
+            "comment_ref": c['databaseId'],   # REST comment id — used to post a reply
+        }) + '\n')
+    # Open inline threads only (path present = file-anchored review comment)
+    if t.get('isResolved') or not t.get('path'):
         continue
-    print(json.dumps({
-        "fid": m.group(1),
-        "status": "resolved" if t['isResolved'] else "open",
-        "thread_ref": t['id'],            # GraphQL node id — used by resolveReviewThread
-        "comment_ref": c['databaseId'],   # REST comment id — used to post a reply
-    }))
+    author = ((c.get('author') or {}) or {}).get('login') or ''
+    open_threads.write(json.dumps({
+        "file": t.get('path') or '',
+        "line": t.get('line'),
+        "body": body,
+        "author": author,
+        "is_plugin": is_plugin,
+        "thread_ref": t['id'],
+        "comment_ref": c['databaseId'],
+    }) + '\n')
+prior.close()
+open_threads.close()
 PY
 
 # Most-recent summary marker sha. The summary marker is stamped on the body of
@@ -107,7 +135,7 @@ PRIOR_SUMMARY_SHA=$(gh api "repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}/reviews" -
 export PRIOR_SUMMARY_SHA
 ```
 
-If `/tmp/pr_prior_findings.jsonl` is empty, the run is an **initial** review. The `file`/`line` fields are intentionally omitted here — reconciliation matches on `fid` alone, so they are not needed.
+If `/tmp/pr_prior_findings.jsonl` is empty, the run is an **initial** review. The `file`/`line` fields are intentionally omitted from prior findings — plugin reconciliation matches on `fid` alone. `/tmp/pr_open_threads.jsonl` may still be non-empty when other reviewers left open inline comments (used for dedup and external-thread replies even on the first plugin run).
 
 ---
 
@@ -392,16 +420,51 @@ If `resolveReviewThread` returns a permissions error, the token lacks write acce
 
 ---
 
+## Replying on addressed external threads (sub-step E)
+
+Runs when `/tmp/pr_external_reconcile.json` exists and `addressed` is non-empty (initial **or** re-review). Reply only — **never** call `resolveReviewThread` on these threads. Resolution stays with the original author.
+
+```bash
+HEAD_SHA=$(git rev-parse HEAD)
+: > /tmp/pr_external_replies.log
+EXTERNAL_REPLY_OK=0
+EXTERNAL_REPLY_FAIL=0
+
+if [ -f /tmp/pr_external_reconcile.json ]; then
+  python3 -c "import json,sys; [print(json.dumps(x)) for x in json.load(open('/tmp/pr_external_reconcile.json')).get('addressed',[])]" \
+  | while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    COMMENT_ID=$(echo "$f" | python3 -c "import sys,json; print(json.load(sys.stdin).get('comment_ref') or '')")
+    [ -n "$COMMENT_ID" ] || { echo "fail missing comment_ref" >> /tmp/pr_external_replies.log; continue; }
+
+    gh api "repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}/comments/${COMMENT_ID}/replies" \
+      --method POST \
+      --field body="Looks addressed as of \`${HEAD_SHA}\` — leaving this thread open for the original author to resolve.
+
+<!-- pr-reviewer:v1 kind=external-ack sha=${HEAD_SHA} -->" \
+      >/dev/null 2>/tmp/pr_external_reply_err.txt \
+      && echo ok >> /tmp/pr_external_replies.log \
+      || echo "fail $COMMENT_ID" >> /tmp/pr_external_replies.log
+  done
+  EXTERNAL_REPLY_OK=$(grep -c '^ok' /tmp/pr_external_replies.log 2>/dev/null || echo 0)
+  EXTERNAL_REPLY_FAIL=$(grep -c '^fail' /tmp/pr_external_replies.log 2>/dev/null || echo 0)
+fi
+export EXTERNAL_REPLY_OK EXTERNAL_REPLY_FAIL
+echo "External replies: ${EXTERNAL_REPLY_OK} addressed thread(s) acknowledged (${EXTERNAL_REPLY_FAIL} failed) — threads left open"
+```
+
+---
+
 ## Output
 
 On completion, use the counters from the inline loop (`$INLINE_OK` / `$INLINE_TOTAL`) — do **not** print a hard-coded number:
 
 ```
 # initial mode
-Review posted on PR #<number>: <verdict> — ${INLINE_OK}/${INLINE_TOTAL} inline comments — https://github.com/<owner>/<repo>/pull/<number>
+Review posted on PR #<number>: <verdict> — ${INLINE_OK}/${INLINE_TOTAL} inline comments — ${EXTERNAL_REPLY_OK} external replies — https://github.com/<owner>/<repo>/pull/<number>
 
 # re-review mode (add reconciliation counters)
-Re-review posted on PR #<number>: <verdict> — ${INLINE_OK}/${INLINE_TOTAL} new — ${RESOLVED_OK} resolved — https://github.com/<owner>/<repo>/pull/<number>
+Re-review posted on PR #<number>: <verdict> — ${INLINE_OK}/${INLINE_TOTAL} new — ${RESOLVED_OK} resolved — ${EXTERNAL_REPLY_OK} external replies — https://github.com/<owner>/<repo>/pull/<number>
 ```
 
 If `INLINE_OK == 0` but the report had findings with file:line references, treat the run as a partial failure and surface the first few lines of `/tmp/pr_inline_failures.log` so the user knows the inline step did not deliver.

@@ -18,6 +18,8 @@ Execute every step below autonomously and in order. Do not ask for confirmation,
 
 **Re-review awareness (first review vs. follow-up review).** Before reviewing, the command checks whether *this plugin* has already reviewed the PR (it stamps every comment it posts with a hidden marker — see *Comment markers* below). If a prior review is found, the run switches to **re-review mode**: it reconciles old findings against the current head (resolving the ones the author fixed, leaving the unresolved ones open without re-posting duplicates), focuses on the commits pushed since the last review, and posts a short re-review delta instead of a brand-new wall of comments. The first review of a PR always runs in **initial mode**. This is automatic; no flag is required. Set `PR_REVIEWER_RECONCILE=false` to force a full, stateless review that ignores prior findings.
 
+**Existing inline review awareness.** On every run (initial *and* re-review), unless `PR_REVIEWER_RECONCILE=false`, the command also loads **all open inline review threads** on the PR — from humans, Copilot, CodeRabbit, other bots, and this plugin. Reviewers use that list to avoid repeating already-raised findings. After analysis, the lead validates whether non-plugin open threads look addressed at `HEAD` and **replies** on those that do — without resolving them (resolution stays with the original author). Still-open external threads get no reply (avoid spam); overlapping new findings are dropped instead.
+
 ## What This Does
 
 This command runs a **cost-tiered** review and posts the results back to the PR. The tier is chosen automatically from the diff (see step 5):
@@ -72,7 +74,9 @@ Stamp every comment the plugin posts with a hidden marker string:
 
 On **GitHub** the marker is an HTML comment appended to the comment body — it renders invisibly. On **Azure DevOps**, HTML comments are *not* reliably hidden, so the same fields are stored as thread **`properties`** (`pr-reviewer.kind`, `pr-reviewer.fid`, `pr-reviewer.sha`) instead of in the body. The provider files show the exact mechanics.
 
-Only comments carrying this marker are ever reconciled, replied to, or resolved by the plugin. Human review comments are never touched.
+**Plugin-owned threads** (carrying this marker) are the only ones the plugin may **resolve**. On re-review, fixed plugin findings get a reply and the thread is marked resolved — same as before.
+
+**External threads** (humans, other bots, unmarked comments) are never resolved by this plugin. When an open external thread looks addressed at `HEAD`, the plugin may **reply** that it appears fixed and leave the thread open for the original author. Still-open external threads are left untouched (no reply every run — avoid notification spam). All open inline threads — plugin and external — are used for awareness and dedup so the plugin does not re-post the same finding.
 
 ### 2. The finding id `fid` (matches a finding across revisions)
 
@@ -421,11 +425,14 @@ Use `git show ${HEAD_SHA}:<filepath>` or the `Read` tool to read the full conten
 
 ### Detect a prior review and compute the re-review range
 
-This is the one place reading platform PR comments is required, because it determines whether the run is an **initial** review or a **re-review**. Skip entirely on the generic platform (no API) and when `PR_REVIEWER_RECONCILE=false`.
+This is the one place reading platform PR comments is required, because it determines whether the run is an **initial** review or a **re-review**, and it loads open inline threads for awareness/dedup. Skip entirely on the generic platform (no API) and when `PR_REVIEWER_RECONCILE=false` (stateless mode also skips external-thread awareness).
 
-1. List the existing review comments/threads on the PR and keep only those carrying the plugin marker (`<!-- pr-reviewer:v1 ... -->` on GitHub, or the `pr-reviewer.*` thread properties on Azure DevOps). Use the platform helper:
-   - **GitHub** → `providers/github.md` → *Detecting a prior review* (GraphQL: review threads with `id`, `isResolved`, body, fid).
-   - **Azure DevOps** → `providers/azure-devops.md` → *Detecting a prior review* (`GET .../threads`, filter by `properties["pr-reviewer.fid"]`).
+1. List the existing review comments/threads on the PR. The provider helper writes two files from one fetch:
+   - `/tmp/pr_prior_findings.jsonl` — only threads carrying the plugin marker (`<!-- pr-reviewer:v1 ... -->` on GitHub, or the `pr-reviewer.*` thread properties on Azure DevOps). Drives `REVIEW_MODE`.
+   - `/tmp/pr_open_threads.jsonl` — **every open inline thread** (humans, bots, this plugin), one JSON object per line: `{file, line, body, author, is_plugin, thread_ref[, comment_ref]}`. Used for reviewer awareness, dedup, and external-thread validation.
+   Use the platform helper:
+   - **GitHub** → `providers/github.md` → *Detecting a prior review* (GraphQL: review threads with `id`, `isResolved`, `path`, `line`, body, fid).
+   - **Azure DevOps** → `providers/azure-devops.md` → *Detecting a prior review* (`GET .../threads`, filter by `properties["pr-reviewer.fid"]` for prior findings; all open `threadContext` threads for open-threads).
 
 2. Decide the mode:
 
@@ -434,8 +441,16 @@ source /tmp/pr_state.env
 # /tmp/pr_prior_findings.jsonl is written by the provider helper: one JSON object per
 # prior marked finding thread: {fid, status(open|resolved), thread_ref[, comment_ref]}.
 # Matching is by fid alone, so file/line are not needed here.
+# /tmp/pr_open_threads.jsonl is written by the same helper (may be empty).
+# Touch an empty file if the helper skipped writing it so later steps can test -s safely.
+: "${PR_REVIEWER_RECONCILE:=true}"
+if [ "$PR_REVIEWER_RECONCILE" = "false" ]; then
+  : > /tmp/pr_prior_findings.jsonl
+  : > /tmp/pr_open_threads.jsonl
+fi
+[ -f /tmp/pr_open_threads.jsonl ] || : > /tmp/pr_open_threads.jsonl
 # PRIOR_SUMMARY_SHA is the sha= from the most recent summary marker, or empty.
-if [ "${PR_REVIEWER_RECONCILE:-true}" = "false" ] || [ ! -s /tmp/pr_prior_findings.jsonl ]; then
+if [ "$PR_REVIEWER_RECONCILE" = "false" ] || [ ! -s /tmp/pr_prior_findings.jsonl ]; then
   REVIEW_MODE="initial"
   RANGE_BASE="$BASE_SHA"
 else
@@ -447,7 +462,8 @@ else
     RANGE_BASE="$BASE_SHA"
   fi
 fi
-echo "Review mode: $REVIEW_MODE  |  incremental range: ${RANGE_BASE}..${HEAD_SHA}"
+OPEN_THREAD_COUNT=$(wc -l < /tmp/pr_open_threads.jsonl | tr -d ' ')
+echo "Review mode: $REVIEW_MODE  |  incremental range: ${RANGE_BASE}..${HEAD_SHA}  |  open threads: ${OPEN_THREAD_COUNT}"
 export REVIEW_MODE RANGE_BASE
 ```
 
@@ -462,7 +478,7 @@ if [ "$REVIEW_MODE" = "rereview" ] && [ "$RANGE_BASE" != "$BASE_SHA" ]; then
 fi
 ```
 
-> **Why review the full PR diff, not just the increment?** The full diff (`/tmp/pr_full_diff.patch`) stays the authoritative input to the reviewers so the *current* finding set is always complete — an unresolved finding in a file the latest commits didn't touch must still be detected so it stays open. The incremental diff focuses your attention and drives the delta summary; it does not replace the full scan. Reconciliation (step 7 / posting) compares the current finding set to the prior one **by `fid`**.
+> **Why review the full PR diff, not just the increment?** The full diff (`/tmp/pr_full_diff.patch`) stays the authoritative input to the reviewers so the *current* finding set is always complete — an unresolved finding in a file the latest commits didn't touch must still be detected so it stays open. The incremental diff focuses your attention and drives the delta summary; it does not replace the full scan. Reconciliation (step 7 / posting) compares the current finding set to the prior one **by `fid`**, and also validates open external threads against `HEAD`.
 
 ## 4. Index the Codebase (skip on small PRs)
 
@@ -554,6 +570,7 @@ Run **exactly one** of the two paths below, chosen by `REVIEW_TIER` from step 5.
 - A reminder: *"Do not re-fetch git data; the annotated diff at /tmp/pr_full_diff_numbered.patch is authoritative. Return findings only."*
 - A line-number constraint: *"Every `path/to/file.ext:NN` reference must be the POST-CHANGE file line number, and you must READ it — never compute it. In /tmp/pr_full_diff_numbered.patch every context and added (`+`) line is prefixed with `<lineno> |`; `NN` is exactly that number for the flagged line. Copy it verbatim. Never do hunk-header arithmetic, never report the diff's own line position, and never emit a number larger than the file. Findings on deleted (`-`) lines (marked `- |`) have no post-change line — reference the nearest surviving numbered line instead."*
 - A suggestion constraint: *"For findings where the fix is a concrete, drop-in replacement (wrong identifier, missing null guard, insecure call swapped for safe equivalent, etc.), add a native GitHub suggestion block immediately after the `**Fix:**` block. Prefix it with an HTML comment that carries the line range, then a ` ```suggestion ` fenced block containing the verbatim replacement lines with indentation preserved. Example for a single-line fix: `<!-- suggestion: line NN -->` on its own line, then ` ```suggestion `, then the replacement line, then ` ``` `. For multi-line: `<!-- suggestion: lines NN-MM -->`. Do not include this for architectural improvements or fixes requiring author judgment."*
+- An open-threads constraint (include only when `/tmp/pr_open_threads.jsonl` is non-empty): *"Also read /tmp/pr_open_threads.jsonl — existing open inline review comments on this PR (humans, bots, prior plugin runs). Do not re-report issues already substantially covered by an open thread on the same file (same concern, or within ±5 lines of the same area). Prefer leaving those to the existing thread over inventing a duplicate finding."*
 
 > **Diff size (used by both paths):**
 > ```bash
@@ -573,14 +590,16 @@ Lowest-cost path for ordinary PRs.
 
 Concatenate the snippets into `/tmp/pr_context.txt` (a filepath header before each). **Never read any file in its entirety if it exceeds 400 lines; never read more than 3 files.**
 
-Then emit **both Agent calls in the same assistant turn** (so they run in parallel). Both **must** set `"model": "haiku"`. Neither agent may call `Read`, `Bash`, `Grep`, or any other tool — they work only from the two files named in the prompt.
+If `/tmp/pr_open_threads.jsonl` is non-empty, also prepare a compact open-threads block for both prompts (Haiku finders cannot call tools). Prefer pasting the file contents when ≤ 80 lines; otherwise paste a truncated summary of `file:line — author — first 120 chars of body` per thread. Prefix with `EXISTING OPEN REVIEW THREADS:` so finders can skip duplicates.
+
+Then emit **both Agent calls in the same assistant turn** (so they run in parallel). Both **must** set `"model": "haiku"`. Neither agent may call `Read`, `Bash`, `Grep`, or any other tool — they work only from the content named in the prompt.
 
 Both prompts share the same shell and tail. Compose each prompt as: the **shared header**, then the agent's **focus list** (below), then the **shared output-format tail**.
 
 **Shared header (start of both prompts):**
 
 ```
-Read /tmp/pr_full_diff_numbered.patch then /tmp/pr_context.txt. The numbered diff prefixes every context/added line with its real post-change file line number (`<lineno> |`); use those numbers for LINE — never compute a line number.
+Read /tmp/pr_full_diff_numbered.patch then /tmp/pr_context.txt (and the EXISTING OPEN REVIEW THREADS block if the lead included one — do not duplicate those issues). The numbered diff prefixes every context/added line with its real post-change file line number (`<lineno> |`); use those numbers for LINE — never compute a line number.
 ```
 
 **Shared output-format tail (end of both prompts, verbatim):**
@@ -688,7 +707,7 @@ In **one assistant turn**, emit one parallel sub-agent invocation per selected r
 >   "subagent_type": "code-reviewer",
 >   "model": "haiku",
 >   "description": "Code quality review",
->   "prompt": "<shared constraints from step 6> + paths /tmp/pr_full_diff_numbered.patch and /tmp/pr_changed_files.txt + BASE_SHA/HEAD_SHA from /tmp/pr_state.env + PR title/description + file-reading constraint"
+>   "prompt": "<shared constraints from step 6> + paths /tmp/pr_full_diff_numbered.patch, /tmp/pr_changed_files.txt, and /tmp/pr_open_threads.jsonl (when non-empty) + BASE_SHA/HEAD_SHA from /tmp/pr_state.env + PR title/description + file-reading constraint"
 > }
 > ```
 >
@@ -777,11 +796,42 @@ Reviewed N new commit(s) since the last review (`<RANGE_BASE>`..`<HEAD_SHA>`).
 - 🆕 New: <count> issue(s) introduced since the last review
 ```
 
-In **initial mode** skip reconciliation entirely — every finding is "New" and there is no delta block.
+In **initial mode** skip plugin-fid reconciliation entirely — every finding starts as "New" and there is no re-review delta block. External-thread validation (next section) still runs in both modes.
+
+### Reconcile against existing open review threads (initial and re-review)
+
+When `/tmp/pr_open_threads.jsonl` is non-empty, validate **external** open threads (`is_plugin=false`) against current `HEAD` and dedup new findings against **all** open threads (plugin and external). Skip when the file is empty or `PR_REVIEWER_RECONCILE=false`.
+
+1. **Validate external threads.** For each open thread with `is_plugin=false`, inspect the current code at `file` near `line` (`git show ${HEAD_SHA}:<file>` / Read around that line) together with the thread `body`, and classify:
+   - **addressed** — the concern no longer reproduces at `HEAD`
+   - **still_open** — the concern is still present
+   - **unclear** — cannot tell with confidence → treat as **still_open** (no reply)
+
+   Write `/tmp/pr_external_reconcile.json`:
+   ```json
+   {"addressed":[{"file":"...","line":42,"thread_ref":"...","comment_ref":123,"author":"..."}], "still_open":[...]}
+   ```
+   Each entry must carry `thread_ref` and `comment_ref` (when available) so posting sub-step **E** can reply without re-fetching.
+
+2. **Dedup before posting.** Drop any finding that would create a new inline thread when an open thread already covers the same issue:
+   - same `file`, and
+   - finding line within ±5 of the open thread's `line` (when both have lines), **or** the finding's issue text clearly matches the thread body's concern.
+   Count dropped findings as `DEDUP_SUPPRESSED`. Prefer the existing thread over a duplicate new inline — including open **plugin** threads (those are already handled as Carried-over in re-review; in initial mode a plugin thread only appears if a previous run's markers somehow exist without flipping mode — still suppress duplicates).
+
+3. **Report block.** Prepend or include an **Existing review threads** block in the report body (see `styles/report-template.md`):
+   ```
+   ### Existing review threads
+   - ✅ Appears addressed: <count> open thread(s) — will reply, leave open for original author
+   - ⏳ Still open: <count> open thread(s) — no reply (avoid spam)
+   - 🔇 Duplicates avoided: <count> finding(s) not re-posted
+   ```
+   Omit the block entirely when there were no open threads to consider.
+
+**Do not resolve** any external thread here or in posting — reply-only in sub-step E.
 
 ### Recompute the verdict from the *currently open* set
 
-The verdict reflects the finding set at `HEAD` after reconciliation — i.e. carried-over + new findings (fixed ones no longer count). A re-review where the author fixed the last blocker should now produce `APPROVE`.
+The verdict reflects the finding set at `HEAD` after reconciliation — i.e. carried-over + new findings that survived dedup (fixed plugin findings and suppressed duplicates no longer count). A re-review where the author fixed the last blocker should now produce `APPROVE`. External threads that are still open do **not** by themselves force `REQUEST CHANGES` unless the plugin also has a matching finding it is keeping; they are advisory context.
 
 ---
 
@@ -834,16 +884,17 @@ Use the platform-appropriate method from the Posting the Review section below wi
 
 # Posting the Review
 
-After compiling the report (and applying fixes if in fix mode), post it to the platform detected in Step 1 immediately without waiting for user input. Posting has the sub-steps below; all are mandatory when the platform supports them and the run is incomplete if any are skipped. Sub-step **R** runs only in re-review mode.
+After compiling the report (and applying fixes if in fix mode), post it to the platform detected in Step 1 immediately without waiting for user input. Posting has the sub-steps below; all are mandatory when the platform supports them and the run is incomplete if any are skipped. Sub-step **R** runs only in re-review mode. Sub-step **E** runs whenever `/tmp/pr_external_reconcile.json` has an non-empty `addressed` list.
 
 | # | Sub-step | GitHub | Azure DevOps | Generic |
 |---|---|---|---|---|
 | A | Cast the verdict / vote | `gh pr review` flag | `PUT .../reviewers/{id}` with vote | n/a |
 | B | Post the full report body (incl. delta) as one PR-level comment, **with the summary marker** | `gh pr review --body` | `POST .../threads` (no `threadContext`) | write to `pr-review-report.md` |
-| R | **Re-review only:** reconcile prior findings — resolve **Fixed** threads (with a reply), leave **Carried-over** threads open (no duplicate) | reply + `resolveReviewThread` (GraphQL) | reply + `PATCH .../threads/{id}` `status:fixed` | n/a |
-| C | Post **one inline thread per finding** (initial mode: every finding; re-review mode: **only the New bucket**), **each with a finding marker** | `gh api .../pulls/<n>/comments` per finding | `POST .../threads` with `threadContext` per finding | n/a (skip with note) |
+| R | **Re-review only:** reconcile prior **plugin** findings — resolve **Fixed** threads (with a reply), leave **Carried-over** threads open (no duplicate) | reply + `resolveReviewThread` (GraphQL) | reply + `PATCH .../threads/{id}` `status:fixed` | n/a |
+| E | Reply on **addressed external** open threads (reply only — **never resolve**) | reply via `.../comments/{id}/replies` | reply via `POST .../threads/{id}/comments` | n/a |
+| C | Post **one inline thread per finding** (initial mode: every surviving finding; re-review mode: **only the New bucket** after dedup), **each with a finding marker** | `gh api .../pulls/<n>/comments` per finding | `POST .../threads` with `threadContext` per finding | n/a (skip with note) |
 
-**C is not optional** when there are findings to post (initial mode: all findings with `path/to/file.ext:NN`; re-review mode: the New bucket). The whole point of the specialized reviewers is to surface findings inline next to the offending code; collapsing them into the summary thread defeats the plugin's value. If you find yourself about to print "Review posted" without having posted the due inline comments, stop and go back to sub-step C.
+**C is not optional** when there are findings to post (initial mode: all findings with `path/to/file.ext:NN` after dedup; re-review mode: the New bucket after dedup). The whole point of the specialized reviewers is to surface findings inline next to the offending code; collapsing them into the summary thread defeats the plugin's value. If you find yourself about to print "Review posted" without having posted the due inline comments, stop and go back to sub-step C.
 
 **Every comment the plugin posts in B and C must carry its marker** (summary marker on B, finding marker with the finding's `fid` on C — see *Comment markers and finding identity*). A run that posts comments without markers breaks the next re-review (it will re-post everything as duplicates). The provider files show exactly where the marker goes for each call.
 
@@ -855,6 +906,16 @@ Skip in initial mode and on the generic platform. Drive this from `/tmp/pr_recon
 - **Carried-over** (`carried_over[]`): take **no** action. The thread is already open; do not reply on every run (avoid notification spam) and never re-post the finding as a new thread.
 
 Track a counter (`RESOLVED_OK` / `RESOLVED_FAIL`) the same way inline posting does, and include resolved-count in the final confirmation line.
+
+### Sub-step E — reply on addressed external threads
+
+Skip on the generic platform and when `/tmp/pr_external_reconcile.json` is missing or `addressed` is empty. Drive this from that file (built in step 7):
+
+- For each entry in `addressed[]`, post a short reply on the existing thread, e.g. `Looks addressed as of \`<HEAD_SHA>\` — leaving this thread open for the original author to resolve.`
+- **Do not** resolve, close, or set status to `fixed` on these threads. Resolution belongs to the original author.
+- **Do not** reply on `still_open[]` (avoid notification spam every run).
+
+Track `EXTERNAL_REPLY_OK` / `EXTERNAL_REPLY_FAIL`. Use the provider file's *Replying on addressed external threads* section.
 
 ### Resolve every finding to a post-change file line (do this before sub-step C)
 
@@ -884,7 +945,7 @@ The reviewers were already instructed (step 6) to return post-change line number
 
 Read and follow the instructions in the appropriate provider file:
 - **GitHub** → `providers/github.md`
-- **Azure DevOps** → run the **entire self-contained script** in `providers/azure-devops.md` → *Posting the Review* (set `VERDICT` and `REVIEW_MODE` from step 3, ensure `/tmp/pr_thread_body.md` and `/tmp/pr_inline_findings.jsonl` exist, then execute as **one** `Bash` call). The script runs reconcile (sub-step R) when `REVIEW_MODE=rereview`. **Never** hand-build URLs with `AZURE_DEVOPS_ORG` / `PR_NUMBER` — use `source /tmp/pr_azure.env` and `PR_ID` inside the script.
+- **Azure DevOps** → run the **entire self-contained script** in `providers/azure-devops.md` → *Posting the Review* (set `VERDICT` and `REVIEW_MODE` from step 3, ensure `/tmp/pr_thread_body.md` and `/tmp/pr_inline_findings.jsonl` exist, then execute as **one** `Bash` call). The script runs reconcile (sub-step R) when `REVIEW_MODE=rereview`, and external replies (sub-step E) when `/tmp/pr_external_reconcile.json` has addressed entries. **Never** hand-build URLs with `AZURE_DEVOPS_ORG` / `PR_NUMBER` — use `source /tmp/pr_azure.env` and `PR_ID` inside the script.
 - **Bitbucket or Unknown Platform** → `providers/generic.md`
 
 > **Blocking vs non-blocking on CRITICAL findings:** by **default** a `REQUEST CHANGES` verdict is posted as a *non-blocking* review (GitHub `--comment`, Azure DevOps vote `-5`) so the plugin runs in advisory / shadow mode out of the box. To make `REQUEST CHANGES` *blocking* (GitHub `--request-changes`, Azure DevOps vote `-10`), set `PR_REVIEWER_BLOCK_ON_CRITICAL=true`. Verdict, report body, and inline comments are identical in both modes — only the platform-side review type changes. Provider files contain the exact mapping logic.
@@ -896,15 +957,17 @@ Determine `EXPECTED_INLINE`: in **initial mode** it is the count of findings in 
 - If `INLINE_OK` is `0` and `EXPECTED_INLINE` is `> 0`: posting failed silently. Surface the failure log (`/tmp/pr_inline_failures.log` on Azure DevOps) and treat the run as a partial failure.
 - If `INLINE_OK` is much smaller than `EXPECTED_INLINE`: read the failure log and either retry the failed ones or include them in the output diagnostic.
 
-After posting, output a single confirmation line that uses the **actual** inline count, not a hard-coded one. In re-review mode also report the reconciliation outcome:
+After posting, output a single confirmation line that uses the **actual** inline count, not a hard-coded one. In re-review mode also report the reconciliation outcome. When external replies ran, include that count too:
 
 ```
 # initial mode
-Review posted on PR #<number>: <verdict> — <INLINE_OK>/<EXPECTED_INLINE> inline comments — <URL>
+Review posted on PR #<number>: <verdict> — <INLINE_OK>/<EXPECTED_INLINE> inline comments — <EXTERNAL_REPLY_OK> external replies — <URL>
 
 # re-review mode
-Re-review posted on PR #<number>: <verdict> — <INLINE_OK>/<EXPECTED_INLINE> new — <RESOLVED_OK> resolved — <carried_over count> still open — <URL>
+Re-review posted on PR #<number>: <verdict> — <INLINE_OK>/<EXPECTED_INLINE> new — <RESOLVED_OK> resolved — <carried_over count> still open — <EXTERNAL_REPLY_OK> external replies — <URL>
 ```
+
+Omit the `external replies` segment when `EXTERNAL_REPLY_OK` is unset or 0 and there was nothing to address.
 
 If `INLINE_OK < EXPECTED_INLINE`, append a second line:
 

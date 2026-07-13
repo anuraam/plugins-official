@@ -58,17 +58,18 @@ Do not ask for confirmation at any point. Execute all steps autonomously and pro
 
 4. **Post the review** (sub-steps, all mandatory when supported by the platform)
 
-   First, unless `PR_REVIEWER_RECONCILE=false`, run the provider's **Detecting a prior review** step. If marked prior findings exist, this is a **re-review**: reconcile them (resolve the ones now fixed, leave carried-over ones open, post only genuinely new findings). See *Comment markers and finding identity* and *Reconciling prior findings* in `commands/pr-review.md` and the provider files.
+   First, unless `PR_REVIEWER_RECONCILE=false`, run the provider's **Detecting a prior review** step. That writes `/tmp/pr_prior_findings.jsonl` (plugin-marked findings) and `/tmp/pr_open_threads.jsonl` (all open inline threads). If marked prior findings exist, this is a **re-review**: reconcile them (resolve the ones now fixed, leave carried-over ones open, post only genuinely new findings). Also validate open **external** threads against `HEAD`, write `/tmp/pr_external_reconcile.json`, and **dedup** findings that overlap existing open threads before posting. See *Comment markers and finding identity*, *Reconcile against existing open review threads*, and *Reconciling prior findings* in `commands/pr-review.md` and the provider files.
 
    1. Cast the verdict / vote (GitHub review flag, Azure DevOps reviewer PUT — see provider).
-   2. Post the full report body (with the re-review delta block when applicable) as one PR-level comment, **carrying the summary marker**.
-   3. **(Re-review only) Reconcile prior findings** — reply on + resolve the threads whose findings are now fixed; do not re-post carried-over findings.
-   4. **Post one inline thread per finding** that has a `path/to/file.ext:NN` reference (initial mode: every finding; re-review mode: only the New bucket), **each carrying its finding marker**. This is mandatory — skipping it collapses every finding into the summary thread and defeats the purpose of the review.
+   2. Post the full report body (with the re-review delta / existing-threads blocks when applicable) as one PR-level comment, **carrying the summary marker**.
+   3. **(Re-review only) Reconcile prior plugin findings** — reply on + resolve the threads whose findings are now fixed; do not re-post carried-over findings.
+   4. **Reply on addressed external threads** (sub-step E) — for each entry in `/tmp/pr_external_reconcile.json` → `addressed[]`, post a reply only; **never resolve** those threads.
+   5. **Post one inline thread per finding** that has a `path/to/file.ext:NN` reference (initial mode: every surviving finding after dedup; re-review mode: only the New bucket after dedup), **each carrying its finding marker**. This is mandatory — skipping it collapses every finding into the summary thread and defeats the purpose of the review.
 
    Follow the instructions in the appropriate provider file:
 
    - **GitHub** → `providers/github.md`
-   - **Azure DevOps** → run the **entire self-contained script** in `providers/azure-devops.md` → *Posting the Review* (one `Bash` call; set `VERDICT` first)
+   - **Azure DevOps** → run the **entire self-contained script** in `providers/azure-devops.md` → *Posting the Review* (one `Bash` call; set `VERDICT` first; includes sub-steps R and E)
    - **Generic / unknown** → `providers/generic.md`
 
 5. **Output result**
@@ -77,12 +78,12 @@ Do not ask for confirmation at any point. Execute all steps autonomously and pro
 
    **GitHub:**
    ```
-   Posted review on PR #<number>: <verdict> — <N> inline comments — <review URL>
+   Posted review on PR #<number>: <verdict> — <N> inline comments — <EXTERNAL_REPLY_OK> external replies — <review URL>
    ```
 
    **Azure DevOps:**
    ```
-   Posted review on PR #<number>: <verdict> — <N> inline comments — ${API_BASE}/_git/<repo>/pullrequest/<number>
+   Posted review on PR #<number>: <verdict> — <N> inline comments — <EXTERNAL_REPLY_OK> external replies — ${API_BASE}/_git/<repo>/pullrequest/<number>
    ```
 
    **Generic:**
