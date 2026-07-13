@@ -38,13 +38,13 @@ Either way the outcome is identical downstream: a verdict, a summary comment, an
 
 ## Platform Support
 
-The plugin auto-detects the hosting platform from your git remote URL:
+The plugin auto-detects the hosting platform from your git remote URL (`origin` is authoritative). The Xianix Executor may inject `PLATFORM=azuredevops` — that alias is normalized to canonical `azure` inside the setup script; never treat `azuredevops` as GitHub.
 
-| Remote URL contains | Platform | How review is posted |
+| Remote URL contains | Canonical `PLATFORM` | How review is posted |
 |---|---|---|
-| `github.com` | GitHub | GitHub CLI (`gh`) — see `providers/github.md` |
-| `dev.azure.com` / `visualstudio.com` | Azure DevOps | REST API (`curl`) — see `providers/azure-devops.md` |
-| Anything else | Generic | Written to `pr-review-report.md` — see `providers/generic.md` |
+| `github.com` | `github` | GitHub CLI (`gh`) — see `providers/github.md` |
+| `dev.azure.com` / `visualstudio.com` | `azure` (aliases: `azuredevops`, `azure-devops`, …) | REST API (`curl`) — see `providers/azure-devops.md` |
+| Anything else | `generic` | Written to `pr-review-report.md` — see `providers/generic.md` |
 
 ## Prerequisites
 
@@ -106,19 +106,35 @@ When invoked with a PR number, branch name, or no argument (defaults to current 
 
 ## 1. Detect Platform (do this FIRST, before any other tool call)
 
-Run **only** the following to detect which hosting platform is in use:
+**Hard gate — do not call `gh`, do not open `providers/github.md`, and do not assume GitHub until this step completes.** The Xianix Executor may log `Platform: azuredevops` and inject `PLATFORM=azuredevops`, but that string is **not** a reason to skip detection, and it is **not** the canonical value scripts use.
+
+Run **only** the following:
 
 ```bash
 git remote get-url origin
 ```
 
-From the remote URL, determine the platform:
-- Contains `github.com` → **GitHub**
-- Contains `dev.azure.com` or `visualstudio.com` → **Azure DevOps**
-- Contains `bitbucket.org` → **Bitbucket**
-- Anything else → **Generic** (report only, no inline posting)
+If that fails or returns empty, stop with an error — there is no platform to review against.
 
-Store the detected platform — it determines every subsequent CLI/API choice. Do **not** assume the platform from the argument or the repo name; the remote URL is authoritative.
+From the remote URL, determine the platform (this is authoritative — not the PR title, not the mention prompt, not marketplace clone URLs in the executor log):
+
+| Remote URL contains | Store as `PLATFORM` | Provider |
+|---|---|---|
+| `github.com` | `github` | `providers/github.md` |
+| `dev.azure.com` / `visualstudio.com` | `azure` | `providers/azure-devops.md` |
+| `bitbucket.org` / anything else | `generic` | `providers/generic.md` |
+
+**Executor / env alias normalization.** If `PLATFORM` is already set in the environment, treat it only as a *hint* and **normalize** it before comparing. The Xianix Agent/Executor standard value is `azuredevops` (no hyphen). Map aliases to the canonical script values above:
+
+| Injected / hint value | Canonical `PLATFORM` |
+|---|---|
+| `azuredevops`, `azure-devops`, `azure_devops`, `ado`, `azure` | `azure` |
+| `github`, `gh` | `github` |
+| `bitbucket`, `generic`, anything else unknown | keep / re-detect from remote |
+
+If the hint disagrees with the remote (e.g. `PLATFORM=github` but origin is `dev.azure.com`), **trust the remote** and continue with the remote-derived value. Never keep a GitHub path on an Azure remote.
+
+Echo one line after detection, e.g. `PLATFORM=azure (from origin; env hint was azuredevops)`, then proceed. Do **not** default to `github` when unset.
 
 ### Platform-exclusive CLI rule (mandatory)
 
@@ -126,8 +142,8 @@ After detection, use **only** the platform-appropriate tool for the rest of the 
 
 | Platform | Allowed for posting / PR API | Forbidden |
 |---|---|---|
-| GitHub | `gh`, `git` | `curl` to Azure DevOps, `az` |
-| Azure DevOps | `curl` + `AZURE_DEVOPS_TOKEN`, `git` | `gh` (will fail with `gh auth login`), `az login` |
+| GitHub (`PLATFORM=github`) | `gh`, `git` | `curl` to Azure DevOps, `az` |
+| Azure DevOps (`PLATFORM=azure`) | `curl` + `AZURE_DEVOPS_TOKEN`, `git` | `gh` (will fail with `gh auth login`), `az login` |
 | Bitbucket / Generic | `git` only | `gh`, `curl` to private APIs |
 
 Do **not** probe other CLIs ("just to check"). The hook layer will block obvious mismatches; doing it wrong will block the run.
@@ -155,21 +171,35 @@ The diff is what matters. Resolve the base/head and pull the diff first — for 
 
 > **Xianix Executor / CI worktrees:** the runner checks out the repo's **default branch** only — it knows nothing about PRs. When a PR number is provided, this script is a **hard gate**. You must see `Checked out PR #<n> at <sha>` (or branch checkout) in the output before proceeding. If `HEAD_SHA` does not match the platform's `headRefOid`, the script exits with an error.
 
-Set `PR_NUMBER` (numeric argument, if any), `PLATFORM` (`github`, `azure`, or `generic` — auto-detected below if unset), and `BRANCH_ARG` (branch name argument, if any) before running. Then execute this **entire** script as a single `Bash` call:
+Set `PR_NUMBER` (numeric argument, if any) and `BRANCH_ARG` (branch name argument, if any) before running. You may leave `PLATFORM` unset — the script always resolves it from `origin` and normalizes executor aliases such as `azuredevops`. Canonical values inside the script are only `github`, `azure`, or `generic`. Then execute this **entire** script as a single `Bash` call:
 
 ```bash
 set -euo pipefail
 
-# --- 0. Auto-detect platform from remote (do not default to github on Azure remotes) ---
-if [ -z "${PLATFORM:-}" ]; then
-  REMOTE_URL=$(git remote get-url origin 2>/dev/null || echo "")
-  case "$REMOTE_URL" in
-    *github.com*) PLATFORM=github ;;
-    *dev.azure.com*|*visualstudio.com*) PLATFORM=azure ;;
-    *) PLATFORM=generic ;;
-  esac
-  echo "Auto-detected PLATFORM=${PLATFORM} from origin"
+# --- 0. Resolve PLATFORM from origin (authoritative). Never default to github. ---
+# Xianix Executor injects PLATFORM=azuredevops; normalize aliases, then prefer origin.
+REMOTE_URL=$(git remote get-url origin 2>/dev/null || echo "")
+[ -n "$REMOTE_URL" ] || { echo "ERROR: no git remote 'origin' — cannot detect platform"; exit 1; }
+case "$REMOTE_URL" in
+  *github.com*) DETECTED=github ;;
+  *dev.azure.com*|*visualstudio.com*) DETECTED=azure ;;
+  *) DETECTED=generic ;;
+esac
+# Strip case/hyphen/underscore so azuredevops, azure-devops, azure_devops, ADO → azure
+PLATFORM_HINT_RAW="${PLATFORM:-}"
+case "$(printf '%s' "$PLATFORM_HINT_RAW" | tr '[:upper:]' '[:lower:]' | tr -d '_-')" in
+  azuredevops|ado|azure) PLATFORM_HINT=azure ;;
+  github|gh) PLATFORM_HINT=github ;;
+  bitbucket|generic) PLATFORM_HINT=generic ;;
+  "") PLATFORM_HINT="" ;;
+  *) PLATFORM_HINT="$PLATFORM_HINT_RAW" ;;
+esac
+if [ -n "$PLATFORM_HINT" ] && [ "$PLATFORM_HINT" != "$DETECTED" ]; then
+  echo "WARN: PLATFORM hint '${PLATFORM_HINT_RAW}' (normalized=${PLATFORM_HINT}) disagrees with origin (${DETECTED}) — using origin" >&2
 fi
+PLATFORM="$DETECTED"
+export PLATFORM
+echo "PLATFORM=${PLATFORM} (from origin; env hint was '${PLATFORM_HINT_RAW:-unset}')"
 CHECKED_OUT=""
 
 # --- 1. Checkout the revision under review ---
@@ -347,8 +377,9 @@ BASE_SHA=$(git merge-base "$BASE_TIP" "$HEAD_SHA")
 echo "Base: $BASE (tip $BASE_TIP -> merge-base $BASE_SHA)"
 echo "Head: $HEAD_SHA"
 
-# --- 4. Sanity check commit count (when PR number available) ---
-if [ -n "${PR_NUMBER:-}" ] && [ "$PLATFORM" != "azure" ]; then
+# --- 4. Sanity check commit count (GitHub only; skip azure/generic) ---
+# Compare against canonical PLATFORM=github only — never treat azuredevops as GitHub.
+if [ -n "${PR_NUMBER:-}" ] && [ "$PLATFORM" = "github" ]; then
   GIT_COMMIT_COUNT=$(git rev-list --count "${BASE_SHA}..${HEAD_SHA}")
   GH_COMMIT_COUNT=$(gh pr view "$PR_NUMBER" --json commits --jq '.commits | length')
   echo "Git commit count: $GIT_COMMIT_COUNT"
@@ -396,12 +427,14 @@ echo "Annotated diff written: $(wc -l < /tmp/pr_full_diff_numbered.patch) lines"
 # --- 7. Persist state for later tool calls ---
 # Use printf %q so titles/bodies with spaces, quotes, or newlines survive `source`.
 {
+  echo "PLATFORM=$PLATFORM"
   echo "HEAD_SHA=$HEAD_SHA"
   echo "BASE_SHA=$BASE_SHA"
   echo "BASE=$BASE"
   echo "BASE_TIP=$BASE_TIP"
   echo "CHANGED_COUNT=$CHANGED_COUNT"
   echo "CHECKED_OUT=$CHECKED_OUT"
+  printf 'PR_NUMBER=%q\n' "${PR_NUMBER:-}"
   printf 'CURRENT_BRANCH=%q\n' "${CURRENT_BRANCH:-}"
   printf 'PR_TITLE=%q\n' "${PR_TITLE:-}"
   printf 'PR_BODY=%q\n' "${PR_BODY:-}"

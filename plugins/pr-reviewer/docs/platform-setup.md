@@ -39,6 +39,16 @@ The push command itself carries the token via an inline `GIT_CONFIG_*` prefix �
 
 Only `git` and `curl` are needed — the plugin calls the Azure DevOps REST API directly with a Personal Access Token (PAT). The `az` CLI is **not** used at runtime (the review procedure explicitly forbids `az login` — see the platform-exclusive CLI rule in `commands/pr-review.md`), so there is nothing to install.
 
+### Platform identity (`PLATFORM=azuredevops`)
+
+The Xianix Agent/Executor standard platform string is **`azuredevops`** (no hyphen). The plugin:
+
+1. Detects the host from `git remote get-url origin` (authoritative).
+2. Normalizes env hints (`azuredevops`, `azure-devops`, `azure_devops`, `ado`, `azure`) to the canonical script value **`azure`**.
+3. Never defaults to GitHub when the remote is Azure, even if `PLATFORM` was unset or still held the raw executor string.
+
+Do not call `gh` on Azure remotes. Scripts must compare against `PLATFORM=azure` after normalization — a raw `!= "azure"` check against `azuredevops` incorrectly takes the GitHub path.
+
 ### Authentication
 
 The plugin authenticates with a Personal Access Token read from the `AZURE_DEVOPS_TOKEN` environment variable.
@@ -119,6 +129,7 @@ The verdict label, Critical Issues section, and inline comments are identical in
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `PLATFORM` | unset (detect from `origin`) | Optional hint from the runner. Xianix Executor sends **`azuredevops`** for Azure DevOps. The setup script normalizes aliases to canonical `github` / `azure` / `generic` and **always prefers `git remote get-url origin`** when they disagree. Never leave the raw `azuredevops` string for later equality checks. |
 | `PR_REVIEWER_BLOCK_ON_CRITICAL` | `false` | Advisory by default: CRITICAL findings post a non-blocking review (GitHub `--comment`, Azure DevOps vote `-5`). Set to `true` to post a blocking review (GitHub `--request-changes`, Azure DevOps vote `-10`). See above. |
 | `PR_REVIEWER_MODEL` | unset | **Override:** pins *every* reviewer sub-agent to one model (e.g. `haiku`), ignoring the tiers below. Env values like `claude-haiku-4-5` are mapped to Agent-tool slugs (`haiku`, `sonnet`, `opus`, `fable`) before invocation. |
 | `PR_REVIEWER_QUALITY_MODEL` | `haiku` | Model for the **quality-tier** reviewers (`code-reviewer`, `test-reviewer`) on the escalated specialist path — pattern/coverage tasks a small model handles well. Ignored if `PR_REVIEWER_MODEL` is set. Passed to `Agent` as `haiku` (not `claude-haiku-4-5`). |

@@ -2,6 +2,8 @@
 
 Use this provider when `git remote get-url origin` contains `github.com`.
 
+Do **not** use this provider when origin is Azure DevOps (`dev.azure.com` / `visualstudio.com`), even if the mention prompt says "pull request" or env `PLATFORM` is unset. The executor’s Azure value is `azuredevops` — that maps to `providers/azure-devops.md`, not here.
+
 ## How this fits with the rest of the plugin
 
 - **Reading / analysis** — Use **git** against your base branch (same as Azure DevOps and other hosts): `git diff`, `git log`, etc. See Step 3 of the `/pr-review` command in `commands/pr-review.md`. No `gh` needed to fetch patches or file lists.

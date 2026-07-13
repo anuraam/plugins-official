@@ -2,6 +2,8 @@
 
 Use this provider when `git remote get-url origin` contains `dev.azure.com` or `visualstudio.com`.
 
+**Platform identity:** after Step 1 / the setup script, the canonical internal value is `PLATFORM=azure`. The Xianix Agent/Executor standard env string is `azuredevops` (no hyphen) — treat that (and `azure-devops` / `azure_devops` / `ado`) as Azure DevOps. Never call `gh` when origin is Azure, even if `PLATFORM` was left unset or still holds the raw `azuredevops` string.
+
 ## Prerequisites
 
 The Azure DevOps REST API is called directly via `curl` using a Personal Access Token (PAT).

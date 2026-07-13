@@ -18,11 +18,12 @@ Do not ask for confirmation at any point. Execute all steps autonomously and pro
    git remote get-url origin
    ```
 
-   Determine the platform:
-   - Contains `github.com` → **GitHub**
-   - Contains `dev.azure.com` or `visualstudio.com` → **Azure DevOps**
+   Determine the platform from the remote (**authoritative** — do not assume GitHub from the PR number or mention prompt):
+   - Contains `github.com` → **GitHub** (`PLATFORM=github`)
+   - Contains `dev.azure.com` or `visualstudio.com` → **Azure DevOps** (`PLATFORM=azure`)
    - Anything else → **Generic**
 
+   If the environment already has `PLATFORM=azuredevops` (Xianix Executor standard) or `azure-devops` / `ado`, treat that as Azure DevOps and confirm against the remote. Canonical script value is always `azure`, never leave the raw `azuredevops` string in place for later `== "azure"` checks.
 2. **Verify PR exists**
 
    Use the platform-appropriate method to confirm the PR exists and retrieve its current state:
