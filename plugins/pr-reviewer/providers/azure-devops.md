@@ -285,132 +285,38 @@ Use `$PR_TARGET` as the **base branch** for diffs. Resolve it to a concrete SHA 
 
 Called from Step 3 of `commands/pr-review.md` to decide initial vs. re-review mode. On Azure DevOps the plugin's identity metadata lives in thread **`properties`** (HTML comments are not reliably hidden in the web UI), so detection reads `properties["pr-reviewer.fid"]` rather than scanning comment text. The same thread listing also writes **all open inline threads** (humans, bots, and this plugin) to `/tmp/pr_open_threads.jsonl` for external-thread awareness, dedup, and reply-only validation.
 
-**Prerequisites:** `source /tmp/pr_azure.env` (or run the Step 2 starting-comment script first). Thread listing is paginated — the helper below follows `x-ms-continuationtoken` until all pages are merged.
+**Prerequisites:** `/tmp/pr_azure.env` from the Step 2 starting-comment script (`API_BASE`, `AZURE_REPO`, `PR_ID`) and `AZURE_DEVOPS_TOKEN`.
+
+**Prefer the plugin script (one Bash call) — do not reinvent this flow.** Agents that invent `THREADS_JSON=$(curl …)` then `json.load` crash on 401 HTML / empty bodies. The script paginates with `x-ms-continuationtoken`, checks HTTP status before parsing JSON, and writes `/tmp/pr_prior.env` so `PRIOR_SUMMARY_SHA` survives across tool calls.
 
 ```bash
+ADO_DETECT="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/ado-detect-prior.sh}"
+if [ -z "${ADO_DETECT:-}" ] || [ ! -f "$ADO_DETECT" ]; then
+  ADO_DETECT=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/ado-detect-prior.sh' 2>/dev/null | head -1)
+fi
+[ -n "${ADO_DETECT:-}" ] && [ -f "$ADO_DETECT" ] || {
+  echo "ERROR: scripts/ado-detect-prior.sh not found — refuse to invent a threads curl" >&2
+  exit 1
+}
+bash "$ADO_DETECT"
 # shellcheck disable=SC1091
-[ -f /tmp/pr_azure.env ] && source /tmp/pr_azure.env
-PR_ID="${PR_ID:-${PR_NUMBER:-}}"
-[ -n "$PR_ID" ] && [ -n "${API_BASE:-}" ] && [ -n "${AZURE_REPO:-}" ] || {
-  echo "ERROR: detect prior review needs /tmp/pr_azure.env (API_BASE, AZURE_REPO, PR_ID)" >&2; exit 1; }
-
-: > /tmp/pr_threads_pages.jsonl
-CONTINUATION=""
-while :; do
-  URL="${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads?api-version=7.1"
-  [ -n "$CONTINUATION" ] && URL="${URL}&continuationToken=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$CONTINUATION")"
-  HEADERS=$(mktemp)
-  BODY=$(curl -sS -D "$HEADERS" -u ":${AZURE_DEVOPS_TOKEN}" "$URL")
-  echo "$BODY" >> /tmp/pr_threads_pages.jsonl
-  CONTINUATION=$(grep -i '^x-ms-continuationtoken:' "$HEADERS" | cut -d' ' -f2- | tr -d '\r' || true)
-  rm -f "$HEADERS"
-  [ -n "$CONTINUATION" ] || break
-done
-
-python3 - <<'PY' > /tmp/pr_threads.json
-import json
-threads = []
-for line in open('/tmp/pr_threads_pages.jsonl'):
-    line = line.strip()
-    if not line:
-        continue
-    data = json.loads(line)
-    threads.extend(data.get("value", []))
-json.dump({"value": threads}, open('/tmp/pr_threads.json', 'w'))
-print(f"Loaded {len(threads)} thread(s)")
-PY
-
-# Our marked finding threads → /tmp/pr_prior_findings.jsonl
-# AND all open inline threads → /tmp/pr_open_threads.jsonl
-python3 - <<'PY'
-import json, re
-data = json.load(open('/tmp/pr_threads.json'))
-def prop(props, key):
-    v = (props or {}).get(key)
-    if isinstance(v, dict):      # PropertiesCollection form: {"$type":..,"$value":..}
-        return v.get("$value")
-    return v
-RESOLVED = ("fixed", "closed", "wontFix", "byDesign")
-prior = open('/tmp/pr_prior_findings.jsonl', 'w')
-open_threads = open('/tmp/pr_open_threads.jsonl', 'w')
-for t in data.get("value", []):
-    props = t.get("properties") or {}
-    comments = t.get("comments") or []
-    first = comments[0] if comments else {}
-    body = first.get("content") or ""
-    fid = prop(props, "pr-reviewer.fid")
-    kind = prop(props, "pr-reviewer.kind")
-    # Fall back to body HTML marker when properties were stripped on create
-    if not fid:
-        m = re.search(r'<!--\s*pr-reviewer:v1\s+kind=finding\s+fid=([0-9a-fA-F]+)', body)
-        if m:
-            fid = m.group(1)
-            kind = kind or "finding"
-    is_plugin = kind == "finding" and bool(fid)
-    # Azure status enum: active|fixed|wontFix|closed|byDesign|pending
-    status = t.get("status", "active")
-    resolved = status in RESOLVED
-    if is_plugin:
-        prior.write(json.dumps({
-            "fid": fid,
-            "status": "resolved" if resolved else "open",
-            "thread_ref": t["id"],   # numeric thread id — used for PATCH + reply
-        }) + '\n')
-    # Open inline threads only (threadContext.filePath = file-anchored)
-    ctx = t.get("threadContext") or {}
-    file_path = ctx.get("filePath") or ""
-    if resolved or not file_path:
-        continue
-    author = ((first.get("author") or {}) or {}).get("displayName") or \
-             ((first.get("author") or {}) or {}).get("uniqueName") or ""
-    # Prefer right-side (new) line; fall back to left-side
-    line = None
-    for side in ("rightFileStart", "leftFileStart"):
-        loc = ctx.get(side) or {}
-        if loc.get("line"):
-            line = loc["line"]
-            break
-    open_threads.write(json.dumps({
-        "file": file_path.lstrip("/"),  # Azure often prefixes with /
-        "line": line,
-        "body": body,
-        "author": author,
-        "is_plugin": is_plugin,
-        "thread_ref": t["id"],
-        "comment_ref": first.get("id"),
-    }) + '\n')
-prior.close()
-open_threads.close()
-PY
-
-# Most-recent summary marker sha (summary thread with latest publishedDate)
-# Prefer thread properties; fall back to body HTML marker when properties were stripped.
-PRIOR_SUMMARY_SHA=$(python3 - <<'PY'
-import json, re
-data = json.load(open('/tmp/pr_threads.json'))
-def prop(props, key):
-    v = (props or {}).get(key)
-    return v.get("$value") if isinstance(v, dict) else v
-summaries = []
-for t in data.get("value", []):
-    sha = prop(t.get("properties") or {}, "pr-reviewer.sha")
-    kind = prop(t.get("properties") or {}, "pr-reviewer.kind")
-    published = (t.get("comments") or [{}])[0].get("publishedDate", "") or t.get("publishedDate", "")
-    if kind == "summary" and sha:
-        summaries.append((published, sha))
-        continue
-    body = ((t.get("comments") or [{}])[0].get("content") or "")
-    m = re.search(r'<!--\s*pr-reviewer:v1\s+kind=summary\s+sha=([0-9a-fA-F]+)\s*-->', body)
-    if m:
-        summaries.append((published, m.group(1)))
-summaries.sort()
-print(summaries[-1][1] if summaries else "")
-PY
-)
-export PRIOR_SUMMARY_SHA
+source /tmp/pr_prior.env   # PRIOR_SUMMARY_SHA
 ```
 
+**Outputs:** `/tmp/pr_prior_findings.jsonl`, `/tmp/pr_open_threads.jsonl`, `/tmp/pr_threads.json`, `/tmp/pr_prior.env` (`PRIOR_SUMMARY_SHA`).
+
 If `/tmp/pr_prior_findings.jsonl` is empty, the run is an **initial** review. Plugin reconciliation matches on `fid` only, so `file`/`line` are not needed on prior findings. `/tmp/pr_open_threads.jsonl` may still be non-empty when other reviewers left open inline comments (used for dedup and external-thread replies even on the first plugin run).
+
+<details>
+<summary>Reference: what the script does (do not paste as a shortened curl)</summary>
+
+1. Presence-check `AZURE_DEVOPS_TOKEN` (underscores); hint re-export if only dashed `AZURE-DEVOPS-TOKEN` exists.
+2. `GET .../pullRequests/{id}/threads` with pagination; **fail on non-2xx or non-JSON** (never `json.load` an error page).
+3. Filter plugin findings via `properties["pr-reviewer.fid"]` (body HTML marker fallback).
+4. Write all open `threadContext` inline threads to `/tmp/pr_open_threads.jsonl`.
+5. Export the latest summary `sha` to `/tmp/pr_prior.env`.
+
+</details>
 
 ---
 
@@ -1220,7 +1126,7 @@ If `INLINE_OK` is `0` while `INLINE_TOTAL` is `> 0`, every POST failed. Read `/t
 
 | HTTP | Cause | Fix |
 |---|---|---|
-| `401` | `AZURE_DEVOPS_TOKEN` empty — often because only the dashed `AZURE-DEVOPS-TOKEN` is set and the underscored alias is missing. Confirm presence with `echo "AZURE_DEVOPS_TOKEN=${AZURE_DEVOPS_TOKEN:+yes}"` (never echo the value). | Re-export with underscores: `export AZURE_DEVOPS_TOKEN="$(printenv AZURE-DEVOPS-TOKEN)"` (the hook normally catches this). |
+| `401` | `AZURE_DEVOPS_TOKEN` empty — often because only the dashed `AZURE-DEVOPS-TOKEN` is set and the underscored alias is missing. Confirm presence with `echo "AZURE_DEVOPS_TOKEN=${AZURE_DEVOPS_TOKEN:+yes}"` (never echo the value). Same failure mode causes `json.JSONDecodeError` when an agent invents `THREADS_JSON=$(curl …)` instead of running `scripts/ado-detect-prior.sh`. | Re-export with underscores: `export AZURE_DEVOPS_TOKEN="$(printenv AZURE-DEVOPS-TOKEN)"` (the hook normally catches this). Then re-run `ado-detect-prior.sh` / `ado-post-review.sh` — do not hand-roll a replacement curl. |
 | `404` | `API_BASE` is wrong — most often the legacy `DefaultCollection` URL was parsed without the project segment. | Re-run the parser at the top of this file; print `API_BASE` and confirm it ends with `/{project}`, not `/{collection}`. |
 | `400` with `threadContext` in the body | `filePath` doesn't match a file in the iteration, or the line number is past EOF. | Confirm the file path is repo-relative (no leading `/` in your JSONL — the script adds one) and the line is on the right (post-change) side. |
 

@@ -52,90 +52,26 @@ REPO=$(echo "$REMOTE"  | sed 's|https://github.com/||;s|git@github.com:||' | cut
 
 Called from Step 3 of `commands/pr-review.md` to decide initial vs. re-review mode. It reads the plugin's **own** previous comments (identified by the `<!-- pr-reviewer:v1 ... -->` marker) and writes a normalised prior-findings file the reconciliation step consumes. The same GraphQL fetch also writes **all open inline threads** (humans, bots, and this plugin) to `/tmp/pr_open_threads.jsonl` for external-thread awareness, dedup, and reply-only validation.
 
-GitHub's REST review-comments endpoint returns comment bodies and ids but **not** the review-thread node id needed to resolve a thread. GraphQL returns both, so use it:
+GitHub's REST review-comments endpoint returns comment bodies and ids but **not** the review-thread node id needed to resolve a thread. GraphQL returns both — **use the plugin script**, do not invent a REST-only shortcut.
+
+**Prefer the plugin script (one Bash call):**
 
 ```bash
-# --paginate + --slurp follows the endCursor automatically and emits a JSON
-# array of pages, so PRs with >100 review threads are still fully reconciled.
-gh api graphql --paginate --slurp -f query='
-  query($owner:String!, $repo:String!, $pr:Int!, $endCursor:String) {
-    repository(owner:$owner, name:$repo) {
-      pullRequest(number:$pr) {
-        reviewThreads(first:100, after:$endCursor) {
-          pageInfo { hasNextPage endCursor }
-          nodes {
-            id
-            isResolved
-            path
-            line
-            comments(first:1) {
-              nodes {
-                databaseId
-                body
-                author { login }
-              }
-            }
-          }
-        }
-      }
-    }
-  }' -F owner="$OWNER" -F repo="$REPO" -F pr="$PR_NUMBER" > /tmp/pr_review_threads.json
-
-# Extract our marked finding threads → /tmp/pr_prior_findings.jsonl
-# AND all open inline threads → /tmp/pr_open_threads.jsonl
-python3 - <<'PY'
-import json, re
-pages = json.load(open('/tmp/pr_review_threads.json'))
-if isinstance(pages, dict):   # older gh without --slurp support returns one page
-    pages = [pages]
-threads = []
-for page in pages:
-    threads += page['data']['repository']['pullRequest']['reviewThreads']['nodes']
-pat = re.compile(r'<!--\s*pr-reviewer:v1\s+kind=finding\s+fid=(\S+)\s+sha=(\S+)\s*-->')
-
-prior = open('/tmp/pr_prior_findings.jsonl', 'w')
-open_threads = open('/tmp/pr_open_threads.jsonl', 'w')
-for t in threads:
-    c = (t['comments']['nodes'] or [None])[0]
-    if not c:
-        continue
-    body = c['body'] or ''
-    m = pat.search(body)
-    is_plugin = bool(m)
-    if m:
-        prior.write(json.dumps({
-            "fid": m.group(1),
-            "status": "resolved" if t['isResolved'] else "open",
-            "thread_ref": t['id'],            # GraphQL node id — used by resolveReviewThread
-            "comment_ref": c['databaseId'],   # REST comment id — used to post a reply
-        }) + '\n')
-    # Open inline threads only (path present = file-anchored review comment)
-    if t.get('isResolved') or not t.get('path'):
-        continue
-    author = ((c.get('author') or {}) or {}).get('login') or ''
-    open_threads.write(json.dumps({
-        "file": t.get('path') or '',
-        "line": t.get('line'),
-        "body": body,
-        "author": author,
-        "is_plugin": is_plugin,
-        "thread_ref": t['id'],
-        "comment_ref": c['databaseId'],
-    }) + '\n')
-prior.close()
-open_threads.close()
-PY
-
-# Most-recent summary marker sha. The summary marker is stamped on the body of
-# the review posted with `gh pr review` — reviews live on the PULLS reviews
-# endpoint, NOT on the issue-comments endpoint (which only holds `gh pr comment`
-# output, e.g. the unmarked "review in progress" comment).
-PRIOR_SUMMARY_SHA=$(gh api "repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}/reviews" --paginate \
-  --jq '.[].body' 2>/dev/null \
-  | grep -oE 'pr-reviewer:v1 kind=summary[^>]*sha=[0-9a-f]+' \
-  | tail -1 | grep -oE 'sha=[0-9a-f]+' | cut -d= -f2)
-export PRIOR_SUMMARY_SHA
+GH_DETECT="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/gh-detect-prior.sh}"
+if [ -z "${GH_DETECT:-}" ] || [ ! -f "$GH_DETECT" ]; then
+  GH_DETECT=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/gh-detect-prior.sh' 2>/dev/null | head -1)
+fi
+[ -n "${GH_DETECT:-}" ] && [ -f "$GH_DETECT" ] || {
+  echo "ERROR: scripts/gh-detect-prior.sh not found — refuse to invent a GraphQL dump" >&2
+  exit 1
+}
+# PR_NUMBER from /tmp/pr_state.env or the invocation argument
+bash "$GH_DETECT"
+# shellcheck disable=SC1091
+source /tmp/pr_prior.env   # PRIOR_SUMMARY_SHA
 ```
+
+**Outputs:** `/tmp/pr_prior_findings.jsonl`, `/tmp/pr_open_threads.jsonl`, `/tmp/pr_review_threads.json`, `/tmp/pr_prior.env` (`PRIOR_SUMMARY_SHA`). The summary marker is read from `pulls/.../reviews` (where `gh pr review` posts), not issue comments.
 
 If `/tmp/pr_prior_findings.jsonl` is empty, the run is an **initial** review. The `file`/`line` fields are intentionally omitted from prior findings — plugin reconciliation matches on `fid` alone. `/tmp/pr_open_threads.jsonl` may still be non-empty when other reviewers left open inline comments (used for dedup and external-thread replies even on the first plugin run).
 

@@ -471,26 +471,36 @@ Use `git show ${HEAD_SHA}:<filepath>` or the `Read` tool to read the full conten
 
 This is the one place reading platform PR comments is required, because it determines whether the run is an **initial** review or a **re-review**, and it loads open inline threads for awareness/dedup. Skip entirely on the generic platform (no API) and when `PR_REVIEWER_RECONCILE=false` (stateless mode also skips external-thread awareness).
 
-1. List the existing review comments/threads on the PR. The provider helper writes two files from one fetch:
+1. Unless `PR_REVIEWER_RECONCILE=false` (or platform is generic), list the existing review comments/threads on the PR. **Run the platform script as one Bash call** — do **not** invent a shortened `curl`/`gh` dump (Azure agents inventing `THREADS_JSON=$(curl …)` then `json.load` is a common crash on 401 HTML).
+
+   The script writes:
    - `/tmp/pr_prior_findings.jsonl` — only threads carrying the plugin marker (`<!-- pr-reviewer:v1 ... -->` on GitHub, or the `pr-reviewer.*` thread properties on Azure DevOps). Drives `REVIEW_MODE`.
    - `/tmp/pr_open_threads.jsonl` — **every open inline thread** (humans, bots, this plugin), one JSON object per line: `{file, line, body, author, is_plugin, thread_ref[, comment_ref]}`. Used for reviewer awareness, dedup, and external-thread validation.
-   Use the platform helper:
-   - **GitHub** → `providers/github.md` → *Detecting a prior review* (GraphQL: review threads with `id`, `isResolved`, `path`, `line`, body, fid).
-   - **Azure DevOps** → `providers/azure-devops.md` → *Detecting a prior review* (`GET .../threads`, filter by `properties["pr-reviewer.fid"]` for prior findings; all open `threadContext` threads for open-threads).
+   - `/tmp/pr_prior.env` — `PRIOR_SUMMARY_SHA` (shell state does not persist; always `source` this file afterward).
+
+   | Platform | Script (one Bash call) |
+   |---|---|
+   | **GitHub** | `scripts/gh-detect-prior.sh` (see `providers/github.md` → *Detecting a prior review*) |
+   | **Azure DevOps** | `scripts/ado-detect-prior.sh` (see `providers/azure-devops.md` → *Detecting a prior review*) |
+
+   Resolve the script via `CLAUDE_PLUGIN_ROOT` the same way as `ado-post-review.sh`. If the script exits non-zero (missing token, HTTP 401, non-JSON body), **fix auth / env and re-run the script** — do not hand-roll a replacement curl.
 
 2. Decide the mode:
 
 ```bash
 source /tmp/pr_state.env
-# /tmp/pr_prior_findings.jsonl is written by the provider helper: one JSON object per
+# shellcheck disable=SC1091
+[ -f /tmp/pr_prior.env ] && source /tmp/pr_prior.env
+# /tmp/pr_prior_findings.jsonl is written by the provider script: one JSON object per
 # prior marked finding thread: {fid, status(open|resolved), thread_ref[, comment_ref]}.
 # Matching is by fid alone, so file/line are not needed here.
-# /tmp/pr_open_threads.jsonl is written by the same helper (may be empty).
+# /tmp/pr_open_threads.jsonl is written by the same script (may be empty).
 # Touch an empty file if the helper skipped writing it so later steps can test -s safely.
 : "${PR_REVIEWER_RECONCILE:=true}"
 if [ "$PR_REVIEWER_RECONCILE" = "false" ]; then
   : > /tmp/pr_prior_findings.jsonl
   : > /tmp/pr_open_threads.jsonl
+  : > /tmp/pr_prior.env
 fi
 [ -f /tmp/pr_open_threads.jsonl ] || : > /tmp/pr_open_threads.jsonl
 # PRIOR_SUMMARY_SHA is the sha= from the most recent summary marker, or empty.
