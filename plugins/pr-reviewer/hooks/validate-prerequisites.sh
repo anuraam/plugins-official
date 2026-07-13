@@ -11,9 +11,13 @@
 # AZURE-DEVOPS-TOKEN); the Xianix Executor re-exports any dashed env var as an underscored
 # alias, so GITHUB_TOKEN / AZURE_DEVOPS_TOKEN are what is referenceable at runtime.
 #   GITHUB_TOKEN          — used by git push for HTTPS authentication (GitHub / generic)
-#                        injected via GIT_CONFIG env vars, never written to disk
 #   AZURE_DEVOPS_TOKEN    — used by git push for HTTPS authentication on Azure DevOps remotes
-#                        also used by the az CLI for API calls
+#                        also used by curl for the Azure DevOps REST API calls
+#
+# This hook VALIDATES only. It cannot inject credentials: it runs as a separate
+# process, and every run happens in a temporary Docker container, so exports made
+# here never reach the agent's shell. The push command carries GIT_CONFIG_*
+# variables inline on the same command line (see docs/git-auth.md).
 
 set -euo pipefail
 
@@ -55,19 +59,25 @@ fi
 # reference as $AZURE-DEVOPS-TOKEN. The Xianix Executor re-exports dashed env vars as underscored
 # aliases, so AZURE_DEVOPS_TOKEN should be set. If it is empty but a dashed AZURE-DEVOPS-TOKEN
 # exists in the raw environment, the alias step did not run — surface an actionable error.
+#
+# Secret hygiene: never echo token values (not via env, printenv to stdout, or $VAR expansion).
+# Presence-check only with ${AZURE_DEVOPS_TOKEN:+yes}. Detect dashed keys via compgen -e (names
+# only). Re-export with printenv into an assignment — never print the value.
 if echo "$COMMAND" | grep -qE "curl.*(dev\.azure\.com|visualstudio\.com|app\.vssps\.visualstudio\.com)"; then
     if [ -z "${AZURE_DEVOPS_TOKEN:-}" ]; then
-        if env | grep -q '^AZURE-DEVOPS-TOKEN='; then
-            echo '{"decision": "block", "reason": "AZURE_DEVOPS_TOKEN is empty but a dashed AZURE-DEVOPS-TOKEN exists in the environment. Bash cannot reference hyphenated names — re-export as: export AZURE_DEVOPS_TOKEN=\"$(env | sed -n s/^AZURE-DEVOPS-TOKEN=//p)\""}'
+        if compgen -e | grep -qx 'AZURE-DEVOPS-TOKEN'; then
+            echo '{"decision": "block", "reason": "AZURE_DEVOPS_TOKEN is empty but a dashed AZURE-DEVOPS-TOKEN exists. Bash cannot reference hyphenated names — re-export as: export AZURE_DEVOPS_TOKEN=\"$(printenv AZURE-DEVOPS-TOKEN)\". Never echo the secret; presence-check only: echo \"AZURE_DEVOPS_TOKEN=${AZURE_DEVOPS_TOKEN:+yes}\""}'
         else
-            echo '{"decision": "block", "reason": "AZURE_DEVOPS_TOKEN is not set. Pass it at runtime: AZURE_DEVOPS_TOKEN=<pat> claude ... (see docs/platform-setup.md)"}'
+            echo '{"decision": "block", "reason": "AZURE_DEVOPS_TOKEN is not set. Pass it at runtime: AZURE_DEVOPS_TOKEN=<pat> claude ... (see docs/platform-setup.md). Never echo the secret; presence-check only: echo \"AZURE_DEVOPS_TOKEN=${AZURE_DEVOPS_TOKEN:+yes}\""}'
         fi
         exit 0
     fi
 fi
 
-# Only validate git commands beyond this point
-if ! echo "$COMMAND" | grep -qE "^git "; then
+# Only validate git commands beyond this point. Match git anywhere at a word
+# start, not just column 0 — the recommended push form is prefixed with
+# GIT_CONFIG_* variables on the same command line.
+if ! echo "$COMMAND" | grep -qE "(^|[[:space:]])git "; then
     exit 0
 fi
 
@@ -84,7 +94,7 @@ if ! git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
 fi
 
 # For commit operations — require git identity to be set
-if echo "$COMMAND" | grep -qE "^git commit"; then
+if echo "$COMMAND" | grep -qE "(^|[[:space:]])git commit"; then
     if [ -z "$(git config user.name 2>/dev/null)" ]; then
         echo '{"decision": "block", "reason": "git user.name is not set. Run: git config --global user.name \"Your Name\""}'
         exit 0
@@ -95,8 +105,15 @@ if echo "$COMMAND" | grep -qE "^git commit"; then
     fi
 fi
 
-# For push operations — require a remote and a token
-if echo "$COMMAND" | grep -qE "^git push"; then
+# For push operations — require a remote and a token.
+#
+# VALIDATION ONLY. This hook runs as its own short-lived process, so exporting
+# GIT_CONFIG_* here can never reach the agent's shell session (and every run is
+# a throwaway Docker container — nothing persists between processes anyway).
+# The push command itself must carry the credentials inline via GIT_CONFIG_*
+# variables prefixed on the same command line — see docs/git-auth.md and the
+# fix-mode push step in commands/pr-review.md.
+if echo "$COMMAND" | grep -qE "(^|[[:space:]])git push"; then
     if ! git remote | grep -q .; then
         echo '{"decision": "block", "reason": "No git remote configured. Add a remote with: git remote add origin <url>"}'
         exit 0
@@ -106,31 +123,15 @@ if echo "$COMMAND" | grep -qE "^git push"; then
     REMOTE_URL=$(git remote get-url origin 2>/dev/null || echo "")
 
     if echo "$REMOTE_URL" | grep -qE "(dev\.azure\.com|visualstudio\.com)"; then
-        # Azure DevOps — use AZURE_DEVOPS_TOKEN
         if [ -z "${AZURE_DEVOPS_TOKEN:-}" ]; then
-            echo '{"decision": "block", "reason": "AZURE_DEVOPS_TOKEN is not set. Pass it at runtime: AZURE_DEVOPS_TOKEN=<pat> claude ... (see docs/platform-setup.md)"}'
+            echo '{"decision": "block", "reason": "AZURE_DEVOPS_TOKEN is not set in the container environment. It must be injected when the container starts (see docs/platform-setup.md)."}'
             exit 0
         fi
-
-        # Inject the PAT into git credentials for Azure DevOps HTTPS remotes
-        # Supports both dev.azure.com and *.visualstudio.com URL formats
-        export GIT_CONFIG_COUNT=2
-        export GIT_CONFIG_KEY_0="url.https://x-access-token:${AZURE_DEVOPS_TOKEN}@dev.azure.com/.insteadOf"
-        export GIT_CONFIG_VALUE_0="https://dev.azure.com/"
-        export GIT_CONFIG_KEY_1="url.https://x-access-token:${AZURE_DEVOPS_TOKEN}@visualstudio.com/.insteadOf"
-        export GIT_CONFIG_VALUE_1="https://visualstudio.com/"
     else
-        # GitHub or generic HTTPS remote — use GITHUB_TOKEN
         if [ -z "${GITHUB_TOKEN:-}" ]; then
-            echo '{"decision": "block", "reason": "GITHUB_TOKEN is not set. Pass it at runtime: GITHUB_TOKEN=<token> claude ... (see docs/platform-setup.md)"}'
+            echo '{"decision": "block", "reason": "GITHUB_TOKEN is not set in the container environment. It must be injected when the container starts (see docs/platform-setup.md)."}'
             exit 0
         fi
-
-        # Inject token via env-based git config — no files written, no global config touched,
-        # scoped to this shell session only.
-        export GIT_CONFIG_COUNT=1
-        export GIT_CONFIG_KEY_0="url.https://x-access-token:${GITHUB_TOKEN}@github.com/.insteadOf"
-        export GIT_CONFIG_VALUE_0="https://github.com/"
     fi
 fi
 

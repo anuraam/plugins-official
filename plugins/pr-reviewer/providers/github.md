@@ -2,6 +2,8 @@
 
 Use this provider when `git remote get-url origin` contains `github.com`.
 
+Do **not** use this provider when origin is Azure DevOps (`dev.azure.com` / `visualstudio.com`), even if the mention prompt says "pull request" or env `PLATFORM` is unset. The executor’s Azure value is `azuredevops` — that maps to `providers/azure-devops.md`, not here.
+
 ## How this fits with the rest of the plugin
 
 - **Reading / analysis** — Use **git** against your base branch (same as Azure DevOps and other hosts): `git diff`, `git log`, etc. See Step 3 of the `/pr-review` command in `commands/pr-review.md`. No `gh` needed to fetch patches or file lists.
@@ -48,82 +50,50 @@ REPO=$(echo "$REMOTE"  | sed 's|https://github.com/||;s|git@github.com:||' | cut
 
 ## Detecting a prior review (re-review awareness)
 
-Called from Step 3 of `commands/pr-review.md` to decide initial vs. re-review mode. It reads the plugin's **own** previous comments (identified by the `<!-- pr-reviewer:v1 ... -->` marker) and writes a normalised prior-findings file the reconciliation step consumes.
+Called from Step 3 of `commands/pr-review.md` to decide initial vs. re-review mode. It reads the plugin's **own** previous comments (identified by the `<!-- pr-reviewer:v1 ... -->` marker) and writes a normalised prior-findings file the reconciliation step consumes. The same GraphQL fetch also writes **all open inline threads** (humans, bots, and this plugin) to `/tmp/pr_open_threads.jsonl` for external-thread awareness, dedup, and reply-only validation.
 
-GitHub's REST review-comments endpoint returns comment bodies and ids but **not** the review-thread node id needed to resolve a thread. GraphQL returns both, so use it:
+GitHub's REST review-comments endpoint returns comment bodies and ids but **not** the review-thread node id needed to resolve a thread. GraphQL returns both — **use the plugin script**, do not invent a REST-only shortcut.
+
+**Prefer the plugin script (one Bash call):**
 
 ```bash
-gh api graphql -f query='
-  query($owner:String!, $repo:String!, $pr:Int!) {
-    repository(owner:$owner, name:$repo) {
-      pullRequest(number:$pr) {
-        reviewThreads(first:100) {
-          nodes {
-            id
-            isResolved
-            comments(first:1) { nodes { databaseId body } }
-          }
-        }
-      }
-    }
-  }' -F owner="$OWNER" -F repo="$REPO" -F pr="$PR_NUMBER" > /tmp/pr_review_threads.json
-
-# Extract our marked finding threads → /tmp/pr_prior_findings.jsonl
-python3 - <<'PY' > /tmp/pr_prior_findings.jsonl
-import json, re
-data = json.load(open('/tmp/pr_review_threads.json'))
-threads = data['data']['repository']['pullRequest']['reviewThreads']['nodes']
-pat = re.compile(r'<!--\s*pr-reviewer:v1\s+kind=finding\s+fid=(\S+)\s+sha=(\S+)\s*-->')
-for t in threads:
-    c = (t['comments']['nodes'] or [None])[0]
-    if not c:
-        continue
-    m = pat.search(c['body'] or '')
-    if not m:
-        continue
-    print(json.dumps({
-        "fid": m.group(1),
-        "status": "resolved" if t['isResolved'] else "open",
-        "thread_ref": t['id'],            # GraphQL node id — used by resolveReviewThread
-        "comment_ref": c['databaseId'],   # REST comment id — used to post a reply
-    }))
-PY
-
-# Most-recent summary marker sha (PR-level review/issue comments carry kind=summary)
-PRIOR_SUMMARY_SHA=$(gh api "repos/${OWNER}/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
-  --jq '.[].body' 2>/dev/null \
-  | grep -oE 'pr-reviewer:v1 kind=summary[^>]*sha=[0-9a-f]+' \
-  | tail -1 | grep -oE 'sha=[0-9a-f]+' | cut -d= -f2)
-export PRIOR_SUMMARY_SHA
+GH_DETECT="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/gh-detect-prior.sh}"
+if [ -z "${GH_DETECT:-}" ] || [ ! -f "$GH_DETECT" ]; then
+  GH_DETECT=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/gh-detect-prior.sh' 2>/dev/null | head -1)
+fi
+[ -n "${GH_DETECT:-}" ] && [ -f "$GH_DETECT" ] || {
+  echo "ERROR: scripts/gh-detect-prior.sh not found — refuse to invent a GraphQL dump" >&2
+  exit 1
+}
+# PR_NUMBER from /tmp/pr_state.env or the invocation argument
+bash "$GH_DETECT"
+# shellcheck disable=SC1091
+source /tmp/pr_prior.env   # PRIOR_SUMMARY_SHA
 ```
 
-If `/tmp/pr_prior_findings.jsonl` is empty, the run is an **initial** review. The `file`/`line` fields are intentionally omitted here — reconciliation matches on `fid` alone, so they are not needed.
+**Outputs:** `/tmp/pr_prior_findings.jsonl`, `/tmp/pr_open_threads.jsonl`, `/tmp/pr_review_threads.json`, `/tmp/pr_prior.env` (`PRIOR_SUMMARY_SHA`). The summary marker is read from `pulls/.../reviews` (where `gh pr review` posts), not issue comments.
+
+If `/tmp/pr_prior_findings.jsonl` is empty, the run is an **initial** review. The `file`/`line` fields are intentionally omitted from prior findings — plugin reconciliation matches on `fid` alone. `/tmp/pr_open_threads.jsonl` may still be non-empty when other reviewers left open inline comments (used for dedup and external-thread replies even on the first plugin run).
 
 ---
 
-## Posting the “review in progress” comment
+## Posting the "review in progress" comment
 
 ```bash
-PLUGIN_VERSION=$(python3 -c “
-import json, os
-for p in [
-    os.path.expanduser('~/.claude/plugins/pr-reviewer/.claude-plugin/plugin.json'),
-    os.path.expanduser('~/Library/Application Support/Claude/plugins/pr-reviewer/.claude-plugin/plugin.json'),
-]:
-    try:
-        print(json.load(open(p))['version']); break
-    except: pass
-else: print('unknown')
-“ 2>/dev/null || echo “unknown”)
+# Best-effort version stamp — cosmetic only, never spend more than one command on it.
+PLUGIN_VERSION=$(grep -hom1 '"version"[^,}]*' ~/.claude/plugins/pr-reviewer/.claude-plugin/plugin.json \
+  "$HOME/Library/Application Support/Claude/plugins/pr-reviewer/.claude-plugin/plugin.json" 2>/dev/null \
+  | cut -d'"' -f4)
+PLUGIN_VERSION=${PLUGIN_VERSION:-unknown}
 
-gh pr comment <pr-number> --body “$(cat <<EOF
+gh pr comment <pr-number> --body "$(cat <<EOF
 🔍 PR Review in Progress
 
 Claude Code is analyzing this pull request. The review will be posted here shortly.
 
 PR Reviewer (${PLUGIN_VERSION})
 EOF
-)”
+)"
 ```
 
 If posting fails, output one warning line and continue.
@@ -159,6 +129,15 @@ The `PR_REVIEWER_BLOCK_ON_CRITICAL` environment variable controls this:
 The verdict label in the report body, the Critical Issues section, and the inline comments are identical in both modes — only the GitHub review *type* changes.
 
 ```bash
+# Detect self-review (author == authenticated user) — GitHub blocks --approve on own PRs
+PR_AUTHOR=$(gh pr view "$PR_NUMBER" --json author --jq '.author.login')
+CURRENT_USER=$(gh api user --jq '.login' 2>/dev/null || echo "")
+SELF_REVIEW=false
+if [ -n "$CURRENT_USER" ] && [ "$PR_AUTHOR" = "$CURRENT_USER" ]; then
+  SELF_REVIEW=true
+  echo "INFO: self-review detected (author=$PR_AUTHOR) — will post as --comment, not --approve/--request-changes"
+fi
+
 # Map verdict + PR_REVIEWER_BLOCK_ON_CRITICAL to the gh flag
 case "${PR_REVIEWER_BLOCK_ON_CRITICAL:-false}" in
   true|True|TRUE|1|yes|Yes|YES) BLOCK_ON_CRITICAL=true ;;
@@ -167,9 +146,18 @@ esac
 
 case "${VERDICT}" in
   "APPROVE"|"APPROVE WITH SUGGESTIONS")
-    REVIEW_FLAG="--approve" ;;
+    if [ "$SELF_REVIEW" = "true" ]; then
+      REVIEW_FLAG="--comment"
+      echo "INFO: self-review — posting APPROVE verdict as non-blocking comment review"
+    else
+      REVIEW_FLAG="--approve"
+    fi
+    ;;
   "REQUEST CHANGES")
-    if [ "$BLOCK_ON_CRITICAL" = "true" ]; then
+    if [ "$SELF_REVIEW" = "true" ]; then
+      REVIEW_FLAG="--comment"
+      echo "INFO: self-review — posting REQUEST CHANGES verdict as non-blocking comment review"
+    elif [ "$BLOCK_ON_CRITICAL" = "true" ]; then
       REVIEW_FLAG="--request-changes"
     else
       REVIEW_FLAG="--comment"
@@ -180,14 +168,20 @@ case "${VERDICT}" in
     REVIEW_FLAG="--comment" ;;
 esac
 
-gh pr review <pr-number> $REVIEW_FLAG --body "$(cat /tmp/pr_review_body.md)"
+source /tmp/pr_state.env 2>/dev/null || HEAD_SHA=$(git rev-parse HEAD)
+printf '\n\n<!-- pr-reviewer:v1 kind=summary sha=%s -->\n' "$HEAD_SHA" >> /tmp/pr_review_body.md
+
+if ! gh pr review "$PR_NUMBER" $REVIEW_FLAG --body "$(cat /tmp/pr_review_body.md)" 2>/tmp/pr_review_err.txt; then
+  echo "WARN: gh pr review failed: $(cat /tmp/pr_review_err.txt)"
+  echo "WARN: falling back to gh pr comment for the summary body"
+  gh pr comment "$PR_NUMBER" --body "$(cat /tmp/pr_review_body.md)" || {
+    echo "ERROR: could not post review summary — see /tmp/pr_review_err.txt"
+    exit 1
+  }
+fi
 ```
 
-> **Stamp the summary marker.** Before posting, append the summary marker to `/tmp/pr_review_body.md` so the next run can find this review and read the head it was generated against:
-> ```bash
-> printf '\n\n<!-- pr-reviewer:v1 kind=summary sha=%s -->\n' "$(git rev-parse HEAD)" >> /tmp/pr_review_body.md
-> ```
-> Each re-review posts a *new* review event (idiomatic on GitHub — reviews are timestamped), with the re-review delta block already at the top of the body from step 7. There is no need to edit the previous review.
+> **Stamp the summary marker.** The posting script above appends `<!-- pr-reviewer:v1 kind=summary sha=<HEAD_SHA> -->` to `/tmp/pr_review_body.md` before calling `gh pr review`, using `HEAD_SHA` from `/tmp/pr_state.env`. Each re-review posts a *new* review event (idiomatic on GitHub — reviews are timestamped), with the re-review delta block already at the top of the body from step 7. There is no need to edit the previous review.
 
 ### Inline comments (one thread per finding) — MANDATORY
 
@@ -250,17 +244,24 @@ while IFS= read -r line; do
   [ -z "$line" ] && continue
   INLINE_TOTAL=$((INLINE_TOTAL + 1))
 
-  F_PATH=$(echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin)['file'])")
-  F_LINE=$(echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin)['line'])")
-  F_FID=$(echo "$line"  | python3 -c "import sys,json; print(json.load(sys.stdin).get('fid',''))")
-  # Body is copied verbatim — sub-agents write ```suggestion blocks directly, GitHub renders the button.
-  echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin)['body'])" > /tmp/pr_inline_body.md
+  # One python call extracts every field AND writes the body file (5 separate
+  # per-finding python invocations is pure process overhead). Body is copied
+  # verbatim — sub-agents write ```suggestion blocks directly, GitHub renders the button.
+  # printf '%s' (not echo) — echo interprets \n escapes in some shells and corrupts the JSON.
+  eval "$(printf '%s' "$line" | python3 -c "
+import sys, json, shlex
+d = json.load(sys.stdin)
+open('/tmp/pr_inline_body.md', 'w').write(d['body'])
+print('F_PATH=' + shlex.quote(str(d['file'])))
+print('F_LINE=' + shlex.quote(str(d['line'])))
+print('F_FID=' + shlex.quote(str(d.get('fid', ''))))
+print('F_SUGGEST_START=' + shlex.quote(str(d.get('suggestion_start_line', ''))))
+")"
 
   # Append the hidden finding marker so the next re-review can reconcile this comment.
   printf '\n\n<!-- pr-reviewer:v1 kind=finding fid=%s sha=%s -->\n' "$F_FID" "$COMMIT_ID" >> /tmp/pr_inline_body.md
 
   # For multi-line suggestions, pass start_line + start_side so GitHub anchors the block correctly.
-  F_SUGGEST_START=$(echo "$line" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('suggestion_start_line',''))" 2>/dev/null || true)
   SUGGESTION_ARGS=""
   if [ -n "$F_SUGGEST_START" ] && [ "$F_SUGGEST_START" != "$F_LINE" ]; then
     SUGGESTION_ARGS="--field start_line=${F_SUGGEST_START} --field start_side=RIGHT"
@@ -310,7 +311,7 @@ If POSTs fail, read `/tmp/pr_inline_failures.log` and check the `gh api` error:
 | `422` (`line must be part of the diff`) | The line is not on the diff's right side — usually a diff-position or old-side line number leaked through. | Re-resolve the finding to its post-change file line per `commands/pr-review.md`. As a fallback, attach the comment to the nearest changed line in the same hunk. |
 | `422` (`commit_id` mismatch) | `commit_id` is not the PR head. | Use `git rev-parse HEAD`; ensure the branch is the PR head, not a stale checkout. |
 | `404` | Wrong `OWNER`/`REPO`/`PR_NUMBER`, or token lacks `repo` scope. | Re-parse the remote URL; confirm token scopes. |
-| `403` | Acting as the PR author with a self-review restriction, or rate-limited. | Inline review *comments* are allowed on your own PR; if rate-limited, retry the failed entries from the log. |
+| `403` | Acting as the PR author attempting `--approve`/`--request-changes` on your own PR, or rate-limited. | Detect self-review before posting (see above) and use `--comment`. Inline review *comments* via `gh api .../pulls/comments` are still allowed on your own PR. If rate-limited, retry the failed entries from the log. |
 
 ---
 
@@ -357,16 +358,51 @@ If `resolveReviewThread` returns a permissions error, the token lacks write acce
 
 ---
 
+## Replying on addressed external threads (sub-step E)
+
+Runs when `/tmp/pr_external_reconcile.json` exists and `addressed` is non-empty (initial **or** re-review). Reply only — **never** call `resolveReviewThread` on these threads. Resolution stays with the original author.
+
+```bash
+HEAD_SHA=$(git rev-parse HEAD)
+: > /tmp/pr_external_replies.log
+EXTERNAL_REPLY_OK=0
+EXTERNAL_REPLY_FAIL=0
+
+if [ -f /tmp/pr_external_reconcile.json ]; then
+  python3 -c "import json,sys; [print(json.dumps(x)) for x in json.load(open('/tmp/pr_external_reconcile.json')).get('addressed',[])]" \
+  | while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    COMMENT_ID=$(echo "$f" | python3 -c "import sys,json; print(json.load(sys.stdin).get('comment_ref') or '')")
+    [ -n "$COMMENT_ID" ] || { echo "fail missing comment_ref" >> /tmp/pr_external_replies.log; continue; }
+
+    gh api "repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}/comments/${COMMENT_ID}/replies" \
+      --method POST \
+      --field body="Looks addressed as of \`${HEAD_SHA}\` — leaving this thread open for the original author to resolve.
+
+<!-- pr-reviewer:v1 kind=external-ack sha=${HEAD_SHA} -->" \
+      >/dev/null 2>/tmp/pr_external_reply_err.txt \
+      && echo ok >> /tmp/pr_external_replies.log \
+      || echo "fail $COMMENT_ID" >> /tmp/pr_external_replies.log
+  done
+  EXTERNAL_REPLY_OK=$(grep -c '^ok' /tmp/pr_external_replies.log 2>/dev/null || echo 0)
+  EXTERNAL_REPLY_FAIL=$(grep -c '^fail' /tmp/pr_external_replies.log 2>/dev/null || echo 0)
+fi
+export EXTERNAL_REPLY_OK EXTERNAL_REPLY_FAIL
+echo "External replies: ${EXTERNAL_REPLY_OK} addressed thread(s) acknowledged (${EXTERNAL_REPLY_FAIL} failed) — threads left open"
+```
+
+---
+
 ## Output
 
 On completion, use the counters from the inline loop (`$INLINE_OK` / `$INLINE_TOTAL`) — do **not** print a hard-coded number:
 
 ```
 # initial mode
-Review posted on PR #<number>: <verdict> — ${INLINE_OK}/${INLINE_TOTAL} inline comments — https://github.com/<owner>/<repo>/pull/<number>
+Review posted on PR #<number>: <verdict> — ${INLINE_OK}/${INLINE_TOTAL} inline comments — ${EXTERNAL_REPLY_OK} external replies — https://github.com/<owner>/<repo>/pull/<number>
 
 # re-review mode (add reconciliation counters)
-Re-review posted on PR #<number>: <verdict> — ${INLINE_OK}/${INLINE_TOTAL} new — ${RESOLVED_OK} resolved — https://github.com/<owner>/<repo>/pull/<number>
+Re-review posted on PR #<number>: <verdict> — ${INLINE_OK}/${INLINE_TOTAL} new — ${RESOLVED_OK} resolved — ${EXTERNAL_REPLY_OK} external replies — https://github.com/<owner>/<repo>/pull/<number>
 ```
 
 If `INLINE_OK == 0` but the report had findings with file:line references, treat the run as a partial failure and surface the first few lines of `/tmp/pr_inline_failures.log` so the user knows the inline step did not deliver.
