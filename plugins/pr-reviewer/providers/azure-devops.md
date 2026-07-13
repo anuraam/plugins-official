@@ -179,7 +179,9 @@ body = open('/tmp/pr_thread_body.md').read()
 print(json.dumps({
     "comments": [{"content": body, "commentType": 1}],
     "status": "active",
-    "properties": {"Microsoft.TeamFoundation.Discussion.SupportsMarkdown": 1},
+    "properties": {
+        "Microsoft.TeamFoundation.Discussion.SupportsMarkdown": {"$type": "System.Int32", "$value": 1},
+    },
 }))
 PY
 
@@ -211,7 +213,9 @@ body = open('/tmp/pr_thread_body.md').read()
 print(json.dumps({
     "comments": [{"content": body, "commentType": 1}],
     "status": "active",
-    "properties": {"Microsoft.TeamFoundation.Discussion.SupportsMarkdown": 1},
+    "properties": {
+        "Microsoft.TeamFoundation.Discussion.SupportsMarkdown": {"$type": "System.Int32", "$value": 1},
+    },
     "threadContext": {
         "filePath": "/" + os.environ["FILE_PATH"].lstrip("/"),
         "rightFileStart": {"line": int(os.environ["LINE_NUMBER"]), "offset": 1},
@@ -319,7 +323,7 @@ PY
 # Our marked finding threads → /tmp/pr_prior_findings.jsonl
 # AND all open inline threads → /tmp/pr_open_threads.jsonl
 python3 - <<'PY'
-import json
+import json, re
 data = json.load(open('/tmp/pr_threads.json'))
 def prop(props, key):
     v = (props or {}).get(key)
@@ -331,8 +335,18 @@ prior = open('/tmp/pr_prior_findings.jsonl', 'w')
 open_threads = open('/tmp/pr_open_threads.jsonl', 'w')
 for t in data.get("value", []):
     props = t.get("properties") or {}
+    comments = t.get("comments") or []
+    first = comments[0] if comments else {}
+    body = first.get("content") or ""
     fid = prop(props, "pr-reviewer.fid")
-    is_plugin = prop(props, "pr-reviewer.kind") == "finding" and bool(fid)
+    kind = prop(props, "pr-reviewer.kind")
+    # Fall back to body HTML marker when properties were stripped on create
+    if not fid:
+        m = re.search(r'<!--\s*pr-reviewer:v1\s+kind=finding\s+fid=([0-9a-fA-F]+)', body)
+        if m:
+            fid = m.group(1)
+            kind = kind or "finding"
+    is_plugin = kind == "finding" and bool(fid)
     # Azure status enum: active|fixed|wontFix|closed|byDesign|pending
     status = t.get("status", "active")
     resolved = status in RESOLVED
@@ -347,9 +361,6 @@ for t in data.get("value", []):
     file_path = ctx.get("filePath") or ""
     if resolved or not file_path:
         continue
-    comments = t.get("comments") or []
-    first = comments[0] if comments else {}
-    body = first.get("content") or ""
     author = ((first.get("author") or {}) or {}).get("displayName") or \
              ((first.get("author") or {}) or {}).get("uniqueName") or ""
     # Prefer right-side (new) line; fall back to left-side
@@ -373,21 +384,25 @@ open_threads.close()
 PY
 
 # Most-recent summary marker sha (summary thread with latest publishedDate)
+# Prefer thread properties; fall back to body HTML marker when properties were stripped.
 PRIOR_SUMMARY_SHA=$(python3 - <<'PY'
-import json
+import json, re
 data = json.load(open('/tmp/pr_threads.json'))
 def prop(props, key):
     v = (props or {}).get(key)
     return v.get("$value") if isinstance(v, dict) else v
 summaries = []
 for t in data.get("value", []):
-    if prop(t.get("properties") or {}, "pr-reviewer.kind") != "summary":
-        continue
     sha = prop(t.get("properties") or {}, "pr-reviewer.sha")
-    if not sha:
+    kind = prop(t.get("properties") or {}, "pr-reviewer.kind")
+    published = (t.get("comments") or [{}])[0].get("publishedDate", "") or t.get("publishedDate", "")
+    if kind == "summary" and sha:
+        summaries.append((published, sha))
         continue
-    published = (t.get("comments") or [{}])[0].get("publishedDate", "")
-    summaries.append((published, sha))
+    body = ((t.get("comments") or [{}])[0].get("content") or "")
+    m = re.search(r'<!--\s*pr-reviewer:v1\s+kind=summary\s+sha=([0-9a-fA-F]+)\s*-->', body)
+    if m:
+        summaries.append((published, m.group(1)))
 summaries.sort()
 print(summaries[-1][1] if summaries else "")
 PY
@@ -403,13 +418,19 @@ If `/tmp/pr_prior_findings.jsonl` is empty, the run is an **initial** review. Pl
 
 This plugin posts via the **Git** [Pull Request Threads](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-threads/create?view=azure-devops-rest-7.1) API (`.../pullrequests/.../threads`). That is **not** the same as Work Item Tracking discussion comments.
 
-For PR threads, put Markdown in `comments[].content`. Also set thread `properties` so the web UI treats the thread as Markdown-capable (otherwise headings, tables, and emphasis can appear as raw text):
+For PR threads, put Markdown in `comments[].content`. Also set thread `properties` so the web UI treats the thread as Markdown-capable (otherwise headings, tables, and emphasis can appear as raw text).
 
-| Key | Value |
-|---|---|
-| `Microsoft.TeamFoundation.Discussion.SupportsMarkdown` | `1` (integer) |
+**Critical — PropertiesCollection write format.** Azure returns properties as `{"$type":"…","$value":…}` and often **rejects creates** that send bare custom strings (e.g. `"pr-reviewer.kind": "summary"`). That is a common cause of "review-in-progress posts, but the final summary never appears": progress uses only `SupportsMarkdown`, while the summary historically added bare custom keys and got HTTP 400. Always write properties like this:
 
-The posting pattern above includes this on every call.
+```json
+"properties": {
+  "Microsoft.TeamFoundation.Discussion.SupportsMarkdown": { "$type": "System.Int32", "$value": 1 },
+  "pr-reviewer.kind": { "$type": "System.String", "$value": "summary" },
+  "pr-reviewer.sha": { "$type": "System.String", "$value": "<HEAD_SHA>" }
+}
+```
+
+Also append an HTML marker to the comment body (`<!-- pr-reviewer:v1 kind=summary sha=… -->`) so re-review detection still works if properties are stripped. `scripts/ado-post-review.sh` does both and retries `full → markdown-only → bare` until the summary thread lands.
 
 ---
 
@@ -544,7 +565,9 @@ body = open('/tmp/pr_progress_body.md').read()
 print(json.dumps({
     "comments": [{"content": body, "commentType": 1}],
     "status": "active",
-    "properties": {"Microsoft.TeamFoundation.Discussion.SupportsMarkdown": 1},
+    "properties": {
+        "Microsoft.TeamFoundation.Discussion.SupportsMarkdown": {"$type": "System.Int32", "$value": 1},
+    },
 }))
 PY
 
@@ -568,13 +591,34 @@ If posting the starting comment fails, output a single warning line and continue
 
 ## Posting the Review
 
-**Run the self-contained script below as a single `Bash` call.** It loads `/tmp/pr_azure.env`, casts the vote, posts the summary thread, and loops inline findings. Set `VERDICT` to exactly one of: `APPROVE`, `APPROVE WITH SUGGESTIONS`, `REQUEST CHANGES`, `NEEDS DISCUSSION` (aliases like `waitForAuthor` are normalized). Do **not** invent a shortened script, hand-build `curl` URLs, or invent `AZURE_DEVOPS_*` variables — that is the #1 cause of 401/404 posting failures and of vote steps aborting under `set -e`.
+**Prefer the plugin script (one Bash call) — do not reinvent this flow.**
 
-Copy the script **verbatim** from this section. Do not rewrite Step A / B / C yourself.
+```bash
+# Resolve the script (CLAUDE_PLUGIN_ROOT is set when the plugin is active)
+ADO_POST="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/ado-post-review.sh}"
+if [ -z "${ADO_POST:-}" ] || [ ! -f "$ADO_POST" ]; then
+  ADO_POST=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/ado-post-review.sh' 2>/dev/null | head -1)
+fi
+[ -n "${ADO_POST:-}" ] && [ -f "$ADO_POST" ] || {
+  echo "ERROR: scripts/ado-post-review.sh not found — refuse to invent a posting script" >&2
+  exit 1
+}
+
+# Set VERDICT to exactly one of: APPROVE | APPROVE WITH SUGGESTIONS | REQUEST CHANGES | NEEDS DISCUSSION
+# (REQUEST_CHANGES / waitForAuthor aliases are normalized inside the script)
+export VERDICT="REQUEST CHANGES"   # <- replace with the actual verdict from step 7
+export REVIEW_MODE="${REVIEW_MODE:-initial}"
+bash "$ADO_POST"
+```
+
+That script loads `/tmp/pr_azure.env`, casts the vote, posts the **summary** thread (with PropertiesCollection `$type`/`$value` + body marker + retries), reconciles re-review/external threads, and loops inline findings. **Do not** invent a shortened script, hand-build `curl` URLs, or invent `AZURE_DEVOPS_*` variables — that is the #1 cause of 401/404 posting failures, vote steps aborting under `set -e`, and **summary comments never appearing on the PR**.
 
 **Inputs (written by earlier steps):**
 - `/tmp/pr_thread_body.md` — full compiled report (fallback: `/tmp/pr_review_summary.md`)
 - `/tmp/pr_inline_findings.jsonl` — one JSON object per finding (fallback: `/tmp/pr_findings.jsonl`)
+
+<details>
+<summary>Reference: inlined posting script (only if the .sh file is missing from the install)</summary>
 
 ```bash
 set -euo pipefail
@@ -744,18 +788,30 @@ else
 fi
 
 # --- 5. Post summary thread ---
+# Bare custom string properties often 400 the create. Use PropertiesCollection
+# {$type,$value} form, embed a body marker, and retry full → markdown → bare.
 HEAD_SHA=$(git rev-parse HEAD)
 export HEAD_SHA
+python3 - <<'PY'
+import os, pathlib
+sha = os.environ["HEAD_SHA"]
+path = pathlib.Path("/tmp/pr_thread_body.md")
+body = path.read_text()
+marker = f"\n\n<!-- pr-reviewer:v1 kind=summary sha={sha} -->\n"
+if "pr-reviewer:v1 kind=summary" not in body:
+    path.write_text(body.rstrip() + marker)
+PY
 python3 - <<'PY' > /tmp/pr_thread_payload.json
-import json, os
-body = open('/tmp/pr_thread_body.md').read()
+import json, os, pathlib
+sha = os.environ["HEAD_SHA"]
+body = pathlib.Path("/tmp/pr_thread_body.md").read_text()
 print(json.dumps({
     "comments": [{"content": body, "commentType": 1}],
     "status": "active",
     "properties": {
-        "Microsoft.TeamFoundation.Discussion.SupportsMarkdown": 1,
-        "pr-reviewer.kind": "summary",
-        "pr-reviewer.sha": os.environ["HEAD_SHA"],
+        "Microsoft.TeamFoundation.Discussion.SupportsMarkdown": {"$type": "System.Int32", "$value": 1},
+        "pr-reviewer.kind": {"$type": "System.String", "$value": "summary"},
+        "pr-reviewer.sha": {"$type": "System.String", "$value": sha},
     },
 }))
 PY
@@ -768,7 +824,29 @@ SUM_STATUS=$(echo "$SUM_RESP" | sed -n 's/^HTTP_STATUS://p')
 if echo "${SUM_STATUS:-}" | grep -qE '^2'; then
   echo "Summary thread posted (HTTP $SUM_STATUS)"
 else
-  echo "WARN: summary thread failed HTTP ${SUM_STATUS:-curl-error} — body: $(echo "$SUM_RESP" | sed '$d')" >&2
+  echo "WARN: summary thread failed HTTP ${SUM_STATUS:-curl-error} — retrying without custom properties" >&2
+  python3 - <<'PY' > /tmp/pr_thread_payload.json
+import json, pathlib
+body = pathlib.Path("/tmp/pr_thread_body.md").read_text()
+print(json.dumps({
+    "comments": [{"content": body, "commentType": 1}],
+    "status": "active",
+    "properties": {
+        "Microsoft.TeamFoundation.Discussion.SupportsMarkdown": {"$type": "System.Int32", "$value": 1},
+    },
+}))
+PY
+  SUM_RESP=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
+    -H "Content-Type: application/json" -u ":${AZURE_DEVOPS_TOKEN}" -X POST \
+    --data @/tmp/pr_thread_payload.json \
+    "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads?api-version=7.1" \
+    || true)
+  SUM_STATUS=$(echo "$SUM_RESP" | sed -n 's/^HTTP_STATUS://p')
+  if echo "${SUM_STATUS:-}" | grep -qE '^2'; then
+    echo "Summary thread posted without custom properties (HTTP $SUM_STATUS) — body marker retained"
+  else
+    echo "WARN: summary thread failed HTTP ${SUM_STATUS:-curl-error} — body: $(echo "$SUM_RESP" | sed '$d')" >&2
+  fi
 fi
 
 # --- 5b. Re-review: reconcile fixed findings (sub-step R) ---
@@ -855,10 +933,10 @@ print(json.dumps({
     "comments": [{"content": body, "commentType": 1}],
     "status": "active",
     "properties": {
-        "Microsoft.TeamFoundation.Discussion.SupportsMarkdown": 1,
-        "pr-reviewer.kind": "finding",
-        "pr-reviewer.fid": f.get("fid", ""),
-        "pr-reviewer.sha": os.environ["HEAD_SHA"],
+        "Microsoft.TeamFoundation.Discussion.SupportsMarkdown": {"$type": "System.Int32", "$value": 1},
+        "pr-reviewer.kind": {"$type": "System.String", "$value": "finding"},
+        "pr-reviewer.fid": {"$type": "System.String", "$value": f.get("fid", "")},
+        "pr-reviewer.sha": {"$type": "System.String", "$value": os.environ["HEAD_SHA"]},
     },
     "threadContext": {
         "filePath": "/" + file_path.lstrip("/"),
@@ -895,7 +973,9 @@ export INLINE_OK INLINE_FAIL INLINE_TOTAL
 echo "Review posted on PR #${PR_ID}: ${VERDICT} — ${INLINE_OK}/${INLINE_TOTAL} inline — ${API_BASE}/_git/${AZURE_REPO}/pullrequest/${PR_ID}"
 ```
 
-The subsections below explain each step. **Do not reimplement them as separate one-off `curl` calls** — use the script above.
+</details>
+
+The subsections below explain each step. **Prefer `scripts/ado-post-review.sh`** — do not reimplement them as separate one-off `curl` calls.
 
 ### 1. Map verdict to Azure DevOps vote
 
@@ -1002,19 +1082,25 @@ fi
 
 Write the **compiled report text itself** into `/tmp/pr_thread_body.md` (with the `Write` tool or a heredoc containing the actual markdown). Do not write a `${REPORT_BODY}` placeholder inside a quoted (`<<'EOF'`) heredoc — quoting suppresses expansion and the literal string `${REPORT_BODY}` gets posted to the PR.
 
+**Do not hand-roll this step** — `scripts/ado-post-review.sh` posts the summary with the correct PropertiesCollection format, a body marker, and retries. The payload shape it uses:
+
 ```bash
 # /tmp/pr_thread_body.md now contains the full compiled report markdown
+# Properties MUST use {$type,$value} — bare "pr-reviewer.kind":"summary" often 400s the create.
 
 HEAD_SHA=$(git rev-parse HEAD) python3 - <<'PY' > /tmp/pr_thread_payload.json
-import json, os
-body = open('/tmp/pr_thread_body.md').read()
+import json, os, pathlib
+sha = os.environ["HEAD_SHA"]
+body = pathlib.Path("/tmp/pr_thread_body.md").read_text()
+if "pr-reviewer:v1 kind=summary" not in body:
+    body = body.rstrip() + f"\n\n<!-- pr-reviewer:v1 kind=summary sha={sha} -->\n"
 print(json.dumps({
     "comments": [{"content": body, "commentType": 1}],
     "status": "active",
     "properties": {
-        "Microsoft.TeamFoundation.Discussion.SupportsMarkdown": 1,
-        "pr-reviewer.kind": "summary",
-        "pr-reviewer.sha": os.environ["HEAD_SHA"],
+        "Microsoft.TeamFoundation.Discussion.SupportsMarkdown": {"$type": "System.Int32", "$value": 1},
+        "pr-reviewer.kind": {"$type": "System.String", "$value": "summary"},
+        "pr-reviewer.sha": {"$type": "System.String", "$value": sha},
     },
 }))
 PY
@@ -1026,7 +1112,7 @@ curl -sS -w "\nHTTP_STATUS:%{http_code}\n" \
   "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads?api-version=7.1"
 ```
 
-> The `pr-reviewer.kind` / `pr-reviewer.sha` properties are the summary marker — they let the next run find this thread and read the head it was generated against. The re-review delta block is already in the compiled report body from step 7. Each re-review posts a fresh summary thread; the prior summary stays as history.
+> The `pr-reviewer.kind` / `pr-reviewer.sha` properties (and the body HTML marker) are the summary marker — they let the next run find this thread and read the head it was generated against. The re-review delta block is already in the compiled report body from step 7. Each re-review posts a fresh summary thread; the prior summary stays as history.
 
 ### 4. Post inline comments (one thread per finding) — MANDATORY
 
@@ -1075,14 +1161,19 @@ while IFS= read -r line; do
   HEAD_SHA=$(git rev-parse HEAD) python3 - <<'PY' > /tmp/pr_thread_payload.json
 import json, os
 f = json.load(open('/tmp/pr_inline_finding.json'))
+sha = os.environ["HEAD_SHA"]
+body = f["body"]
+fid = f.get("fid", "")
+if fid and "pr-reviewer:v1 kind=finding" not in body:
+    body = body.rstrip() + f"\n\n<!-- pr-reviewer:v1 kind=finding fid={fid} sha={sha} -->\n"
 print(json.dumps({
-    "comments": [{"content": f["body"], "commentType": 1}],
+    "comments": [{"content": body, "commentType": 1}],
     "status": "active",
     "properties": {
-        "Microsoft.TeamFoundation.Discussion.SupportsMarkdown": 1,
-        "pr-reviewer.kind": "finding",
-        "pr-reviewer.fid": f.get("fid", ""),
-        "pr-reviewer.sha": os.environ["HEAD_SHA"],
+        "Microsoft.TeamFoundation.Discussion.SupportsMarkdown": {"$type": "System.Int32", "$value": 1},
+        "pr-reviewer.kind": {"$type": "System.String", "$value": "finding"},
+        "pr-reviewer.fid": {"$type": "System.String", "$value": fid},
+        "pr-reviewer.sha": {"$type": "System.String", "$value": sha},
     },
     "threadContext": {
         "filePath": "/" + f["file"].lstrip("/"),

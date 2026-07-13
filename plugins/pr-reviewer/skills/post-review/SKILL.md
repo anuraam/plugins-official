@@ -70,7 +70,7 @@ Do not ask for confirmation at any point. Execute all steps autonomously and pro
    Follow the instructions in the appropriate provider file:
 
    - **GitHub** → `providers/github.md`
-   - **Azure DevOps** → run the **entire self-contained script** in `providers/azure-devops.md` → *Posting the Review* (one `Bash` call; set `VERDICT` first; includes sub-steps R and E)
+   - **Azure DevOps** → run `scripts/ado-post-review.sh` via `providers/azure-devops.md` → *Posting the Review* (one `Bash` call; set `VERDICT` first; includes sub-steps R and E). Do not invent a shortened curl script.
    - **Generic / unknown** → `providers/generic.md`
 
 5. **Output result**
