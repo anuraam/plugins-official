@@ -59,12 +59,16 @@ fi
 # reference as $AZURE-DEVOPS-TOKEN. The Xianix Executor re-exports dashed env vars as underscored
 # aliases, so AZURE_DEVOPS_TOKEN should be set. If it is empty but a dashed AZURE-DEVOPS-TOKEN
 # exists in the raw environment, the alias step did not run — surface an actionable error.
+#
+# Secret hygiene: never echo token values (not via env, printenv to stdout, or $VAR expansion).
+# Presence-check only with ${AZURE_DEVOPS_TOKEN:+yes}. Detect dashed keys via compgen -e (names
+# only). Re-export with printenv into an assignment — never print the value.
 if echo "$COMMAND" | grep -qE "curl.*(dev\.azure\.com|visualstudio\.com|app\.vssps\.visualstudio\.com)"; then
     if [ -z "${AZURE_DEVOPS_TOKEN:-}" ]; then
-        if env | grep -q '^AZURE-DEVOPS-TOKEN='; then
-            echo '{"decision": "block", "reason": "AZURE_DEVOPS_TOKEN is empty but a dashed AZURE-DEVOPS-TOKEN exists in the environment. Bash cannot reference hyphenated names — re-export as: export AZURE_DEVOPS_TOKEN=\"$(env | sed -n s/^AZURE-DEVOPS-TOKEN=//p)\""}'
+        if compgen -e | grep -qx 'AZURE-DEVOPS-TOKEN'; then
+            echo '{"decision": "block", "reason": "AZURE_DEVOPS_TOKEN is empty but a dashed AZURE-DEVOPS-TOKEN exists. Bash cannot reference hyphenated names — re-export as: export AZURE_DEVOPS_TOKEN=\"$(printenv AZURE-DEVOPS-TOKEN)\". Never echo the secret; presence-check only: echo \"AZURE_DEVOPS_TOKEN=${AZURE_DEVOPS_TOKEN:+yes}\""}'
         else
-            echo '{"decision": "block", "reason": "AZURE_DEVOPS_TOKEN is not set. Pass it at runtime: AZURE_DEVOPS_TOKEN=<pat> claude ... (see docs/platform-setup.md)"}'
+            echo '{"decision": "block", "reason": "AZURE_DEVOPS_TOKEN is not set. Pass it at runtime: AZURE_DEVOPS_TOKEN=<pat> claude ... (see docs/platform-setup.md). Never echo the secret; presence-check only: echo \"AZURE_DEVOPS_TOKEN=${AZURE_DEVOPS_TOKEN:+yes}\""}'
         fi
         exit 0
     fi

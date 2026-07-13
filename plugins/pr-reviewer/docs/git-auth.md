@@ -114,6 +114,17 @@ blocked: AZURE_DEVOPS_TOKEN is not set in the container environment. It must be 
 
 ---
 
+## Secret hygiene
+
+**Never echo token values** (`echo "$AZURE_DEVOPS_TOKEN"`, `env | grep …`, unredirected `printenv`). Presence-check only:
+
+```bash
+echo "AZURE_DEVOPS_TOKEN=${AZURE_DEVOPS_TOKEN:+yes}"
+echo "GITHUB_TOKEN=${GITHUB_TOKEN:+yes}"
+```
+
+If only the dashed `AZURE-DEVOPS-TOKEN` is set: `export AZURE_DEVOPS_TOKEN="$(printenv AZURE-DEVOPS-TOKEN)"`.
+
 ## Verification
 
 Verify git can push with a dry-run, using the same inline `GIT_CONFIG_*` prefix as the real push:

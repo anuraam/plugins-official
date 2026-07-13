@@ -148,6 +148,17 @@ After detection, use **only** the platform-appropriate tool for the rest of the 
 
 Do **not** probe other CLIs ("just to check"). The hook layer will block obvious mismatches; doing it wrong will block the run.
 
+### Secret hygiene (mandatory)
+
+**Never echo secrets** into the transcript (`echo "$AZURE_DEVOPS_TOKEN"`, `echo "$GITHUB_TOKEN"`, `env | grep TOKEN`, unredirected `printenv`). Use tokens only in `curl -u` / `GIT_CONFIG_*` assignments. Presence-check only:
+
+```bash
+echo "AZURE_DEVOPS_TOKEN=${AZURE_DEVOPS_TOKEN:+yes}"
+echo "GITHUB_TOKEN=${GITHUB_TOKEN:+yes}"
+```
+
+If the underscored Azure alias is empty but a dashed `AZURE-DEVOPS-TOKEN` exists: `export AZURE_DEVOPS_TOKEN="$(printenv AZURE-DEVOPS-TOKEN)"` — then re-check with `:+yes`, never by printing the value.
+
 ## 2. Post a "Review in Progress" Comment (must be within the first 3 tool calls)
 
 Immediately after platform detection, post a comment so the PR author knows the review has started. **Do not read any files, do not run `find`/`ls`, do not index the codebase before this step.**

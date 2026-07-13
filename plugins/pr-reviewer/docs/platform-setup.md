@@ -64,7 +64,13 @@ AZURE_DEVOPS_TOKEN=<your-pat> claude ...
 > **Variable-name hygiene (important):** reference the token as `AZURE_DEVOPS_TOKEN` — **underscores only**. Some CI systems and orchestrators (e.g. when reading from a YAML key like `azure-devops-token`) inject it as `AZURE-DEVOPS-TOKEN` with hyphens. Bash cannot reference hyphenated names (a dashed reference parses as `$AZURE` minus `DEVOPS-TOKEN`), so a dashed `curl -u ":..."` would silently send an empty password and every Azure DevOps API call would fail with 401. The Xianix Executor automatically re-exports any dashed env var as an underscored alias, so `AZURE_DEVOPS_TOKEN` is normally already set. If it is missing while a dashed `AZURE-DEVOPS-TOKEN` exists, the plugin's `PreToolUse` hook blocks with an actionable message; re-export under the underscore name:
 >
 > ```bash
-> export AZURE_DEVOPS_TOKEN="$(env | sed -n 's/^AZURE-DEVOPS-TOKEN=//p')"
+> export AZURE_DEVOPS_TOKEN="$(printenv AZURE-DEVOPS-TOKEN)"
+> ```
+>
+> **Never echo secrets.** Do not run `echo "$AZURE_DEVOPS_TOKEN"`, `env | grep TOKEN`, or `printenv` without redirecting away from the transcript. Presence-check only:
+>
+> ```bash
+> echo "AZURE_DEVOPS_TOKEN=${AZURE_DEVOPS_TOKEN:+yes}"
 > ```
 
 **PAT scopes needed:**

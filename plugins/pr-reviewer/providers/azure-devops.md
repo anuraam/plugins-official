@@ -14,7 +14,9 @@ Required environment variable:
 |---|---|
 | `AZURE_DEVOPS_TOKEN` | Azure DevOps PAT — must have `Code (Read & Write)` (`vso.code_write` — casting the reviewer vote and fix-mode `git push` need write; plain `Code (Read)` cannot vote), `Pull Request Threads (Read & Write)`, and `User Profile (Read)` scopes |
 
-> **Note on var-name hygiene:** reference the token as `AZURE_DEVOPS_TOKEN` (**underscores**) everywhere in bash. The framework may inject the secret under the dashed key `AZURE-DEVOPS-TOKEN`; bash cannot reference hyphenated names (a dashed reference parses as `$AZURE` minus `DEVOPS-TOKEN`) and would silently send an empty password. The Xianix Executor re-exports any dashed env var as an underscored alias, so `AZURE_DEVOPS_TOKEN` is the referenceable name. If it is empty but a dashed `AZURE-DEVOPS-TOKEN` exists, the plugin's `PreToolUse` hook blocks with a re-export command.
+> **Note on var-name hygiene:** reference the token as `AZURE_DEVOPS_TOKEN` (**underscores**) everywhere in bash. The framework may inject the secret under the dashed key `AZURE-DEVOPS-TOKEN`; bash cannot reference hyphenated names (a dashed reference parses as `$AZURE` minus `DEVOPS-TOKEN`) and would silently send an empty password. The Xianix Executor re-exports any dashed env var as an underscored alias, so `AZURE_DEVOPS_TOKEN` is the referenceable name. If it is empty but a dashed `AZURE-DEVOPS-TOKEN` exists, the plugin's `PreToolUse` hook blocks with a re-export command (`export AZURE_DEVOPS_TOKEN="$(printenv AZURE-DEVOPS-TOKEN)"`).
+>
+> **Never echo secrets.** Do not print the PAT (`echo "$AZURE_DEVOPS_TOKEN"`, `env | grep …`, unredirected `printenv`). Presence-check only: `echo "AZURE_DEVOPS_TOKEN=${AZURE_DEVOPS_TOKEN:+yes}"`.
 
 Optional — used to override values parsed from the remote URL:
 
@@ -1127,7 +1129,7 @@ If `INLINE_OK` is `0` while `INLINE_TOTAL` is `> 0`, every POST failed. Read `/t
 
 | HTTP | Cause | Fix |
 |---|---|---|
-| `401` | `AZURE_DEVOPS_TOKEN` empty — often because only the dashed `AZURE-DEVOPS-TOKEN` is set and the underscored alias is missing. | Re-export with underscores: `export AZURE_DEVOPS_TOKEN="$(env \| sed -n 's/^AZURE-DEVOPS-TOKEN=//p')"` (the hook normally catches this). |
+| `401` | `AZURE_DEVOPS_TOKEN` empty — often because only the dashed `AZURE-DEVOPS-TOKEN` is set and the underscored alias is missing. Confirm presence with `echo "AZURE_DEVOPS_TOKEN=${AZURE_DEVOPS_TOKEN:+yes}"` (never echo the value). | Re-export with underscores: `export AZURE_DEVOPS_TOKEN="$(printenv AZURE-DEVOPS-TOKEN)"` (the hook normally catches this). |
 | `404` | `API_BASE` is wrong — most often the legacy `DefaultCollection` URL was parsed without the project segment. | Re-run the parser at the top of this file; print `API_BASE` and confirm it ends with `/{project}`, not `/{collection}`. |
 | `400` with `threadContext` in the body | `filePath` doesn't match a file in the iteration, or the line number is past EOF. | Confirm the file path is repo-relative (no leading `/` in your JSONL — the script adds one) and the line is on the right (post-change) side. |
 
