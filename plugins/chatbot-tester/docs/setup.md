@@ -105,6 +105,24 @@ Describe the chatbot widget in plain language. The plugin translates these hints
 - Describe state changes: "becomes clickable", "placeholder disappears", "spinner stops"
 - Be specific about location: "bottom right corner", "left sidebar", "top of the page"
 
+#### Multi-step trigger (`trigger_hint` as an array)
+
+Some apps require several clicks before the chat input is reachable (e.g. opening a menu, then picking an item from a list, then switching to a tab). For these, set `trigger_hint` to an **array of hints**, in the order they must be clicked:
+
+```json
+"widget": {
+  "trigger_hint": [
+    "'Show instances' button next to the agent entry on the Agent Overview page",
+    "the only active instance link named 'Lead Discovery Agent - ChatBot Tester'",
+    "the 'General Discussion' tab inside the opened instance"
+  ],
+  "ready_hint": "input placeholder reads 'Message Lead Discovery Agent-ChatBot Tester...' and the send icon is disabled until text is typed",
+  "response_done_hint": "the send icon turns green/active and the placeholder text is gone"
+}
+```
+
+Each step is clicked in order; later steps are only resolved after the previous click completes, since their elements may not exist until then. Use a plain string for a single-click trigger — the array form is only needed for multi-step navigation.
+
 ### Credentials Block (optional)
 
 If the chatbot requires login, add the username and a reference to the secret key holding the password.
