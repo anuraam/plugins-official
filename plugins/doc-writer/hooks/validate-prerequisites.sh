@@ -4,7 +4,7 @@
 # Run as a PreToolUse hook before Bash tool executions.
 #
 # Credentials
-#   GIT_TOKEN          — used by git push for HTTPS authentication (GitHub / generic)
+#   GITHUB_TOKEN          — used by git push for HTTPS authentication (GitHub / generic)
 #   AZURE_DEVOPS_TOKEN — used by git push and REST API on Azure DevOps remotes
 
 set -euo pipefail
@@ -88,8 +88,8 @@ if echo "$COMMAND" | grep -qE "^git push"; then
             exit 0
         fi
     else
-        if [ -z "${GIT_TOKEN:-}" ]; then
-            echo '{"decision": "block", "reason": "GIT_TOKEN is not set. Pass it at runtime: GIT_TOKEN=<token> claude ... (see docs/platform-setup.md)"}'
+        if [ -z "${GITHUB_TOKEN:-}" ]; then
+            echo '{"decision": "block", "reason": "GITHUB_TOKEN is not set. Pass it at runtime: GITHUB_TOKEN=<token> claude ... (see docs/platform-setup.md)"}'
             exit 0
         fi
     fi

@@ -9,7 +9,7 @@ This guide covers how to configure the `pr-comment-resolver` plugin for each sup
 ### Requirements
 
 - **GitHub CLI** (`gh`) installed and authenticated
-- `GIT_TOKEN` environment variable set (for pushing commits)
+- `GITHUB_TOKEN` environment variable set (for pushing commits)
 - `GITHUB-TOKEN` or `GH_TOKEN` (alternative to interactive `gh auth login`)
 
 ### Install GitHub CLI
@@ -32,7 +32,7 @@ Or set the token in your environment:
 
 ```bash
 export GH_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-export GIT_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
 ```
 
 ### Required Token Permissions

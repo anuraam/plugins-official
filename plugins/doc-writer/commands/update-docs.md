@@ -338,15 +338,15 @@ Synchronises documentation with the source changes in #${PR_NUMBER}:
 - CHANGELOG entry under [Unreleased]"
 ```
 
-Then push the docs branch. **Authenticate the push inline** — the runtime injects a token via `GIT_TOKEN` (GitHub / generic) or `AZURE_DEVOPS_TOKEN` (Azure DevOps). Pass it directly on the `git push` invocation with `-c url.<...>.insteadOf`, so authentication does not depend on any ambient git config:
+Then push the docs branch. **Authenticate the push inline** — the runtime injects a token via `GITHUB_TOKEN` (GitHub / generic) or `AZURE_DEVOPS_TOKEN` (Azure DevOps). Pass it directly on the `git push` invocation with `-c url.<...>.insteadOf`, so authentication does not depend on any ambient git config:
 
 ```bash
 # GitHub / generic remotes
-git -c "url.https://x-access-token:${GIT_TOKEN}@github.com/.insteadOf=https://github.com/" \
+git -c "url.https://x-access-token:${GITHUB_TOKEN}@github.com/.insteadOf=https://github.com/" \
     push -u origin "${DOCS_BRANCH}"
 ```
 
-For Azure DevOps remotes, use the provider-specific push in `providers/azure-devops.md` (it injects `AZURE_DEVOPS_TOKEN` for both `dev.azure.com` and `visualstudio.com`). If `GIT_TOKEN` (or `AZURE_DEVOPS_TOKEN`) is unset, the `validate-prerequisites.sh` hook blocks the push with a clear message — surface that message and stop.
+For Azure DevOps remotes, use the provider-specific push in `providers/azure-devops.md` (it injects `AZURE_DEVOPS_TOKEN` for both `dev.azure.com` and `visualstudio.com`). If `GITHUB_TOKEN` (or `AZURE_DEVOPS_TOKEN`) is unset, the `validate-prerequisites.sh` hook blocks the push with a clear message — surface that message and stop.
 
 If the commit or push fails, output a single error line and stop — do not ask what to do.
 
@@ -460,7 +460,7 @@ Substitute the following for Steps 4a and 9:
    ```bash
    git add <doc files>
    git commit -m "docs: sync documentation with merged PR #${PR_NUMBER}"
-   git -c "url.https://x-access-token:${GIT_TOKEN}@github.com/.insteadOf=https://github.com/" \
+   git -c "url.https://x-access-token:${GITHUB_TOKEN}@github.com/.insteadOf=https://github.com/" \
        push -u origin "${DOCS_BRANCH}"
    ```
 

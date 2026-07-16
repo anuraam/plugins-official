@@ -4,7 +4,7 @@ This guide covers how to configure the `doc-writer` plugin for each supported pl
 
 > **How the plugin runs.** `/update-docs` is executed by the top-level agent itself — there is no separate background "orchestrator" agent. The agent runs every step (git/`gh`/`curl`, doc edits, commit, push, PR creation) directly in its own context.
 >
-> **How push authentication works.** The token you provide (`GIT_TOKEN` for GitHub / generic, `AZURE_DEVOPS_TOKEN` for Azure DevOps) is injected **inline on the `git push` command** via `git -c url.<...>.insteadOf=...`. The `validate-prerequisites.sh` hook only *validates* that the required token is set and blocks the push otherwise — it does not (and cannot) inject the credential into the push itself, because hooks run in a separate process.
+> **How push authentication works.** The token you provide (`GITHUB_TOKEN` for GitHub / generic, `AZURE_DEVOPS_TOKEN` for Azure DevOps) is injected **inline on the `git push` command** via `git -c url.<...>.insteadOf=...`. The `validate-prerequisites.sh` hook only *validates* that the required token is set and blocks the push otherwise — it does not (and cannot) inject the credential into the push itself, because hooks run in a separate process.
 
 ---
 
@@ -13,7 +13,7 @@ This guide covers how to configure the `doc-writer` plugin for each supported pl
 ### Requirements
 
 - **GitHub CLI** (`gh`) installed and authenticated
-- `GIT_TOKEN` environment variable set (for pushing commits)
+- `GITHUB_TOKEN` environment variable set (for pushing commits)
 - `GITHUB_TOKEN` or `GH_TOKEN` (alternative to interactive `gh auth login`)
 
 ### Install GitHub CLI
@@ -39,7 +39,7 @@ Or set the token in your environment:
 
 ```bash
 export GH_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-export GIT_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
 ```
 
 ### Required Token Permissions

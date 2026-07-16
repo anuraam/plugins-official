@@ -125,10 +125,10 @@ git checkout -b "${DOCS_BRANCH}"
 
 ## Pushing the Docs Branch (authenticated)
 
-Authenticate the push inline with `GIT_TOKEN`. Pass the credential on the `git push` invocation itself with `-c url.<...>.insteadOf` — do not rely on ambient git config or on the `validate-prerequisites.sh` hook to inject it (the hook only validates that the token is present; it runs in a separate process and cannot alter this command's environment):
+Authenticate the push inline with `GITHUB_TOKEN`. Pass the credential on the `git push` invocation itself with `-c url.<...>.insteadOf` — do not rely on ambient git config or on the `validate-prerequisites.sh` hook to inject it (the hook only validates that the token is present; it runs in a separate process and cannot alter this command's environment):
 
 ```bash
-git -c "url.https://x-access-token:${GIT_TOKEN}@github.com/.insteadOf=https://github.com/" \
+git -c "url.https://x-access-token:${GITHUB_TOKEN}@github.com/.insteadOf=https://github.com/" \
     push -u origin "${DOCS_BRANCH}"
 ```
 

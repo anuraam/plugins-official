@@ -37,7 +37,7 @@ The plugin does **not** use the GitHub MCP server.
 
 ### Credentials for `git push`
 
-The `perf-pr-author` agent pushes the new `perf/issue-<number>-<slug>` branch (never the default branch). The `GITHUB-TOKEN` is reused as the push credential — the `hooks/validate-prerequisites.sh` PreToolUse hook injects it into git via `GIT_CONFIG_*` environment variables just for that one push. No separate `GIT_TOKEN` is required.
+The `perf-pr-author` agent pushes the new `perf/issue-<number>-<slug>` branch (never the default branch). The `GITHUB-TOKEN` is reused as the push credential — the `hooks/validate-prerequisites.sh` PreToolUse hook injects it into git via `GIT_CONFIG_*` environment variables just for that one push. No separate `GITHUB_TOKEN` is required.
 
 Pass it at runtime:
 

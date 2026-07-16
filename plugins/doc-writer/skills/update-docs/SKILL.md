@@ -28,7 +28,7 @@ The authoritative, step-by-step flow lives in the `/update-docs` command (`comma
 10. Apply the documentation edits — preserving the repo's existing style
 11. Add a CHANGELOG entry under `[Unreleased]` for user-visible changes (when the repo uses a changelog)
 12. Verify cross-references, code samples, and links still resolve
-13. Commit the doc-only changes in a single commit on the docs branch and push it (authenticate the push inline with `GIT_TOKEN` / `AZURE_DEVOPS_TOKEN`)
+13. Commit the doc-only changes in a single commit on the docs branch and push it (authenticate the push inline with `GITHUB_TOKEN` / `AZURE_DEVOPS_TOKEN`)
 14. Open a **companion documentation PR** whose target / base is the original PR's head branch (so it merges into the feature branch)
 15. Post a structured documentation summary comment on the original PR, linking the new docs PR
 16. Only after verifying the docs PR exists (or confirming a genuine no-op) emit the final result line

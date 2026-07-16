@@ -68,9 +68,9 @@ Edits are applied locally on `DOCS_BRANCH`:
 
 1. Edit files using `Edit` or `Write`.
 2. Commit using `git commit` (a single `docs:` commit covering all doc edits).
-3. Push (if a remote is available), authenticating inline with `GIT_TOKEN`:
+3. Push (if a remote is available), authenticating inline with `GITHUB_TOKEN`:
    ```bash
-   git -c "url.https://x-access-token:${GIT_TOKEN}@github.com/.insteadOf=https://github.com/" \
+   git -c "url.https://x-access-token:${GITHUB_TOKEN}@github.com/.insteadOf=https://github.com/" \
        push -u origin "${DOCS_BRANCH}"
    ```
    For non-GitHub HTTPS remotes, substitute the host in the `insteadOf` key accordingly.
