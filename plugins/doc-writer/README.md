@@ -26,22 +26,23 @@ The plugin is intended to be triggered automatically by an upstream automation w
 
 ## What it does
 
+`/update-docs` is executed by the top-level agent directly — it runs the whole flow itself rather than handing off to a background agent:
+
 ```
 /update-docs <pr-number>
-    └── orchestrator
-          │
-          ├── Step 0: Index the codebase
-          ├── Step 1: Detect platform from git remote
-          ├── Step 2: Resolve PR number and check state (open / merged)
-          ├── Step 3: Post "documentation update in progress" comment on the original PR
-          ├── Step 4: Fetch the PR head and cut a fresh docs branch (docs/pr-<n>-sync)
-          │           + inventory documentation surfaces + detect conventions
-          ├── Step 5: Fetch PR diff and classify changed files
-          ├── Step 6: Map each source change to documentation entries (UPDATE / ADD / REMOVE / RENAME / NO-OP)
-          ├── Step 7: Apply documentation edits on the docs branch
-          ├── Step 8: Commit and push the docs branch
-          ├── Step 9: Open a companion documentation PR targeting the original PR's head branch
-          └── Step 10: Post the documentation summary on the original PR (linking the new docs PR)
+    │
+    ├── Step 0: Index the codebase
+    ├── Step 1: Detect platform from git remote
+    ├── Step 2: Resolve PR number (bare number / PR URL / API URL) and check state (open / merged)
+    ├── Step 3: Post "documentation update in progress" comment on the original PR
+    ├── Step 4: Fetch the PR head and cut a fresh docs branch (docs/pr-<n>-sync)
+    │           + inventory documentation surfaces + detect conventions
+    ├── Step 5: Fetch PR diff and classify changed files
+    ├── Step 6: Map each source change to documentation entries (UPDATE / ADD / REMOVE / RENAME / NO-OP)
+    ├── Step 7: Apply documentation edits on the docs branch
+    ├── Step 8: Commit and push the docs branch (push authenticated inline via GIT_TOKEN / AZURE_DEVOPS_TOKEN)
+    ├── Step 9: Open a companion documentation PR targeting the original PR's head branch
+    └── Step 10: Post the documentation summary on the original PR (linking the new docs PR)
 ```
 
 | State of the original PR | Docs PR target / base branch |
@@ -69,7 +70,7 @@ A `CHANGELOG.md` entry is added under `[Unreleased]` whenever the PR introduces 
 
 ## Scope — what counts as "documentation"
 
-The orchestrator treats the following as documentation surfaces (and only these are eligible for edit):
+The plugin treats the following as documentation surfaces (and only these are eligible for edit):
 
 - `README.md`, `README.*` at any depth
 - `docs/`, `doc/`, `documentation/`, `wiki/` directories
@@ -80,7 +81,7 @@ The orchestrator treats the following as documentation surfaces (and only these 
 - Inline reference docs (JSDoc / TSDoc / docstrings / GoDoc / Rustdoc / XML doc comments) — **only inside source files the PR already touched**
 - `package.json` / plugin-manifest `description` fields when they summarise user-visible behaviour
 
-The orchestrator never modifies source files, tests, lockfiles, build configuration, or generated artefacts. Every edit must trace back to a specific change in the PR diff.
+The plugin never modifies source files, tests, lockfiles, build configuration, or generated artefacts. Every edit must trace back to a specific change in the PR diff.
 
 ---
 
@@ -100,14 +101,14 @@ See [`docs/platform-setup.md`](docs/platform-setup.md) for detailed credential s
 
 - Must be run inside a git repository with a remote configured
 - **GitHub**: `gh` CLI installed and authenticated (`gh auth login`)
-- **Azure DevOps**: `AZURE-DEVOPS-TOKEN` environment variable set
-- **Pushing commits**: `GIT_TOKEN` (GitHub) or `AZURE-DEVOPS-TOKEN` (Azure DevOps)
+- **Azure DevOps**: `AZURE_DEVOPS_TOKEN` environment variable set
+- **Pushing commits**: `GIT_TOKEN` (GitHub) or `AZURE_DEVOPS_TOKEN` (Azure DevOps)
 
 ---
 
 ## Output
 
-On completion, the orchestrator prints a single confirmation line:
+On completion, the plugin prints a single confirmation line:
 
 ```
 Documentation PR opened: #<docs-pr-number> → <pr-head-branch> (companion for PR #<number>): <N> updated, <N> added, <N> removed, <N> renamed — <docs-pr-url>
@@ -132,4 +133,4 @@ A structured summary comment is posted on the **original PR** using the template
 - **One commit, one PR.** All documentation edits ship in a single `docs:` commit on the docs branch, delivered via one companion PR.
 - **Idempotent re-runs.** Running the plugin again on the same PR reuses the same docs branch and the same companion PR — new commits are simply pushed on top.
 - **Merged-PR safe.** When the original PR is already merged, the companion docs PR targets the original PR's base branch instead of its (possibly deleted) head branch.
-- **Gaps are surfaced, not invented.** When the orchestrator cannot find a natural home for a new doc entry, it reports the gap in the summary instead of creating speculative files.
+- **Gaps are surfaced, not invented.** When there is no natural home for a new doc entry, the plugin reports the gap in the summary instead of creating speculative files.

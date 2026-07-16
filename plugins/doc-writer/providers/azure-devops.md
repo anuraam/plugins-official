@@ -8,7 +8,7 @@ Required environment variable:
 
 | Variable | Purpose |
 |---|---|
-| `AZURE-DEVOPS-TOKEN` | PAT with `Code (Read & Write)` and `Pull Request Threads (Read & Write)` scopes |
+| `AZURE_DEVOPS_TOKEN` | PAT with `Code (Read & Write)` and `Pull Request Threads (Read & Write)` scopes |
 
 Optional overrides:
 
@@ -60,7 +60,7 @@ If no PR number was passed as an argument:
 ```bash
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
 
-curl -s -u ":${AZURE-DEVOPS-TOKEN}" \
+curl -s -u ":${AZURE_DEVOPS_TOKEN}" \
   "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests?searchCriteria.sourceRefName=refs/heads/${BRANCH}&searchCriteria.status=active&api-version=7.1" \
   | python3 -c "import sys,json; prs=json.load(sys.stdin)['value']; print(prs[0]['pullRequestId'] if prs else '')"
 ```
@@ -72,7 +72,7 @@ Store as `PR_ID`. If empty, the branch has no open PR — output a warning and s
 ## Fetching PR Metadata
 
 ```bash
-curl -s -u ":${AZURE-DEVOPS-TOKEN}" \
+curl -s -u ":${AZURE_DEVOPS_TOKEN}" \
   "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests/${PR_ID}?api-version=7.1"
 ```
 
@@ -104,7 +104,7 @@ Include this `properties` object on **every** `POST .../threads` body.
 ## Posting the Starting Comment
 
 ```bash
-curl -s -u ":${AZURE-DEVOPS-TOKEN}" \
+curl -s -u ":${AZURE_DEVOPS_TOKEN}" \
   -X POST \
   -H "Content-Type: application/json" \
   "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests/${PR_ID}/threads?api-version=7.1" \
@@ -134,12 +134,12 @@ As a fallback when only an iteration-level view is needed (for example, to ident
 
 ```bash
 # List iterations
-curl -s -u ":${AZURE-DEVOPS-TOKEN}" \
+curl -s -u ":${AZURE_DEVOPS_TOKEN}" \
   "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests/${PR_ID}/iterations?api-version=7.1"
 
 # Changes for the latest iteration
 LATEST_ITERATION=<id from above>
-curl -s -u ":${AZURE-DEVOPS-TOKEN}" \
+curl -s -u ":${AZURE_DEVOPS_TOKEN}" \
   "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests/${PR_ID}/iterations/${LATEST_ITERATION}/changes?api-version=7.1"
 ```
 
@@ -147,7 +147,7 @@ curl -s -u ":${AZURE-DEVOPS-TOKEN}" \
 
 ## Fetching the PR Head Branch and Cutting the Docs Branch
 
-This orchestrator does **not** check out the PR's own branch — it cuts a new branch off the PR's head instead:
+Do **not** check out the PR's own branch — cut a new branch off the PR's head instead:
 
 ```bash
 git fetch origin "${PR_HEAD_BRANCH}"
@@ -158,12 +158,25 @@ git checkout -b "${DOCS_BRANCH}" "origin/${PR_HEAD_BRANCH}"
 
 ---
 
+## Pushing the Docs Branch (authenticated)
+
+Authenticate the push inline with `AZURE_DEVOPS_TOKEN`. Pass the credential on the `git push` invocation itself with `-c url.<...>.insteadOf` — do not rely on ambient git config or on the `validate-prerequisites.sh` hook to inject it (the hook only validates that the token is present; it runs in a separate process and cannot alter this command's environment). The same PAT covers both `dev.azure.com` and legacy `*.visualstudio.com` remotes:
+
+```bash
+git \
+  -c "url.https://x-access-token:${AZURE_DEVOPS_TOKEN}@dev.azure.com/.insteadOf=https://dev.azure.com/" \
+  -c "url.https://x-access-token:${AZURE_DEVOPS_TOKEN}@visualstudio.com/.insteadOf=https://visualstudio.com/" \
+  push -u origin "${DOCS_BRANCH}"
+```
+
+---
+
 ## Detecting an Existing Docs PR (Re-runs)
 
 Before opening a new docs PR, check whether a previous run already opened one for this `DOCS_BRANCH`:
 
 ```bash
-EXISTING=$(curl -s -u ":${AZURE-DEVOPS-TOKEN}" \
+EXISTING=$(curl -s -u ":${AZURE_DEVOPS_TOKEN}" \
   "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests?searchCriteria.sourceRefName=refs/heads/${DOCS_BRANCH}&searchCriteria.status=active&api-version=7.1" \
   | python3 -c "import sys,json; prs=json.load(sys.stdin)['value']; print(prs[0]['pullRequestId'] if prs else '')")
 
@@ -183,7 +196,7 @@ fi
 When no existing docs PR is found, open one. **The target / base is the original PR's head branch** (`PR_HEAD_BRANCH`), not the default branch — this makes the docs PR a candidate to be merged *into* the feature branch:
 
 ```bash
-DOCS_PR_ID=$(curl -s -u ":${AZURE-DEVOPS-TOKEN}" \
+DOCS_PR_ID=$(curl -s -u ":${AZURE_DEVOPS_TOKEN}" \
   -X POST \
   -H "Content-Type: application/json" \
   "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests?api-version=7.1" \
@@ -210,7 +223,7 @@ Store `DOCS_PR_ID` and `DOCS_PR_URL` — both are referenced in the summary comm
 After the docs PR is open, post a thread on the **original PR** (`PR_ID`) so reviewers see the summary in the right place:
 
 ```bash
-curl -s -u ":${AZURE-DEVOPS-TOKEN}" \
+curl -s -u ":${AZURE_DEVOPS_TOKEN}" \
   -X POST \
   -H "Content-Type: application/json" \
   "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests/${PR_ID}/threads?api-version=7.1" \
@@ -239,7 +252,7 @@ When no documentation changes were required (no docs PR was opened), post the sh
 When the original PR is already `completed` (merged), the head branch may be deleted. Target the original PR's base branch (`PR_BASE_BRANCH`) instead of the head branch:
 
 ```bash
-curl -s -u ":${AZURE-DEVOPS-TOKEN}" \
+curl -s -u ":${AZURE_DEVOPS_TOKEN}" \
   -X POST \
   -H "Content-Type: application/json" \
   "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests?api-version=7.1" \

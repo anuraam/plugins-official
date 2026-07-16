@@ -1,6 +1,6 @@
 # Documentation Update Report Template
 
-This template defines the structure for the summary comment posted at the end of a `doc-writer` run. The orchestrator must follow this format exactly.
+This template defines the structure for the summary comment posted at the end of a `doc-writer` run. Follow this format exactly.
 
 ---
 

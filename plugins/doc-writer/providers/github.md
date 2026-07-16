@@ -78,7 +78,7 @@ If posting fails, output one warning line and continue.
 
 ## Fetching the PR Diff
 
-The orchestrator should call `gh pr diff` to get the **unified diff** of the PR exactly as GitHub sees it (independent of local branch state):
+Call `gh pr diff` to get the **unified diff** of the PR exactly as GitHub sees it (independent of local branch state):
 
 ```bash
 gh pr diff <pr-number>
@@ -104,7 +104,7 @@ done
 
 ## Fetching the PR Head Branch Locally
 
-This orchestrator does **not** check out the PR's own branch — it cuts a new branch off the PR's head instead. Fetch the head ref and create the docs branch:
+Do **not** check out the PR's own branch — cut a new branch off the PR's head instead. Fetch the head ref and create the docs branch:
 
 ```bash
 PR_HEAD_BRANCH=$(gh pr view <pr-number> --json headRefName --jq '.headRefName')
@@ -123,6 +123,17 @@ git checkout -b "${DOCS_BRANCH}"
 
 ---
 
+## Pushing the Docs Branch (authenticated)
+
+Authenticate the push inline with `GIT_TOKEN`. Pass the credential on the `git push` invocation itself with `-c url.<...>.insteadOf` — do not rely on ambient git config or on the `validate-prerequisites.sh` hook to inject it (the hook only validates that the token is present; it runs in a separate process and cannot alter this command's environment):
+
+```bash
+git -c "url.https://x-access-token:${GIT_TOKEN}@github.com/.insteadOf=https://github.com/" \
+    push -u origin "${DOCS_BRANCH}"
+```
+
+---
+
 ## Detecting an Existing Docs PR (Re-runs)
 
 Before opening a new docs PR, check whether a previous run already opened one for this `DOCS_BRANCH`:
@@ -131,7 +142,7 @@ Before opening a new docs PR, check whether a previous run already opened one fo
 gh pr list --head "${DOCS_BRANCH}" --state open --json number,url --jq '.[0]'
 ```
 
-If the result is non-empty, reuse the returned PR number — the `git push -u origin "${DOCS_BRANCH}"` in Step 8 of the orchestrator will already have updated it. Optionally refresh its body:
+If the result is non-empty, reuse the returned PR number — the authenticated `git push -u origin "${DOCS_BRANCH}"` in Step 8 will already have updated it. Optionally refresh its body:
 
 ```bash
 gh pr edit "${DOCS_PR_NUMBER}" --body "<latest summary from styles/report-template.md>"

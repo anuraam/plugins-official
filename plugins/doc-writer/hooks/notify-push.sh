@@ -32,5 +32,5 @@ if echo "${BRANCH}" | grep -qE '^docs/(pr-[0-9]+-sync|[^/]+-sync|pr-[0-9]+-follo
         echo "Next step: write the documentation update report to doc-update-report.md, including the manual merge instructions for ${BRANCH} → <PR head branch> (see providers/generic.md)."
     fi
 else
-    echo "WARN: unexpected branch '${BRANCH}' for a doc-writer push — the orchestrator should push docs/pr-<n>-sync, not the original PR branch."
+    echo "WARN: unexpected branch '${BRANCH}' for a doc-writer push — doc-writer should push docs/pr-<n>-sync, not the original PR branch."
 fi

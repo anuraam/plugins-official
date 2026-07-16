@@ -5,7 +5,7 @@
 #
 # Credentials
 #   GIT_TOKEN          — used by git push for HTTPS authentication (GitHub / generic)
-#   AZURE-DEVOPS-TOKEN — used by git push and REST API on Azure DevOps remotes
+#   AZURE_DEVOPS_TOKEN — used by git push and REST API on Azure DevOps remotes
 
 set -euo pipefail
 
@@ -33,8 +33,8 @@ fi
 
 # Azure DevOps REST calls via curl
 if echo "$COMMAND" | grep -qE "^curl.*(dev\.azure\.com|visualstudio\.com)"; then
-    if [ -z "${AZURE-DEVOPS-TOKEN:-}" ]; then
-        echo '{"decision": "block", "reason": "AZURE-DEVOPS-TOKEN is not set. Pass it at runtime: AZURE-DEVOPS-TOKEN=<pat> claude ... (see docs/platform-setup.md)"}'
+    if [ -z "${AZURE_DEVOPS_TOKEN:-}" ]; then
+        echo '{"decision": "block", "reason": "AZURE_DEVOPS_TOKEN is not set. Pass it at runtime: AZURE_DEVOPS_TOKEN=<pat> claude ... (see docs/platform-setup.md)"}'
         exit 0
     fi
     exit 0
@@ -78,24 +78,20 @@ if echo "$COMMAND" | grep -qE "^git push"; then
 
     REMOTE_URL=$(git remote get-url origin 2>/dev/null || echo "")
 
+    # Only validate that the required token is present. The token is injected into
+    # the push itself (via `git -c url.<...>.insteadOf ... push`) by the command flow,
+    # NOT here: this hook runs in a separate process, so any variables it exports do
+    # not reach the actual `git push` invocation.
     if echo "$REMOTE_URL" | grep -qE "(dev\.azure\.com|visualstudio\.com)"; then
-        if [ -z "${AZURE-DEVOPS-TOKEN:-}" ]; then
-            echo '{"decision": "block", "reason": "AZURE-DEVOPS-TOKEN is not set. Pass it at runtime: AZURE-DEVOPS-TOKEN=<pat> claude ... (see docs/platform-setup.md)"}'
+        if [ -z "${AZURE_DEVOPS_TOKEN:-}" ]; then
+            echo '{"decision": "block", "reason": "AZURE_DEVOPS_TOKEN is not set. Pass it at runtime: AZURE_DEVOPS_TOKEN=<pat> claude ... (see docs/platform-setup.md)"}'
             exit 0
         fi
-        export GIT_CONFIG_COUNT=2
-        export GIT_CONFIG_KEY_0="url.https://x-access-token:${AZURE-DEVOPS-TOKEN}@dev.azure.com/.insteadOf"
-        export GIT_CONFIG_VALUE_0="https://dev.azure.com/"
-        export GIT_CONFIG_KEY_1="url.https://x-access-token:${AZURE-DEVOPS-TOKEN}@visualstudio.com/.insteadOf"
-        export GIT_CONFIG_VALUE_1="https://visualstudio.com/"
     else
         if [ -z "${GIT_TOKEN:-}" ]; then
             echo '{"decision": "block", "reason": "GIT_TOKEN is not set. Pass it at runtime: GIT_TOKEN=<token> claude ... (see docs/platform-setup.md)"}'
             exit 0
         fi
-        export GIT_CONFIG_COUNT=1
-        export GIT_CONFIG_KEY_0="url.https://x-access-token:${GIT_TOKEN}@github.com/.insteadOf"
-        export GIT_CONFIG_VALUE_0="https://github.com/"
     fi
 fi
 

@@ -1,6 +1,6 @@
 {
     "name": "doc-writer",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "description": "Automated documentation updater. Given a pull request number, analyses the modified source files and synchronises the project's documentation — updating existing docs that drifted from the new behaviour, creating new docs for new public surfaces, and removing stale entries — then commits the doc-only changes on a separate docs branch and opens a companion documentation pull request targeting the original PR's head branch, so the docs can be reviewed and merged into the feature branch independently. Works with GitHub, Azure DevOps, and any git repository.",
     "author": {
         "name": "99x",
@@ -23,7 +23,6 @@
         "azure-devops"
     ],
     "commands": ["./commands/update-docs.md"],
-    "agents": ["./agents/orchestrator.md"],
     "skills": "./skills/",
     "hooks": "./hooks/hooks.json",
     "outputStyles": "./styles/",

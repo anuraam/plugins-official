@@ -38,13 +38,13 @@ git diff --name-status "origin/${BASE}...HEAD"
 git log --oneline "origin/${BASE}..HEAD"
 ```
 
-Use these outputs as the equivalent of the PR diff, file list, and commit messages in the orchestrator's Step 5.
+Use these outputs as the equivalent of the PR diff, file list, and commit messages in Step 5 of the command flow.
 
 ---
 
 ## Cutting the Docs Branch
 
-Identify the "PR head branch" — the branch the orchestrator was invoked on — and cut a dedicated docs branch from it:
+Identify the "PR head branch" — the branch the command was invoked on — and cut a dedicated docs branch from it:
 
 ```bash
 PR_HEAD_BRANCH=$(git rev-parse --abbrev-ref HEAD)
@@ -68,7 +68,12 @@ Edits are applied locally on `DOCS_BRANCH`:
 
 1. Edit files using `Edit` or `Write`.
 2. Commit using `git commit` (a single `docs:` commit covering all doc edits).
-3. Push using `git push -u origin "${DOCS_BRANCH}"` (if a remote is available).
+3. Push (if a remote is available), authenticating inline with `GIT_TOKEN`:
+   ```bash
+   git -c "url.https://x-access-token:${GIT_TOKEN}@github.com/.insteadOf=https://github.com/" \
+       push -u origin "${DOCS_BRANCH}"
+   ```
+   For non-GitHub HTTPS remotes, substitute the host in the `insteadOf` key accordingly.
 
 If no remote is configured or the push fails, leave the commit on the local docs branch and note this in the report.
 
