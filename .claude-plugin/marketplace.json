@@ -390,6 +390,30 @@
         "ux-design"
       ],
       "license": "MIT"
+    },
+    {
+      "name": "arch-fitness",
+      "source": "./plugins/arch-fitness",
+      "description": "Architecture fitness plugin. Discovers or bootstraps architecture-constraint documents in a repository, opens a docs PR when created or updated, then evaluates a requested changeset scope (a PR, a branch, or PRs merged in a date window) against those constraints and reports the few most important improvements. Works with GitHub, Azure DevOps, and any git repository.",
+      "version": "1.0.0",
+      "author": {
+        "name": "99x",
+        "email": "xianix-agent@99x.io"
+      },
+      "homepage": "https://opensource.99x.io/xianix-team/",
+      "repository": "https://github.com/xianix-team/xianix-plugins-official",
+      "category": "architecture",
+      "keywords": [
+        "architecture",
+        "architecture-fitness",
+        "fitness-functions",
+        "constraints",
+        "adr",
+        "code-analysis",
+        "azure-devops",
+        "github"
+      ],
+      "license": "MIT"
     }
   ]
 }

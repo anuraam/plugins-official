@@ -1,0 +1,32 @@
+{
+  "name": "arch-fitness",
+  "version": "1.0.0",
+  "description": "Architecture fitness plugin. Discovers or bootstraps architecture-constraint documents in a repository, opens a docs PR when created or updated, then evaluates a requested changeset scope (a PR, a branch, or PRs merged in a date window) against those constraints and reports the few most important improvements. Works with GitHub, Azure DevOps, and any git repository.",
+  "author": {
+    "name": "99x",
+    "email": "xianix@99x.io",
+    "url": "https://github.com/99x"
+  },
+  "homepage": "https://github.com/99x/xianix-team",
+  "repository": "https://github.com/99x/xianix-team",
+  "license": "MIT",
+  "keywords": [
+    "architecture",
+    "architecture-fitness",
+    "fitness-functions",
+    "constraints",
+    "adr",
+    "code-analysis",
+    "azure-devops",
+    "github"
+  ],
+  "commands": ["./commands/arch-fitness.md"],
+  "agents": [
+    "./agents/arch-doc-curator.md",
+    "./agents/fitness-evaluator.md"
+  ],
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "outputStyles": "./styles/",
+  "providers": "./providers/"
+}
