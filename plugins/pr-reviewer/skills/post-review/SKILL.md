@@ -11,40 +11,15 @@ Do not ask for confirmation at any point. Execute all steps autonomously and pro
 
 ## Steps
 
-1. **Detect Platform**
+1. **Check permissions**
 
-   Run:
-   ```bash
-   git remote get-url origin
-   ```
+   Set `PR_NUMBER` from the argument, then run `scripts/check-permissions.sh` as one Bash call (it detects the platform from `origin` and normalizes executor aliases such as `azuredevops` → `azure`). **Stop** if it exits non-zero — do not post. Then `source /tmp/pr_permissions.env`.
 
-   Determine the platform from the remote (**authoritative** — do not assume GitHub from the PR number or mention prompt):
-   - Contains `github.com` → **GitHub** (`PLATFORM=github`)
-   - Contains `dev.azure.com` or `visualstudio.com` → **Azure DevOps** (`PLATFORM=azure`)
-   - Anything else → **Generic**
+2. **Verify PR exists and is open**
 
-   If the environment already has `PLATFORM=azuredevops` (Xianix Executor standard) or `azure-devops` / `ado`, treat that as Azure DevOps and confirm against the remote. Canonical script value is always `azure`, never leave the raw `azuredevops` string in place for later `== "azure"` checks.
-2. **Verify PR exists**
+   Run `scripts/verify-pr.sh` as one Bash call. **Stop** if it exits non-zero (missing / merged / completed / abandoned). Then `source /tmp/pr_verify.env`.
 
-   Use the platform-appropriate method to confirm the PR exists and retrieve its current state:
-
-   **GitHub:**
-   ```bash
-   gh pr view <pr-number> --json state,title,headRefName
-   ```
-   If the PR does not exist or is already merged/closed, stop and output a single error line.
-
-   **Azure DevOps:**
-   ```bash
-   # Run Step 2 starting-comment script first if /tmp/pr_azure.env is missing.
-   source /tmp/pr_azure.env
-   PR_ID="${PR_ID:-${PR_NUMBER}}"
-   curl -sS -u ":${AZURE_DEVOPS_TOKEN}" \
-     "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests/${PR_ID}?api-version=7.1"
-   ```
-   `API_BASE`, `AZURE_REPO`, and `PR_ID` come from `/tmp/pr_azure.env` (written in Step 2). Do **not** use `AZURE_DEVOPS_ORG`, `AZURE_DEVOPS_PROJECT`, or `PR_NUMBER` in REST paths.
-
-   If the PR does not exist or is already completed/abandoned, stop and output a single error line — do not ask the user what to do.
+   On Azure DevOps, if `/tmp/pr_azure.env` is missing, run `scripts/ado-start-comment.sh` first (or let `verify-pr.sh` / `lib-azure-remote.sh` parse the remote).
 
 3. **Format the review**
 
@@ -57,20 +32,17 @@ Do not ask for confirmation at any point. Execute all steps autonomously and pro
    | `REQUEST CHANGES` | `COMMENT` (default) / `REQUEST_CHANGES` if `PR_REVIEWER_BLOCK_ON_CRITICAL=true` | `-5` (default) / `-10` if `PR_REVIEWER_BLOCK_ON_CRITICAL=true` |
    | `NEEDS DISCUSSION` | `COMMENT` | `-5` |
 
-4. **Post the review** (sub-steps, all mandatory when supported by the platform)
+   Ensure findings are ready for posting:
+   - `scripts/assign-fids.sh` — fill any missing `fid` values
+   - `scripts/validate-findings.sh` — re-anchor / drop bad line numbers
+   - Unless `PR_REVIEWER_RECONCILE=false`, run `scripts/detect-review-mode.sh` then `scripts/reconcile-prior-findings.sh` (fid buckets + line±5 dedup). External-thread "addressed vs still_open" judgment stays with you — write `/tmp/pr_external_reconcile.json` when you classify them.
 
-   First, unless `PR_REVIEWER_RECONCILE=false`, run the provider **detect-prior script** as one Bash call (`scripts/gh-detect-prior.sh` or `scripts/ado-detect-prior.sh` — see provider *Detecting a prior review*). Do **not** invent a shortened `curl`/`THREADS_JSON` dump. That writes `/tmp/pr_prior_findings.jsonl`, `/tmp/pr_open_threads.jsonl`, and `/tmp/pr_prior.env`. If marked prior findings exist, this is a **re-review**: reconcile them (resolve the ones now fixed, leave carried-over ones open, post only genuinely new findings). Also validate open **external** threads against `HEAD`, write `/tmp/pr_external_reconcile.json`, and **dedup** findings that overlap existing open threads before posting. See *Comment markers and finding identity*, *Reconcile against existing open review threads*, and *Reconciling prior findings* in `commands/pr-review.md` and the provider files.
+4. **Post the review**
 
-   1. Cast the verdict / vote (GitHub review flag, Azure DevOps reviewer PUT — see provider).
-   2. Post the full report body (with the re-review delta / existing-threads blocks when applicable) as one PR-level comment, **carrying the summary marker**.
-   3. **(Re-review only) Reconcile prior plugin findings** — reply on + resolve the threads whose findings are now fixed; do not re-post carried-over findings.
-   4. **Reply on addressed external threads** (sub-step E) — for each entry in `/tmp/pr_external_reconcile.json` → `addressed[]`, post a reply only; **never resolve** those threads.
-   5. **Post one inline thread per finding** that has a `path/to/file.ext:NN` reference (initial mode: every surviving finding after dedup; re-review mode: only the New bucket after dedup), **each carrying its finding marker**. This is mandatory — skipping it collapses every finding into the summary thread and defeats the purpose of the review.
+   Post via the platform script as **one** `Bash` call (set `VERDICT` and `REVIEW_MODE` first; ensure `/tmp/pr_thread_body.md` and `/tmp/pr_inline_findings.jsonl` exist). The script casts the verdict/vote, posts the summary with marker, reconciles prior/external threads (sub-steps R and E), and posts one inline thread per finding:
 
-   Follow the instructions in the appropriate provider file:
-
-   - **GitHub** → `providers/github.md`
-   - **Azure DevOps** → run `scripts/ado-post-review.sh` via `providers/azure-devops.md` → *Posting the Review* (one `Bash` call; set `VERDICT` first; includes sub-steps R and E). Do not invent a shortened curl script.
+   - **GitHub** → `scripts/gh-post-review.sh` (see `providers/github.md`)
+   - **Azure DevOps** → `scripts/ado-post-review.sh` (see `providers/azure-devops.md`)
    - **Generic / unknown** → `providers/generic.md`
 
 5. **Output result**

@@ -19,6 +19,8 @@ For CI or scripts, set **`GH_TOKEN`** or **`GITHUB_TOKEN`** instead of interacti
 
 **Token scopes:** `repo` (private repos) or `public_repo` (public repos only), `read:org` (optional).
 
+At the start of every review the plugin runs `scripts/check-permissions.sh`, which authenticates via `gh` / `GH_TOKEN`, confirms repo (and PR) read access, and verifies classic PAT scopes include `repo` or `public_repo`. Fine-grained tokens are capability-probed instead of scope-listed.
+
 The plugin does **not** use the GitHub MCP server. See `providers/github.md` for `gh` usage.
 
 ### Credentials for `git push` (fix mode)
@@ -77,6 +79,8 @@ AZURE_DEVOPS_TOKEN=<your-pat> claude ...
 - `Code` → Read & Write (`vso.code_write` — required to cast the reviewer vote and for fix-mode `git push`; Read alone is not enough)
 - `Pull Request Threads` → Read & Write
 - `User Profile` → Read (required to resolve the reviewer ID for casting the vote)
+
+At the start of every review the plugin runs `scripts/check-permissions.sh`, which re-exports a dashed `AZURE-DEVOPS-TOKEN` if needed, probes `connectionData`, repo/PR read, and thread read, and **warns** when the reviewer/vote endpoint looks unauthorized (summary + inline comments can still succeed without Code Write).
 
 ### Credentials for `git push` (fix mode)
 

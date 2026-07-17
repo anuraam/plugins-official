@@ -35,10 +35,12 @@ if ! command -v gh >/dev/null 2>&1; then
 fi
 
 REMOTE=$(git remote get-url origin)
-OWNER=$(echo "$REMOTE" | sed 's|https://github.com/||;s|git@github.com:||;s|ssh://git@github.com/||' | cut -d'/' -f1)
-REPO=$(echo "$REMOTE"  | sed 's|https://github.com/||;s|git@github.com:||;s|ssh://git@github.com/||' | cut -d'/' -f2 | sed 's|\.git$||')
+# Strip embedded credentials (https://user:token@host/...) before parsing — never log secrets.
+REMOTE_CLEAN=$(echo "$REMOTE" | sed -E 's|https?://[^@]+@|https://|')
+OWNER=$(echo "$REMOTE_CLEAN" | sed 's|https://github.com/||;s|git@github.com:||;s|ssh://git@github.com/||' | cut -d'/' -f1)
+REPO=$(echo "$REMOTE_CLEAN"  | sed 's|https://github.com/||;s|git@github.com:||;s|ssh://git@github.com/||' | cut -d'/' -f2 | sed 's|\.git$||')
 [ -n "$OWNER" ] && [ -n "$REPO" ] || {
-  echo "ERROR: could not parse owner/repo from origin: $REMOTE" >&2
+  echo "ERROR: could not parse owner/repo from origin (credentials stripped)" >&2
   exit 1
 }
 
@@ -109,6 +111,8 @@ for t in threads:
     if m:
         prior.write(json.dumps({
             "fid": m.group(1),
+            "file": t.get("path") or "",
+            "line": t.get("line"),
             "status": "resolved" if t["isResolved"] else "open",
             "thread_ref": t["id"],
             "comment_ref": c["databaseId"],

@@ -48,113 +48,21 @@ The posting script below accepts common agent mistakes (`/tmp/pr_review_summary.
 
 ## Parsing the Remote URL
 
-Extract org, project, and repo from the remote URL before making any API calls. Strip any embedded basic-auth (`user@`) component first — it appears in remotes injected by CI runners.
-
-Azure DevOps uses **four** URL shapes in the wild. **All must be handled** — the legacy `DefaultCollection` form is common in tenants that migrated from on-prem TFS, and getting it wrong means inline threads silently 4xx (plain threads still post because the repo can be resolved at collection level — that is the #1 cause of "main comment posts but inline comments don't show up").
-
-| # | Shape | Example |
-|---|---|---|
-| 1 | `dev.azure.com/{org}/{project}/_git/{repo}` | `https://dev.azure.com/contoso/Web/_git/api` |
-| 2 | `dev.azure.com/{org}/{collection}/{project}/_git/{repo}` | rare — usually only seen on imported orgs |
-| 3 | `{org}.visualstudio.com/{project}/_git/{repo}` | `https://contoso.visualstudio.com/Web/_git/api` |
-| 4 | `{org}.visualstudio.com/{collection}/{project}/_git/{repo}` | `https://contoso.visualstudio.com/DefaultCollection/Web/_git/api` |
-
-Use the parser below — it anchors on the `_git` segment (always exactly one position before the repo and one position after the project), so it works for all four shapes.
-
-> **Shortcut:** if Step 2 already ran the starting-comment script, `source /tmp/pr_azure.env` restores `API_BASE`, `AZURE_REPO`, `PR_ID`, etc. Re-run the parser only when that file is missing.
+Extract org, project, and repo from the remote URL before making any API calls. **Prefer the shared library** — do not retype the parser:
 
 ```bash
-REMOTE=$(git remote get-url origin)
-
-# Normalise SSH remotes to the canonical https shape first, so the _git-anchored
-# parser below only has to handle one format. SSH shapes in the wild:
-#   git@ssh.dev.azure.com:v3/{org}/{project}/{repo}
-#   ssh://git@ssh.dev.azure.com/v3/{org}/{project}/{repo}
-#   {org}@vs-ssh.visualstudio.com:v3/{org}/{project}/{repo}
-if echo "$REMOTE" | grep -qE '(ssh\.dev\.azure\.com|vs-ssh\.visualstudio\.com)'; then
-  V3_PATH=$(echo "$REMOTE" | sed -E 's|^ssh://||; s|^[^@]+@||; s|^[^:/]+[:/]+||')
-  V3_ORG=$(echo "$V3_PATH" | cut -d/ -f2)
-  V3_PROJECT=$(echo "$V3_PATH" | cut -d/ -f3)
-  V3_REPO=$(echo "$V3_PATH" | cut -d/ -f4)
-  REMOTE="https://dev.azure.com/${V3_ORG}/${V3_PROJECT}/_git/${V3_REPO}"
-fi
-
-# Strip optional "user@" basic-auth prefix and any trailing .git
-REMOTE_CLEAN=$(echo "$REMOTE" | sed -E 's|https?://[^@]+@|https://|; s|\.git$||')
-
-# Extract host and the path-after-host
-AZURE_HOST=$(echo "$REMOTE_CLEAN" | awk -F/ '{print $3}')
-PATH_PARTS=$(echo "$REMOTE_CLEAN" | awk -F/ '{for (i=4; i<=NF; i++) print $i}')
-
-# Anchor on the _git segment. project = segment immediately before, repo = immediately after.
-GIT_LINE=$(echo "$PATH_PARTS" | grep -nx '_git' | head -1 | cut -d: -f1)
-if [ -z "$GIT_LINE" ]; then
-  echo "ERROR: not an Azure DevOps git URL (no _git segment): $REMOTE_CLEAN" >&2
-  return 1 2>/dev/null || exit 1
-fi
-AZURE_PROJECT=$(echo "$PATH_PARTS" | sed -n "$((GIT_LINE - 1))p")
-AZURE_REPO=$(echo    "$PATH_PARTS" | sed -n "$((GIT_LINE + 1))p")
-
-# Determine org and the optional collection prefix (segments between org and project)
-if [ "$AZURE_HOST" = "dev.azure.com" ]; then
-  AZURE_ORG=$(echo "$PATH_PARTS" | sed -n '1p')
-  PREFIX_START=2
-else
-  # *.visualstudio.com — org is the subdomain
-  AZURE_ORG=$(echo "$AZURE_HOST" | cut -d'.' -f1)
-  PREFIX_START=1
-fi
-
-PROJECT_LINE=$((GIT_LINE - 1))
-# Collection exists iff there is ≥1 path segment between the org/host and the project.
-if [ "$PROJECT_LINE" -gt "$PREFIX_START" ]; then
-  AZURE_COLLECTION=$(echo "$PATH_PARTS" \
-    | sed -n "${PREFIX_START},$((PROJECT_LINE - 1))p" \
-    | tr '\n' '/' | sed 's|/$||')
-else
-  AZURE_COLLECTION=""
-fi
-
-# API_BASE always includes the project — required for inline threads with threadContext.
-# Including the collection (e.g. DefaultCollection) when present makes the URL canonical.
-HOST_AND_ORG_PATH=$(
-  if [ "$AZURE_HOST" = "dev.azure.com" ]; then
-    echo "https://dev.azure.com/${AZURE_ORG}"
-  else
-    echo "https://${AZURE_HOST}"
-  fi
-)
-if [ -n "$AZURE_COLLECTION" ]; then
-  API_BASE="${HOST_AND_ORG_PATH}/${AZURE_COLLECTION}/${AZURE_PROJECT}"
-else
-  API_BASE="${HOST_AND_ORG_PATH}/${AZURE_PROJECT}"
-fi
-
-# Sanity-assert the parse — refuse to continue on garbage. Catches the historical bug where
-# AZURE_PROJECT silently became "DefaultCollection".
-case "$AZURE_PROJECT" in
-  ""|"_git"|"DefaultCollection"|"https:")
-    echo "ERROR: parsed AZURE_PROJECT='${AZURE_PROJECT}' looks wrong from URL: $REMOTE_CLEAN" >&2
-    return 1 2>/dev/null || exit 1
-    ;;
-esac
-[ -z "$AZURE_ORG" ] || [ -z "$AZURE_REPO" ] && {
-  echo "ERROR: parsed AZURE_ORG='${AZURE_ORG}' AZURE_REPO='${AZURE_REPO}' from URL: $REMOTE_CLEAN" >&2
-  return 1 2>/dev/null || exit 1
-}
-
-echo "Azure DevOps target: org=${AZURE_ORG} collection=${AZURE_COLLECTION:-<none>} project=${AZURE_PROJECT} repo=${AZURE_REPO}"
-echo "API_BASE=${API_BASE}"
-
-# Export so subsequent python heredocs can read them via os.environ
-export AZURE_HOST AZURE_ORG AZURE_COLLECTION AZURE_PROJECT AZURE_REPO API_BASE
+# shellcheck disable=SC1091
+source "${CLAUDE_PLUGIN_ROOT}/scripts/lib-azure-remote.sh"
+# or: source "$(find … -path '*/pr-reviewer/scripts/lib-azure-remote.sh' | head -1)"
+parse_azure_remote          # sets AZURE_HOST, AZURE_ORG, AZURE_COLLECTION, AZURE_PROJECT, AZURE_REPO, API_BASE
+write_azure_env             # persists to /tmp/pr_azure.env (includes PR_ID when set)
 ```
 
-Use `${API_BASE}` in place of a hardcoded host for **every** API call below.
+> **Shortcut:** if Step 2 already ran `scripts/ado-start-comment.sh`, `source /tmp/pr_azure.env` restores `API_BASE`, `AZURE_REPO`, `PR_ID`, etc. Re-run the parser only when that file is missing.
 
-> **Why this matters:** prior versions used `cut -d'/' -f4` on the legacy URL, which returns `DefaultCollection` when the URL is `https://{org}.visualstudio.com/DefaultCollection/{project}/_git/{repo}`. The resulting `API_BASE` skipped the project segment. Plain threads still post (the repo is unique within the collection) but inline threads with `threadContext.filePath` 4xx because the file context can't be resolved without a project. The parser above anchors on `_git` so the project is always picked correctly.
+The library handles all four URL shapes (dev.azure.com / visualstudio.com, with or without collection) plus SSH remotes, and anchors on the `_git` segment so `DefaultCollection` never steals the project name.
 
----
+> **Why this matters:** prior versions used `cut -d'/' -f4` on the legacy URL, which returns `DefaultCollection` when the URL is `https://{org}.visualstudio.com/DefaultCollection/{project}/_git/{repo}`. The resulting `API_BASE` skipped the project segment. Plain threads still post but inline threads with `threadContext.filePath` 4xx. The shared parser anchors on `_git` so the project is always picked correctly.
 
 ## Posting pattern (use this exact form for every write call)
 
@@ -233,31 +141,9 @@ Then POST exactly as in step 3 above.
 
 ## Resolving the PR Number
 
-If no PR number was passed as an argument, find the active PR for the current branch.
-
-In a detached-HEAD worktree (which is how the Xianix Executor runs the plugin), `git rev-parse --abbrev-ref HEAD` returns the literal string `HEAD`. Resolve the source branch from `git branch --contains` instead, or pass the branch name explicitly.
-
-```bash
-BRANCH="${BRANCH_ARG:-}"
-if [ -z "$BRANCH" ]; then
-  if [ "$(git rev-parse --abbrev-ref HEAD)" = "HEAD" ]; then
-    BRANCH=$(git branch --contains "$(git rev-parse HEAD)" \
-      | sed 's|^[* ] *||' | grep -v '^(' | head -1)
-  else
-    BRANCH=$(git rev-parse --abbrev-ref HEAD)
-  fi
-fi
-BRANCH="${BRANCH#refs/heads/}"
-
-PR_ID=$(curl -sS -u ":${AZURE_DEVOPS_TOKEN}" \
-  "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests?searchCriteria.sourceRefName=refs/heads/${BRANCH}&searchCriteria.status=active&api-version=7.1" \
-  | python3 -c "import sys,json; prs=json.load(sys.stdin)['value']; print(prs[0]['pullRequestId'] if prs else '')")
-export PR_ID
-```
+If no PR number was passed as an argument, `scripts/ado-start-comment.sh` finds the active PR for the current branch (handles detached HEAD via `git branch --contains`) and writes `PR_ID` to `/tmp/pr_azure.env`. Prefer that script over inventing a one-off curl.
 
 If empty, the branch has no open PR — output a warning and skip posting.
-
----
 
 ## Fetching PR Metadata
 
@@ -344,156 +230,24 @@ Also append an HTML marker to the comment body (`<!-- pr-reviewer:v1 kind=summar
 
 Before running any analysis, post a plain PR comment thread to inform the author that a review is underway. This fires as the very first action on Azure DevOps, before sub-agents are launched.
 
-**This block is self-contained.** Run it as a **single** `Bash` call immediately after platform detection — do **not** assume `API_BASE` / `PR_ID` already exist (shell state does not persist between tool calls). Set `PR_NUMBER` from the invocation argument when a numeric PR id was given; set `BRANCH_ARG` when the executor passes a branch ref (e.g. `feat/foo` or `refs/heads/feat/foo`); leave both empty to resolve from the current branch.
+**Prefer the plugin script (one Bash call)** — do **not** invent a shortened curl. The script parses the remote, resolves `PR_ID`, posts the thread, and writes `/tmp/pr_azure.env`:
 
 ```bash
-set -euo pipefail
-
-# --- 0. Token ---
-if [ -z "${AZURE_DEVOPS_TOKEN:-}" ]; then
-  echo "WARN: AZURE_DEVOPS_TOKEN unset — skipping review-in-progress comment" >&2
-  exit 0
+ADO_START="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/ado-start-comment.sh}"
+if [ -z "${ADO_START:-}" ] || [ ! -f "$ADO_START" ]; then
+  ADO_START=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/ado-start-comment.sh' 2>/dev/null | head -1)
 fi
-
-# --- 1. Parse remote → API_BASE / AZURE_REPO (same rules as "Parsing the Remote URL") ---
-REMOTE=$(git remote get-url origin)
-if echo "$REMOTE" | grep -qE '(ssh\.dev\.azure\.com|vs-ssh\.visualstudio\.com)'; then
-  V3_PATH=$(echo "$REMOTE" | sed -E 's|^ssh://||; s|^[^@]+@||; s|^[^:/]+[:/]+||')
-  REMOTE="https://dev.azure.com/$(echo "$V3_PATH" | cut -d/ -f2)/$(echo "$V3_PATH" | cut -d/ -f3)/_git/$(echo "$V3_PATH" | cut -d/ -f4)"
-fi
-REMOTE_CLEAN=$(echo "$REMOTE" | sed -E 's|https?://[^@]+@|https://|; s|\.git$||')
-AZURE_HOST=$(echo "$REMOTE_CLEAN" | awk -F/ '{print $3}')
-PATH_PARTS=$(echo "$REMOTE_CLEAN" | awk -F/ '{for (i=4; i<=NF; i++) print $i}')
-GIT_LINE=$(echo "$PATH_PARTS" | grep -nx '_git' | head -1 | cut -d: -f1 || true)
-if [ -z "$GIT_LINE" ]; then
-  echo "WARN: not an Azure DevOps git URL — skipping review-in-progress comment" >&2
-  exit 0
-fi
-AZURE_PROJECT=$(echo "$PATH_PARTS" | sed -n "$((GIT_LINE - 1))p")
-AZURE_REPO=$(echo    "$PATH_PARTS" | sed -n "$((GIT_LINE + 1))p")
-if [ "$AZURE_HOST" = "dev.azure.com" ]; then
-  AZURE_ORG=$(echo "$PATH_PARTS" | sed -n '1p')
-  PREFIX_START=2
-else
-  AZURE_ORG=$(echo "$AZURE_HOST" | cut -d'.' -f1)
-  PREFIX_START=1
-fi
-PROJECT_LINE=$((GIT_LINE - 1))
-if [ "$PROJECT_LINE" -gt "$PREFIX_START" ]; then
-  AZURE_COLLECTION=$(echo "$PATH_PARTS" | sed -n "${PREFIX_START},$((PROJECT_LINE - 1))p" | tr '\n' '/' | sed 's|/$||')
-else
-  AZURE_COLLECTION=""
-fi
-if [ "$AZURE_HOST" = "dev.azure.com" ]; then
-  HOST_AND_ORG_PATH="https://dev.azure.com/${AZURE_ORG}"
-else
-  HOST_AND_ORG_PATH="https://${AZURE_HOST}"
-fi
-if [ -n "$AZURE_COLLECTION" ]; then
-  API_BASE="${HOST_AND_ORG_PATH}/${AZURE_COLLECTION}/${AZURE_PROJECT}"
-else
-  API_BASE="${HOST_AND_ORG_PATH}/${AZURE_PROJECT}"
-fi
-case "$AZURE_PROJECT" in
-  ""|"_git"|"DefaultCollection"|"https:")
-    echo "WARN: bad AZURE_PROJECT='${AZURE_PROJECT}' from $REMOTE_CLEAN — skipping review-in-progress comment" >&2
-    exit 0
-    ;;
-esac
-if [ -z "$AZURE_ORG" ] || [ -z "$AZURE_REPO" ]; then
-  echo "WARN: could not parse org/repo from $REMOTE_CLEAN — skipping review-in-progress comment" >&2
-  exit 0
-fi
-
-# Persist parse results immediately so Step 3 / posting can proceed even if the
-# progress comment is skipped (no PR id yet, soft-fail later, etc.).
-write_azure_env() {
-  export AZURE_HOST AZURE_ORG AZURE_COLLECTION AZURE_PROJECT AZURE_REPO API_BASE PR_ID
-  {
-    echo "export AZURE_HOST=$(printf %q "$AZURE_HOST")"
-    echo "export AZURE_ORG=$(printf %q "$AZURE_ORG")"
-    echo "export AZURE_COLLECTION=$(printf %q "${AZURE_COLLECTION:-}")"
-    echo "export AZURE_PROJECT=$(printf %q "$AZURE_PROJECT")"
-    echo "export AZURE_REPO=$(printf %q "$AZURE_REPO")"
-    echo "export API_BASE=$(printf %q "$API_BASE")"
-    echo "export PR_ID=$(printf %q "${PR_ID:-}")"
-  } > /tmp/pr_azure.env
+[ -n "${ADO_START:-}" ] && [ -f "$ADO_START" ] || {
+  echo "ERROR: scripts/ado-start-comment.sh not found — refuse to invent a starting-comment curl" >&2
+  exit 1
 }
-PR_ID=""
-write_azure_env
-echo "Azure DevOps target: org=${AZURE_ORG} project=${AZURE_PROJECT} repo=${AZURE_REPO}"
-echo "API_BASE=${API_BASE}"
-
-# --- 2. Resolve PR_ID (argument first, else active PR for current branch) ---
-PR_ID="${PR_NUMBER:-}"
-if [ -z "$PR_ID" ]; then
-  BRANCH="${BRANCH_ARG:-}"
-  if [ -z "$BRANCH" ] && [ "$(git rev-parse --abbrev-ref HEAD)" = "HEAD" ]; then
-    BRANCH=$(git branch --contains "$(git rev-parse HEAD)" \
-      | sed 's|^[* ] *||' | grep -v '^(' | head -1 || true)
-  elif [ -z "$BRANCH" ]; then
-    BRANCH=$(git rev-parse --abbrev-ref HEAD)
-  fi
-  # Strip refs/heads/ if the executor passed a full ref
-  BRANCH="${BRANCH#refs/heads/}"
-  if [ -z "${BRANCH:-}" ] || [ "$BRANCH" = "HEAD" ]; then
-    echo "WARN: no PR number and could not resolve branch — skipping review-in-progress comment" >&2
-    exit 0
-  fi
-  PR_ID=$(curl -sS -u ":${AZURE_DEVOPS_TOKEN}" \
-    "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests?searchCriteria.sourceRefName=refs/heads/${BRANCH}&searchCriteria.status=active&api-version=7.1" \
-    | python3 -c "import sys,json; prs=json.load(sys.stdin).get('value',[]); print(prs[0]['pullRequestId'] if prs else '')" 2>/dev/null || true)
-fi
-if [ -z "$PR_ID" ]; then
-  echo "WARN: no open PR found — skipping review-in-progress comment" >&2
-  exit 0
-fi
-write_azure_env
-echo "PR=#${PR_ID}"
-
-# --- 3. Post the progress thread ---
-PLUGIN_VERSION=$(grep -hom1 '"version"[^,}]*' ~/.claude/plugins/pr-reviewer/.claude-plugin/plugin.json \
-  "$HOME/Library/Application Support/Claude/plugins/pr-reviewer/.claude-plugin/plugin.json" 2>/dev/null \
-  | cut -d'"' -f4 || true)
-PLUGIN_VERSION=${PLUGIN_VERSION:-unknown}
-
-cat > /tmp/pr_progress_body.md <<BODY
-🔍 PR Review in Progress
-
-Claude Code is analyzing this pull request. The review will be posted here shortly.
-
-PR Reviewer (${PLUGIN_VERSION})
-BODY
-
-python3 - <<'PY' > /tmp/pr_thread_payload.json
-import json
-body = open('/tmp/pr_progress_body.md').read()
-print(json.dumps({
-    "comments": [{"content": body, "commentType": 1}],
-    "status": "active",
-    "properties": {
-        "Microsoft.TeamFoundation.Discussion.SupportsMarkdown": {"$type": "System.Int32", "$value": 1},
-    },
-}))
-PY
-
-RESP=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
-  -H "Content-Type: application/json" \
-  -u ":${AZURE_DEVOPS_TOKEN}" \
-  -X POST --data @/tmp/pr_thread_payload.json \
-  "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads?api-version=7.1" \
-  || true)
-STATUS=$(echo "$RESP" | sed -n 's/^HTTP_STATUS://p')
-if echo "${STATUS:-}" | grep -qE '^2'; then
-  echo "Review-in-progress comment posted on PR #${PR_ID} (HTTP $STATUS)"
-else
-  echo "WARN: review-in-progress comment failed HTTP ${STATUS:-curl-error} — body: $(echo "$RESP" | sed '$d')" >&2
-fi
+# Set PR_NUMBER from the numeric argument when provided; BRANCH_ARG when a branch was given
+bash "$ADO_START"
+# shellcheck disable=SC1091
+source /tmp/pr_azure.env   # API_BASE, AZURE_REPO, PR_ID, …
 ```
 
-If posting the starting comment fails, output a single warning line and continue — do not stop the review. Later steps that need `API_BASE` / `PR_ID` should `source /tmp/pr_azure.env` (written above) or re-run the remote-URL parser.
-
----
+If posting the starting comment fails, output a single warning line and continue — do not stop the review. Later steps that need `API_BASE` / `PR_ID` should `source /tmp/pr_azure.env` (written above) or re-run `parse_azure_remote` from `lib-azure-remote.sh`.
 
 ## Posting the Review
 

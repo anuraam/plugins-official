@@ -80,20 +80,15 @@ On **GitHub** the marker is an HTML comment appended to the comment body — it 
 
 ### 2. The finding id `fid` (matches a finding across revisions)
 
-`fid` must be **deterministic** and **independent of line number** (lines drift as the author edits), so the same logical issue produces the same id on every run. Compute it from the file path plus a normalised issue signature:
+`fid` must be **deterministic** and **independent of line number** (lines drift as the author edits), so the same logical issue produces the same id on every run. Compute it from the file path plus a normalised issue signature via the plugin script:
 
 ```bash
-# fid = first 12 hex of sha1( lowercased repo-relative path + "|" + normalised issue text )
-# Normalisation: lowercase, keep [a-z0-9 ], collapse runs of whitespace, trim.
-compute_fid() {  # args: <file> <issue-text>
-  python3 - "$1" "$2" <<'PY'
-import sys, re, hashlib
-path = sys.argv[1].strip().lower()
-issue = re.sub(r'[^a-z0-9 ]', ' ', sys.argv[2].lower())
-issue = re.sub(r'\s+', ' ', issue).strip()
-print(hashlib.sha1(f"{path}|{issue}".encode()).hexdigest()[:12])
-PY
-}
+FID_SCRIPT="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/compute-fid.sh}"
+if [ -z "${FID_SCRIPT:-}" ] || [ ! -f "$FID_SCRIPT" ]; then
+  FID_SCRIPT=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/compute-fid.sh' 2>/dev/null | head -1)
+fi
+# fid = first 12 hex of sha1( lowercased path + "|" + normalised issue text )
+FID=$(bash "$FID_SCRIPT" "<file>" "<issue-summary-sentence>")
 ```
 
 Use the **issue summary sentence** (not the code snippet, not the line) as the issue text. The same wording each run keeps the id stable; if the reviewer rephrases an issue slightly between runs it may be treated as new — acceptable, since the worst case is one duplicate rather than a missed regression.
@@ -159,16 +154,50 @@ echo "GITHUB_TOKEN=${GITHUB_TOKEN:+yes}"
 
 If the underscored Azure alias is empty but a dashed `AZURE-DEVOPS-TOKEN` exists: `export AZURE_DEVOPS_TOKEN="$(printenv AZURE-DEVOPS-TOKEN)"` — then re-check with `:+yes`, never by printing the value.
 
+### 1b. Check permissions (immediately after platform detect — hard gate)
+
+Before posting the starting comment, run **`scripts/check-permissions.sh` as one Bash call**. It verifies auth and the capabilities required to post a review (and warns when vote / fix-mode push may fail). Do **not** invent ad-hoc `gh auth` / `curl` probes.
+
+```bash
+PERM="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/check-permissions.sh}"
+if [ -z "${PERM:-}" ] || [ ! -f "$PERM" ]; then
+  PERM=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/check-permissions.sh' 2>/dev/null | head -1)
+fi
+[ -n "${PERM:-}" ] && [ -f "$PERM" ] || {
+  echo "ERROR: scripts/check-permissions.sh not found" >&2
+  exit 1
+}
+# Optional: PR_NUMBER=<n> FIX_MODE=true (when --fix)
+bash "$PERM"
+# shellcheck disable=SC1091
+source /tmp/pr_permissions.env
+```
+
+| Result | Action |
+|---|---|
+| Exit **0** (`PERMISSIONS CHECK PASSED`) | Continue. Surface any `WARN:` lines (e.g. vote may fail) but do not stop. |
+| Exit **1** (`PERMISSIONS CHECK FAILED`) | **Stop** with the script's error lines. Do not post a starting comment or run the review. |
+
+**What it checks**
+
+| Platform | Required (hard fail) | Soft warn |
+|---|---|---|
+| **GitHub** | `gh` installed; authenticated; can read repo (+ PR when `PR_NUMBER` set); classic PAT has `repo` or `public_repo` | Fine-grained scope reminder; missing `GITHUB_TOKEN` in `--fix` mode |
+| **Azure DevOps** | `AZURE_DEVOPS_TOKEN` present (re-exports dashed alias); `connectionData` OK; repo + PR readable; threads readable | Vote / Code Write likely missing; `--fix` push not probeable without mutating |
+| **Generic** | (none — report file only) | — |
+
+Writes `/tmp/pr_permissions.env` (`PLATFORM`, `AUTH_OK`, `CAP_*`, `PERMISSIONS_WARNINGS`). Never echoes secret values.
+
 ## 2. Post a "Review in Progress" Comment (must be within the first 3 tool calls)
 
-Immediately after platform detection, post a comment so the PR author knows the review has started. **Do not read any files, do not run `find`/`ls`, do not index the codebase before this step.**
+Immediately after the permissions check, post a comment so the PR author knows the review has started. **Do not read any files, do not run `find`/`ls`, do not index the codebase before this step.**
 
-Use the platform-appropriate method — each provider's starting-comment block is **self-contained** (run it as one `Bash` call; do not invent a shortened version):
-- **GitHub:** `gh pr comment` — see `providers/github.md` → *Posting the "review in progress" comment*
-- **Azure DevOps:** run the **entire** script in `providers/azure-devops.md` → *Posting the Starting Comment* (it parses the remote, resolves `PR_ID`, posts the thread, and writes `/tmp/pr_azure.env`). Set `PR_NUMBER` from the numeric argument first when one was provided.
+Use the platform-appropriate **plugin script** as one `Bash` call — do not invent a shortened version:
+- **GitHub:** `scripts/gh-start-comment.sh` — see `providers/github.md` → *Posting the "review in progress" comment*
+- **Azure DevOps:** `scripts/ado-start-comment.sh` — parses the remote, resolves `PR_ID`, posts the thread, and writes `/tmp/pr_azure.env`. See `providers/azure-devops.md` → *Posting the Starting Comment*.
 - **Generic / unknown platform:** Skip — no API available
 
-Resolve the PR number from the argument first; only fall back to a CLI lookup (`gh pr list` on GitHub, or the branch lookup inside the Azure starting-comment script) if it was not provided.
+Set `PR_NUMBER` from the numeric argument (or `BRANCH_ARG` for a branch name) before running. Resolve the PR number from the argument first; only fall back to a CLI lookup inside the start-comment script if it was not provided.
 
 If posting the starting comment fails, output a single warning line and continue — do not stop the review.
 
@@ -182,277 +211,21 @@ The diff is what matters. Resolve the base/head and pull the diff first — for 
 
 > **Xianix Executor / CI worktrees:** the runner checks out the repo's **default branch** only — it knows nothing about PRs. When a PR number is provided, this script is a **hard gate**. You must see `Checked out PR #<n> at <sha>` (or branch checkout) in the output before proceeding. If `HEAD_SHA` does not match the platform's `headRefOid`, the script exits with an error.
 
-Set `PR_NUMBER` (numeric argument, if any) and `BRANCH_ARG` (branch name argument, if any) before running. You may leave `PLATFORM` unset — the script always resolves it from `origin` and normalizes executor aliases such as `azuredevops`. Canonical values inside the script are only `github`, `azure`, or `generic`. Then execute this **entire** script as a single `Bash` call:
+Set `PR_NUMBER` (numeric argument, if any) and `BRANCH_ARG` (branch name argument, if any) before running. You may leave `PLATFORM` unset — the script always resolves it from `origin` and normalizes executor aliases such as `azuredevops`. Canonical values inside the script are only `github`, `azure`, or `generic`. Then run **`scripts/pr-setup.sh` as a single `Bash` call** — do **not** invent a shortened checkout/diff script:
 
 ```bash
-set -euo pipefail
-
-# --- 0. Resolve PLATFORM from origin (authoritative). Never default to github. ---
-# Xianix Executor injects PLATFORM=azuredevops; normalize aliases, then prefer origin.
-REMOTE_URL=$(git remote get-url origin 2>/dev/null || echo "")
-[ -n "$REMOTE_URL" ] || { echo "ERROR: no git remote 'origin' — cannot detect platform"; exit 1; }
-case "$REMOTE_URL" in
-  *github.com*) DETECTED=github ;;
-  *dev.azure.com*|*visualstudio.com*) DETECTED=azure ;;
-  *) DETECTED=generic ;;
-esac
-# Strip case/hyphen/underscore so azuredevops, azure-devops, azure_devops, ADO → azure
-PLATFORM_HINT_RAW="${PLATFORM:-}"
-case "$(printf '%s' "$PLATFORM_HINT_RAW" | tr '[:upper:]' '[:lower:]' | tr -d '_-')" in
-  azuredevops|ado|azure) PLATFORM_HINT=azure ;;
-  github|gh) PLATFORM_HINT=github ;;
-  bitbucket|generic) PLATFORM_HINT=generic ;;
-  "") PLATFORM_HINT="" ;;
-  *) PLATFORM_HINT="$PLATFORM_HINT_RAW" ;;
-esac
-if [ -n "$PLATFORM_HINT" ] && [ "$PLATFORM_HINT" != "$DETECTED" ]; then
-  echo "WARN: PLATFORM hint '${PLATFORM_HINT_RAW}' (normalized=${PLATFORM_HINT}) disagrees with origin (${DETECTED}) — using origin" >&2
+SETUP="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/pr-setup.sh}"
+if [ -z "${SETUP:-}" ] || [ ! -f "$SETUP" ]; then
+  SETUP=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/pr-setup.sh' 2>/dev/null | head -1)
 fi
-PLATFORM="$DETECTED"
-export PLATFORM
-echo "PLATFORM=${PLATFORM} (from origin; env hint was '${PLATFORM_HINT_RAW:-unset}')"
-CHECKED_OUT=""
-
-# --- 1. Checkout the revision under review ---
-if [ -n "${PR_NUMBER:-}" ]; then
-  case "$PLATFORM" in
-    azure*) CANDIDATE_REFS="refs/pull/${PR_NUMBER}/merge refs/pull/${PR_NUMBER}/head" ;;
-    *)      CANDIDATE_REFS="refs/pull/${PR_NUMBER}/head refs/pull/${PR_NUMBER}/merge" ;;
-  esac
-  for ref in $CANDIDATE_REFS; do
-    if git fetch origin "$ref" 2>/dev/null; then
-      git checkout --detach FETCH_HEAD
-      CHECKED_OUT="$ref"
-      break
-    fi
-  done
-  if [ -z "$CHECKED_OUT" ]; then
-    echo "WARN: no synthetic PR ref found — resolving source branch via platform API"
-    case "$PLATFORM" in
-      azure*)
-        if [ -f /tmp/pr_azure.env ]; then
-          # shellcheck disable=SC1091
-          source /tmp/pr_azure.env
-        fi
-        if [ -z "${API_BASE:-}" ] || [ -z "${AZURE_REPO:-}" ]; then
-          REMOTE=$(git remote get-url origin)
-          if echo "$REMOTE" | grep -qE '(ssh\.dev\.azure\.com|vs-ssh\.visualstudio\.com)'; then
-            V3_PATH=$(echo "$REMOTE" | sed -E 's|^ssh://||; s|^[^@]+@||; s|^[^:/]+[:/]+||')
-            REMOTE="https://dev.azure.com/$(echo "$V3_PATH" | cut -d/ -f2)/$(echo "$V3_PATH" | cut -d/ -f3)/_git/$(echo "$V3_PATH" | cut -d/ -f4)"
-          fi
-          REMOTE_CLEAN=$(echo "$REMOTE" | sed -E 's|https?://[^@]+@|https://|; s|\.git$||')
-          AZURE_HOST=$(echo "$REMOTE_CLEAN" | awk -F/ '{print $3}')
-          PATH_PARTS=$(echo "$REMOTE_CLEAN" | awk -F/ '{for (i=4; i<=NF; i++) print $i}')
-          GIT_LINE=$(echo "$PATH_PARTS" | grep -nx '_git' | head -1 | cut -d: -f1 || true)
-          [ -n "$GIT_LINE" ] || { echo "ERROR: not an Azure DevOps git URL"; exit 1; }
-          AZURE_PROJECT=$(echo "$PATH_PARTS" | sed -n "$((GIT_LINE - 1))p")
-          AZURE_REPO=$(echo    "$PATH_PARTS" | sed -n "$((GIT_LINE + 1))p")
-          if [ "$AZURE_HOST" = "dev.azure.com" ]; then
-            AZURE_ORG=$(echo "$PATH_PARTS" | sed -n '1p'); PREFIX_START=2
-            HOST_AND_ORG_PATH="https://dev.azure.com/${AZURE_ORG}"
-          else
-            AZURE_ORG=$(echo "$AZURE_HOST" | cut -d'.' -f1); PREFIX_START=1
-            HOST_AND_ORG_PATH="https://${AZURE_HOST}"
-          fi
-          PROJECT_LINE=$((GIT_LINE - 1))
-          if [ "$PROJECT_LINE" -gt "$PREFIX_START" ]; then
-            AZURE_COLLECTION=$(echo "$PATH_PARTS" | sed -n "${PREFIX_START},$((PROJECT_LINE - 1))p" | tr '\n' '/' | sed 's|/$||')
-            API_BASE="${HOST_AND_ORG_PATH}/${AZURE_COLLECTION}/${AZURE_PROJECT}"
-          else
-            API_BASE="${HOST_AND_ORG_PATH}/${AZURE_PROJECT}"
-          fi
-        fi
-        PR_ID="${PR_ID:-${PR_NUMBER:-}}"
-        if [ -z "$PR_ID" ] || [ -z "${API_BASE:-}" ] || [ -z "${AZURE_REPO:-}" ]; then
-          echo "ERROR: Azure checkout fallback needs PR_NUMBER and a parsed API_BASE/AZURE_REPO"
-          exit 1
-        fi
-        SRC=$(curl -sS -u ":${AZURE_DEVOPS_TOKEN}" \
-          "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests/${PR_ID}?api-version=7.1" \
-          | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('sourceRefName','').replace('refs/heads/',''))")
-        [ -n "$SRC" ] || { echo "ERROR: could not resolve Azure PR source branch for PR #${PR_ID}"; exit 1; }
-        git fetch origin "refs/heads/${SRC}"
-        git checkout --detach FETCH_HEAD
-        CHECKED_OUT="refs/heads/${SRC}"
-        ;;
-      *)
-        SRC=$(gh pr view "$PR_NUMBER" --json headRefName --jq '.headRefName')
-        git fetch origin "refs/heads/${SRC}"
-        git checkout --detach FETCH_HEAD
-        CHECKED_OUT="refs/heads/${SRC}"
-        ;;
-    esac
-  fi
-  echo "Checked out PR #${PR_NUMBER} via ${CHECKED_OUT} at $(git rev-parse HEAD)"
-elif [ -n "${BRANCH_ARG:-}" ]; then
-  git fetch origin "$BRANCH_ARG"
-  git checkout --detach FETCH_HEAD
-  CHECKED_OUT="refs/heads/${BRANCH_ARG}"
-  echo "Checked out branch ${BRANCH_ARG} at $(git rev-parse HEAD)"
-fi
-
-# --- 2. Resolve target branch name ---
-if [ -n "${PR_NUMBER:-}" ]; then
-  case "$PLATFORM" in
-    azure*)
-      if [ -f /tmp/pr_azure.env ]; then
-        # shellcheck disable=SC1091
-        source /tmp/pr_azure.env
-      fi
-      if [ -z "${API_BASE:-}" ] || [ -z "${AZURE_REPO:-}" ]; then
-        echo "WARN: /tmp/pr_azure.env incomplete — re-parsing remote for Azure metadata"
-        REMOTE=$(git remote get-url origin)
-        if echo "$REMOTE" | grep -qE '(ssh\.dev\.azure\.com|vs-ssh\.visualstudio\.com)'; then
-          V3_PATH=$(echo "$REMOTE" | sed -E 's|^ssh://||; s|^[^@]+@||; s|^[^:/]+[:/]+||')
-          REMOTE="https://dev.azure.com/$(echo "$V3_PATH" | cut -d/ -f2)/$(echo "$V3_PATH" | cut -d/ -f3)/_git/$(echo "$V3_PATH" | cut -d/ -f4)"
-        fi
-        REMOTE_CLEAN=$(echo "$REMOTE" | sed -E 's|https?://[^@]+@|https://|; s|\.git$||')
-        AZURE_HOST=$(echo "$REMOTE_CLEAN" | awk -F/ '{print $3}')
-        PATH_PARTS=$(echo "$REMOTE_CLEAN" | awk -F/ '{for (i=4; i<=NF; i++) print $i}')
-        GIT_LINE=$(echo "$PATH_PARTS" | grep -nx '_git' | head -1 | cut -d: -f1 || true)
-        [ -n "$GIT_LINE" ] || { echo "ERROR: not an Azure DevOps git URL"; exit 1; }
-        AZURE_PROJECT=$(echo "$PATH_PARTS" | sed -n "$((GIT_LINE - 1))p")
-        AZURE_REPO=$(echo    "$PATH_PARTS" | sed -n "$((GIT_LINE + 1))p")
-        if [ "$AZURE_HOST" = "dev.azure.com" ]; then
-          AZURE_ORG=$(echo "$PATH_PARTS" | sed -n '1p'); PREFIX_START=2
-          HOST_AND_ORG_PATH="https://dev.azure.com/${AZURE_ORG}"
-        else
-          AZURE_ORG=$(echo "$AZURE_HOST" | cut -d'.' -f1); PREFIX_START=1
-          HOST_AND_ORG_PATH="https://${AZURE_HOST}"
-        fi
-        PROJECT_LINE=$((GIT_LINE - 1))
-        if [ "$PROJECT_LINE" -gt "$PREFIX_START" ]; then
-          AZURE_COLLECTION=$(echo "$PATH_PARTS" | sed -n "${PREFIX_START},$((PROJECT_LINE - 1))p" | tr '\n' '/' | sed 's|/$||')
-          API_BASE="${HOST_AND_ORG_PATH}/${AZURE_COLLECTION}/${AZURE_PROJECT}"
-        else
-          API_BASE="${HOST_AND_ORG_PATH}/${AZURE_PROJECT}"
-        fi
-      fi
-      PR_ID="${PR_ID:-${PR_NUMBER}}"
-      if [ -z "$PR_ID" ] || [ -z "${API_BASE:-}" ] || [ -z "${AZURE_REPO:-}" ]; then
-        echo "ERROR: Azure metadata needs PR_NUMBER and a parsed API_BASE/AZURE_REPO"
-        exit 1
-      fi
-      PR_JSON=$(curl -sS -u ":${AZURE_DEVOPS_TOKEN}" \
-        "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests/${PR_ID}?api-version=7.1")
-      BASE=$(echo "$PR_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('targetRefName','').replace('refs/heads/',''))")
-      PR_HEAD_BRANCH=$(echo "$PR_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('sourceRefName','').replace('refs/heads/',''))")
-      EXPECTED_HEAD=$(echo "$PR_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('lastMergeSourceCommit',{}).get('commitId',''))")
-      PR_TITLE=$(echo "$PR_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('title',''))")
-      PR_BODY=$(echo "$PR_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('description','') or '')")
-      PR_AUTHOR=$(echo "$PR_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('createdBy',{}).get('displayName',''))")
-      ;;
-    *)
-      PR_METADATA=$(gh pr view "$PR_NUMBER" --json baseRefName,headRefName,headRefOid,title,body,author)
-      BASE=$(echo "$PR_METADATA" | jq -r '.baseRefName')
-      PR_HEAD_BRANCH=$(echo "$PR_METADATA" | jq -r '.headRefName')
-      PR_TITLE=$(echo "$PR_METADATA" | jq -r '.title')
-      PR_BODY=$(echo "$PR_METADATA" | jq -r '.body // ""')
-      PR_AUTHOR=$(echo "$PR_METADATA" | jq -r '.author.login')
-      EXPECTED_HEAD=$(echo "$PR_METADATA" | jq -r '.headRefOid')
-      ;;
-  esac
-else
-  BASE=$(git ls-remote --symref origin HEAD 2>/dev/null | awk '/^ref:/ {sub("refs/heads/","",$2); print $2}')
-  : "${BASE:=main}"
-  PR_TITLE=""
-  PR_BODY=""
-  PR_AUTHOR=""
-  EXPECTED_HEAD=""
-fi
-
-# --- 3. Resolve HEAD_SHA and fetch fresh base tip ---
-if [ "${CHECKED_OUT:-}" = "refs/pull/${PR_NUMBER:-}/merge" ]; then
-  HEAD_SHA=$(git rev-parse HEAD^2)
-else
-  HEAD_SHA=$(git rev-parse HEAD)
-fi
-
-if [ -n "${PR_NUMBER:-}" ] && [ -n "${EXPECTED_HEAD:-}" ] && [ "$HEAD_SHA" != "$EXPECTED_HEAD" ]; then
-  echo "ERROR: checked-out HEAD ($HEAD_SHA) does not match PR headRefOid ($EXPECTED_HEAD) — checkout failed"
+[ -n "${SETUP:-}" ] && [ -f "$SETUP" ] || {
+  echo "ERROR: scripts/pr-setup.sh not found — refuse to invent a checkout/diff script" >&2
   exit 1
-fi
-
-if git fetch origin "refs/heads/${BASE}" 2>/dev/null; then
-  BASE_TIP=$(git rev-parse FETCH_HEAD)
-else
-  echo "WARN: could not fetch origin/${BASE} — falling back to local refs, base may be stale"
-  BASE_TIP=""
-  for candidate in "refs/remotes/origin/${BASE}" "refs/heads/${BASE}"; do
-    git show-ref --verify --quiet "$candidate" && { BASE_TIP=$(git rev-parse "$candidate"); break; }
-  done
-fi
-[ -n "$BASE_TIP" ] || { echo "ERROR: could not resolve base branch '${BASE}'"; exit 1; }
-
-BASE_SHA=$(git merge-base "$BASE_TIP" "$HEAD_SHA")
-echo "Base: $BASE (tip $BASE_TIP -> merge-base $BASE_SHA)"
-echo "Head: $HEAD_SHA"
-
-# --- 4. Sanity check commit count (GitHub only; skip azure/generic) ---
-# Compare against canonical PLATFORM=github only — never treat azuredevops as GitHub.
-if [ -n "${PR_NUMBER:-}" ] && [ "$PLATFORM" = "github" ]; then
-  GIT_COMMIT_COUNT=$(git rev-list --count "${BASE_SHA}..${HEAD_SHA}")
-  GH_COMMIT_COUNT=$(gh pr view "$PR_NUMBER" --json commits --jq '.commits | length')
-  echo "Git commit count: $GIT_COMMIT_COUNT"
-  echo "GitHub commit count: $GH_COMMIT_COUNT"
-  if [ "$GIT_COMMIT_COUNT" -gt "$GH_COMMIT_COUNT" ]; then
-    echo "ERROR: git reports more commits than GitHub — base is stale; re-fetch origin/${BASE} and retry"
-    exit 1
-  fi
-  echo "✓ Commit count OK (git=$GIT_COMMIT_COUNT, github=$GH_COMMIT_COUNT)"
-fi
-
-# --- 5. Generate diffs and metadata ---
-git log --oneline "${BASE_SHA}..${HEAD_SHA}"
-git diff --stat "${BASE_SHA}"..."${HEAD_SHA}"
-git diff --name-only "${BASE_SHA}"..."${HEAD_SHA}" | tee /tmp/pr_changed_files.txt
-git diff "${BASE_SHA}"..."${HEAD_SHA}" > /tmp/pr_full_diff.patch
-git log -1 --format="%an <%ae>" "${HEAD_SHA}"
-git log --format="%s%n%b" "${BASE_SHA}..${HEAD_SHA}"
-
-CHANGED_COUNT=$(wc -l < /tmp/pr_changed_files.txt | tr -d ' ')
-echo "Changed files: $CHANGED_COUNT"
-
-CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-if [ "$CURRENT_BRANCH" = "HEAD" ]; then
-  CURRENT_BRANCH=$(git branch --contains "$HEAD_SHA" \
-    | sed 's|^[* ] *||' | grep -v '^(' | head -1 || true)
-fi
-
-# --- 6. Annotate diff with post-change line numbers ---
-awk '
-  /^@@/ {
-    s = substr($0, index($0, "+") + 1); newln = s + 0
-    print "      | " $0; next
-  }
-  /^(diff |index |--- |\+\+\+ |new file|deleted file|similarity|rename |Binary )/ {
-    print "      | " $0; next
-  }
-  /^\+/ { printf "%5d |+%s\n", newln, substr($0, 2); newln++; next }
-  /^ /  { printf "%5d | %s\n", newln, substr($0, 2); newln++; next }
-  /^-/  { printf "    - |-%s\n", substr($0, 2); next }
-  { print "      | " $0 }
-' /tmp/pr_full_diff.patch > /tmp/pr_full_diff_numbered.patch
-echo "Annotated diff written: $(wc -l < /tmp/pr_full_diff_numbered.patch) lines"
-
-# --- 7. Persist state for later tool calls ---
-# Use printf %q so titles/bodies with spaces, quotes, or newlines survive `source`.
-{
-  echo "PLATFORM=$PLATFORM"
-  echo "HEAD_SHA=$HEAD_SHA"
-  echo "BASE_SHA=$BASE_SHA"
-  echo "BASE=$BASE"
-  echo "BASE_TIP=$BASE_TIP"
-  echo "CHANGED_COUNT=$CHANGED_COUNT"
-  echo "CHECKED_OUT=$CHECKED_OUT"
-  printf 'PR_NUMBER=%q\n' "${PR_NUMBER:-}"
-  printf 'CURRENT_BRANCH=%q\n' "${CURRENT_BRANCH:-}"
-  printf 'PR_TITLE=%q\n' "${PR_TITLE:-}"
-  printf 'PR_BODY=%q\n' "${PR_BODY:-}"
-  printf 'PR_AUTHOR=%q\n' "${PR_AUTHOR:-}"
-  printf 'PR_HEAD_BRANCH=%q\n' "${PR_HEAD_BRANCH:-}"
-} > /tmp/pr_state.env
-echo "State written to /tmp/pr_state.env"
+}
+# PR_NUMBER / BRANCH_ARG already exported from the invocation argument
+bash "$SETUP"
+# shellcheck disable=SC1091
+source /tmp/pr_state.env
 ```
 
 > On **Azure DevOps** the `/merge` ref points at the PR's *merge commit*; its second parent (`HEAD^2`) is the real PR head. The script sets `HEAD_SHA` accordingly when `CHECKED_OUT=refs/pull/<n>/merge`.
@@ -471,99 +244,46 @@ Use `git show ${HEAD_SHA}:<filepath>` or the `Read` tool to read the full conten
 
 This is the one place reading platform PR comments is required, because it determines whether the run is an **initial** review or a **re-review**, and it loads open inline threads for awareness/dedup. Skip entirely on the generic platform (no API) and when `PR_REVIEWER_RECONCILE=false` (stateless mode also skips external-thread awareness).
 
-1. Unless `PR_REVIEWER_RECONCILE=false` (or platform is generic), list the existing review comments/threads on the PR. **Run the platform script as one Bash call** — do **not** invent a shortened `curl`/`gh` dump (Azure agents inventing `THREADS_JSON=$(curl …)` then `json.load` is a common crash on 401 HTML).
-
-   The script writes:
-   - `/tmp/pr_prior_findings.jsonl` — only threads carrying the plugin marker (`<!-- pr-reviewer:v1 ... -->` on GitHub, or the `pr-reviewer.*` thread properties on Azure DevOps). Drives `REVIEW_MODE`.
-   - `/tmp/pr_open_threads.jsonl` — **every open inline thread** (humans, bots, this plugin), one JSON object per line: `{file, line, body, author, is_plugin, thread_ref[, comment_ref]}`. Used for reviewer awareness, dedup, and external-thread validation.
-   - `/tmp/pr_prior.env` — `PRIOR_SUMMARY_SHA` (shell state does not persist; always `source` this file afterward).
-
-   | Platform | Script (one Bash call) |
-   |---|---|
-   | **GitHub** | `scripts/gh-detect-prior.sh` (see `providers/github.md` → *Detecting a prior review*) |
-   | **Azure DevOps** | `scripts/ado-detect-prior.sh` (see `providers/azure-devops.md` → *Detecting a prior review*) |
-
-   Resolve the script via `CLAUDE_PLUGIN_ROOT` the same way as `ado-post-review.sh`. If the script exits non-zero (missing token, HTTP 401, non-JSON body), **fix auth / env and re-run the script** — do not hand-roll a replacement curl.
-
-2. Decide the mode:
+**Run `scripts/detect-review-mode.sh` as one Bash call** — it invokes the platform detect-prior script (`gh-detect-prior.sh` / `ado-detect-prior.sh`), decides `REVIEW_MODE` / `RANGE_BASE`, writes the incremental diff when needed, and appends mode vars to `/tmp/pr_state.env`. Do **not** invent a shortened `curl`/`gh` dump (Azure agents inventing `THREADS_JSON=$(curl …)` then `json.load` is a common crash on 401 HTML).
 
 ```bash
-source /tmp/pr_state.env
+MODE="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/detect-review-mode.sh}"
+if [ -z "${MODE:-}" ] || [ ! -f "$MODE" ]; then
+  MODE=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/detect-review-mode.sh' 2>/dev/null | head -1)
+fi
+[ -n "${MODE:-}" ] && [ -f "$MODE" ] || {
+  echo "ERROR: scripts/detect-review-mode.sh not found — refuse to invent a prior-review dump" >&2
+  exit 1
+}
+bash "$MODE"
 # shellcheck disable=SC1091
-[ -f /tmp/pr_prior.env ] && source /tmp/pr_prior.env
-# /tmp/pr_prior_findings.jsonl is written by the provider script: one JSON object per
-# prior marked finding thread: {fid, status(open|resolved), thread_ref[, comment_ref]}.
-# Matching is by fid alone, so file/line are not needed here.
-# /tmp/pr_open_threads.jsonl is written by the same script (may be empty).
-# Touch an empty file if the helper skipped writing it so later steps can test -s safely.
-: "${PR_REVIEWER_RECONCILE:=true}"
-if [ "$PR_REVIEWER_RECONCILE" = "false" ]; then
-  : > /tmp/pr_prior_findings.jsonl
-  : > /tmp/pr_open_threads.jsonl
-  : > /tmp/pr_prior.env
-fi
-[ -f /tmp/pr_open_threads.jsonl ] || : > /tmp/pr_open_threads.jsonl
-# PRIOR_SUMMARY_SHA is the sha= from the most recent summary marker, or empty.
-if [ "$PR_REVIEWER_RECONCILE" = "false" ] || [ ! -s /tmp/pr_prior_findings.jsonl ]; then
-  REVIEW_MODE="initial"
-  RANGE_BASE="$BASE_SHA"
-else
-  REVIEW_MODE="rereview"
-  # New commits since the last review; fall back to BASE_SHA if the recorded sha is gone.
-  if [ -n "${PRIOR_SUMMARY_SHA:-}" ] && git cat-file -e "${PRIOR_SUMMARY_SHA}^{commit}" 2>/dev/null; then
-    RANGE_BASE="$PRIOR_SUMMARY_SHA"
-  else
-    RANGE_BASE="$BASE_SHA"
-  fi
-fi
-OPEN_THREAD_COUNT=$(wc -l < /tmp/pr_open_threads.jsonl | tr -d ' ')
-echo "Review mode: $REVIEW_MODE  |  incremental range: ${RANGE_BASE}..${HEAD_SHA}  |  open threads: ${OPEN_THREAD_COUNT}"
-export REVIEW_MODE RANGE_BASE
-```
-
-3. Capture the **incremental** diff (commits pushed since the last review) in addition to the full PR diff — it is what you skim first in re-review mode and what populates the "changed since last review" line in the delta:
-
-```bash
 source /tmp/pr_state.env
-if [ "$REVIEW_MODE" = "rereview" ] && [ "$RANGE_BASE" != "$BASE_SHA" ]; then
-  git log --oneline ${RANGE_BASE}..${HEAD_SHA}
-  git diff ${RANGE_BASE}...${HEAD_SHA} > /tmp/pr_incremental_diff.patch
-  echo "Incremental diff: $(wc -l < /tmp/pr_incremental_diff.patch) lines since last review"
-fi
+# also sources PRIOR_SUMMARY_SHA when present:
+[ -f /tmp/pr_prior.env ] && source /tmp/pr_prior.env
 ```
+
+**Outputs:**
+- `/tmp/pr_prior_findings.jsonl` — only threads carrying the plugin marker. Drives `REVIEW_MODE`.
+- `/tmp/pr_open_threads.jsonl` — **every open inline thread** (humans, bots, this plugin). Used for reviewer awareness, dedup, and external-thread validation.
+- `/tmp/pr_prior.env` — `PRIOR_SUMMARY_SHA`
+- `/tmp/pr_incremental_diff.patch` — when re-review and `RANGE_BASE != BASE_SHA`
+
+If the script exits non-zero (missing token, HTTP 401, non-JSON body), **fix auth / env and re-run the script** — do not hand-roll a replacement curl.
 
 > **Why review the full PR diff, not just the increment?** The full diff (`/tmp/pr_full_diff.patch`) stays the authoritative input to the reviewers so the *current* finding set is always complete — an unresolved finding in a file the latest commits didn't touch must still be detected so it stays open. The incremental diff focuses your attention and drives the delta summary; it does not replace the full scan. Reconciliation (step 7 / posting) compares the current finding set to the prior one **by `fid`**, and also validates open external threads against `HEAD`.
 
 ## 4. Index the Codebase (skip on small PRs)
 
-Every line these commands print lands in your context and is paid for on every subsequent turn — keep the index small. The caps below are mandatory, not decorative.
+Every line these commands print lands in your context and is paid for on every subsequent turn — keep the index small. The caps are mandatory, not decorative.
+
+**Run `scripts/index-codebase.sh` as one Bash call** — do not invent an unbounded `find`/`ls` walk. It skips automatically when `CHANGED_COUNT ≤ 10`.
 
 ```bash
-source /tmp/pr_state.env
-if [ "${CHANGED_COUNT:-0}" -le 10 ]; then
-  echo "Small PR ($CHANGED_COUNT files) — skipping codebase index, diff alone is enough context."
-else
-  # Top-level layout
-  ls -1
-
-  # Source tree (depth 3, ignore common noise, HARD CAP at 200 lines)
-  find . -maxdepth 3 \
-    -name .git -prune -o \
-    -name node_modules -prune -o \
-    -name bin -prune -o \
-    -name obj -prune -o \
-    -name .vs -prune -o \
-    -name dist -prune -o \
-    -name build -prune -o \
-    -print | sort | head -200
-
-  # Language fingerprint (changed files only — the repo-wide walk is wasted tokens)
-  sed 's/.*\.//' /tmp/pr_changed_files.txt | sort | uniq -c | sort -rn | head -10
-
-  # Entry points / build manifests
-  ls *.sln *.csproj package.json go.mod Cargo.toml pom.xml build.gradle \
-     pyproject.toml setup.py requirements.txt CMakeLists.txt 2>/dev/null || true
+INDEX="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/index-codebase.sh}"
+if [ -z "${INDEX:-}" ] || [ ! -f "$INDEX" ]; then
+  INDEX=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/index-codebase.sh' 2>/dev/null | head -1)
 fi
+bash "$INDEX"
 ```
 
 If indexing was performed, use `Read` on key config/manifest files (`package.json`, `*.csproj`, `go.mod`) and `Grep` to locate patterns such as the main entry point, base classes, or shared utilities referenced by the changed files. Otherwise skip directly to step 5.
@@ -580,30 +300,13 @@ Before launching any agents:
 The review runs on the **cheap Haiku-finder path by default** (step 6A) and only **escalates to the full specialist reviewers** (step 6B) when the diff touches a high-risk surface. Detect high-risk changes from both the file list and the diff content:
 
 ```bash
-source /tmp/pr_state.env
-RISK_PATH_RE='(auth|login|signin|session|password|passwd|secret|token|jwt|oauth|crypto|encrypt|decrypt|payment|billing|charge|invoice|checkout|migration|schema|\.sql$|webhook|/api/|/controllers?/|/routes?/|/handlers?/|iam|rbac|permission)'
-RISK_CONTENT_RE='(password|secret|api[_-]?key|private[_-]?key|authorize|authenticate|hashpw|bcrypt|jwt|sql|exec\(|eval\(|subprocess|os\.system|pickle\.loads)'
-
-REVIEW_TIER="haiku"
-# 1. High-risk by file path — docs/images can never be a high-risk surface,
-#    so exclude them before matching (a filename like docs/token-guide.md must
-#    not escalate the whole run to the expensive specialist path).
-if grep -ivE '\.(md|markdown|rst|txt|png|jpg|jpeg|gif|svg)$' /tmp/pr_changed_files.txt \
-   | grep -qiE "$RISK_PATH_RE"; then
-  REVIEW_TIER="specialists"
-# 2. High-risk by changed content. '^\+[^+]' matches added lines ONLY — a bare
-#    '^\+' also matches '+++ b/<path>' file headers, which escalates PRs whose
-#    filenames merely contain words like "token" or "sql".
-elif grep -E '^\+[^+]' /tmp/pr_full_diff.patch | grep -qiE "$RISK_CONTENT_RE"; then
-  REVIEW_TIER="specialists"
+TIER="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/review-tier.sh}"
+if [ -z "${TIER:-}" ] || [ ! -f "$TIER" ]; then
+  TIER=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/review-tier.sh' 2>/dev/null | head -1)
 fi
-
-if [ "$REVIEW_TIER" = "specialists" ]; then
-  echo "High-risk surface detected — escalating to specialist reviewers."
-else
-  echo "No high-risk surface — using low-cost Haiku finder path."
-fi
-export REVIEW_TIER
+bash "$TIER"
+# shellcheck disable=SC1091
+source /tmp/pr_state.env   # REVIEW_TIER=haiku|specialists
 ```
 
 - `REVIEW_TIER=haiku` → go to **step 6A** (two Haiku finders). This is the common case.
@@ -714,7 +417,26 @@ Deeper coverage for high-risk diffs. Run `code-reviewer` **always**; gate the ot
 
 `package.json`/`*.csproj`/lockfile changes are **not** docs — they keep `security-reviewer` in scope (dependency risk). Paths matching `auth`, `cache`, or `handler` keep `performance-reviewer` in scope (request-path latency). When uncertain whether a reviewer applies, **run it**. For `REVIEW_TIER=specialists` on auth/security code, expect **four** agent results unless you document a skip reason.
 
-In **one assistant turn**, emit one parallel sub-agent invocation per selected reviewer (between 1 and 4). Each invocation prompt must include, in addition to the two shared constraints above:
+**Run the two gating scripts as Bash calls before launching agents** — do not invent your own skip logic or model-slug mapping:
+
+```bash
+SELECT="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/select-reviewers.sh}"
+MODELS="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/resolve-models.sh}"
+if [ -z "${SELECT:-}" ] || [ ! -f "$SELECT" ]; then
+  SELECT=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/select-reviewers.sh' 2>/dev/null | head -1)
+fi
+if [ -z "${MODELS:-}" ] || [ ! -f "$MODELS" ]; then
+  MODELS=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/resolve-models.sh' 2>/dev/null | head -1)
+fi
+bash "$SELECT"
+bash "$MODELS"
+# shellcheck disable=SC1091
+source /tmp/pr_state.env
+# RUN_CODE / RUN_TEST / RUN_SECURITY / RUN_PERFORMANCE
+# QUALITY_SLUG / RISK_SLUG  (empty RISK_SLUG = omit model field)
+```
+
+In **one assistant turn**, emit one parallel sub-agent invocation per selected reviewer (`RUN_*=true`, between 1 and 4). Each invocation prompt must include, in addition to the two shared constraints above:
 
 - The path `/tmp/pr_full_diff_numbered.patch` (the line-number-annotated diff — the authoritative source for `NN`) and the path `/tmp/pr_changed_files.txt`
 - `BASE_SHA` and `HEAD_SHA`
@@ -723,36 +445,12 @@ In **one assistant turn**, emit one parallel sub-agent invocation per selected r
 
 > **Pass-by-value vs path:** if `DIFF_LINES ≤ 300`, paste the contents of `/tmp/pr_full_diff_numbered.patch` **inline** in each prompt (cheaper than each sub-agent re-opening a shared file) — inline the *numbered* diff, not the raw one, so the line numbers travel with it; if `DIFF_LINES > 300`, pass the path `/tmp/pr_full_diff_numbered.patch`.
 
-> **Model selection (mixed-model tiering).** The reviewers split into two model tiers so you don't pay frontier-model rates for the cheaper review dimensions. Set each sub-agent's `model` from its tier (per the table above), resolved with this precedence:
+> **Model selection (mixed-model tiering).** `scripts/resolve-models.sh` already applied this precedence and wrote `QUALITY_SLUG` / `RISK_SLUG`:
 >
-> 1. **`PR_REVIEWER_MODEL` (override).** If set, it pins **every** reviewer to that one model — backward-compatible escape hatch, ignores the tiers below.
-> 2. Otherwise, per tier:
->    - **quality tier** (`code-reviewer`, `test-reviewer`) → `PR_REVIEWER_QUALITY_MODEL` if set, else `haiku`. These are pattern/coverage tasks that a small model handles well.
->    - **risk tier** (`security-reviewer`, `performance-reviewer`) → `PR_REVIEWER_RISK_MODEL` if set, else inherit (omit `model`). Vulnerability and performance reasoning is where frontier accuracy actually pays off — this path was chosen *because* the diff is high-risk.
+> 1. **`PR_REVIEWER_MODEL` (override).** If set, pins **every** reviewer.
+> 2. Otherwise: quality tier (`code-reviewer`, `test-reviewer`) → `PR_REVIEWER_QUALITY_MODEL` or `haiku`; risk tier (`security-reviewer`, `performance-reviewer`) → `PR_REVIEWER_RISK_MODEL` or inherit (omit `model`).
 >
-> ```bash
-> source /tmp/pr_state.env
-> map_model_slug() {
->   case "$1" in
->     inherit|"") echo "" ;;
->     sonnet|opus|haiku|fable) echo "$1" ;;
->     *haiku*) echo "haiku" ;;
->     *sonnet*) echo "sonnet" ;;
->     *opus*) echo "opus" ;;
->     *) echo "haiku" ;;
->   esac
-> }
-> RISK_MODEL="${PR_REVIEWER_RISK_MODEL:-inherit}"
-> QUALITY_MODEL="${PR_REVIEWER_QUALITY_MODEL:-haiku}"
-> if [ -n "${PR_REVIEWER_MODEL:-}" ]; then
->   RISK_MODEL="$PR_REVIEWER_MODEL"; QUALITY_MODEL="$PR_REVIEWER_MODEL"
-> fi
-> QUALITY_SLUG=$(map_model_slug "$QUALITY_MODEL")
-> RISK_SLUG=$(map_model_slug "$RISK_MODEL")
-> echo "Reviewer models — quality: ${QUALITY_SLUG:-inherit} | risk: ${RISK_SLUG:-inherit}"
-> ```
->
-> Emit each reviewer in the **same assistant turn** with `subagent_type` set. Pass `"model": "<slug>"` only when the mapped slug is non-empty (`haiku` for quality tier; omit entirely for risk tier when `RISK_SLUG` is empty). **Never** pass `claude-haiku-4-5`, `inherit`, or any other string — those cause `InputValidationError`.
+> Emit each reviewer in the **same assistant turn** with `subagent_type` set. Pass `"model": "<QUALITY_SLUG>"` for quality-tier reviewers; for risk-tier omit `"model"` when `RISK_SLUG` is empty. **Never** pass `claude-haiku-4-5`, `inherit`, or any other string — those cause `InputValidationError`.
 >
 > **Invocation template (6B — copy per selected reviewer, adjust `subagent_type` and `model`):**
 >
@@ -765,7 +463,7 @@ In **one assistant turn**, emit one parallel sub-agent invocation per selected r
 > }
 > ```
 >
-> For `security-reviewer` and `performance-reviewer`, omit `"model"` so they inherit the lead's model. Launch all selected reviewers in one turn — never sequentially.
+> For `security-reviewer` and `performance-reviewer`, omit `"model"` so they inherit the lead's model (unless `RISK_SLUG` is set). Launch all selected reviewers in one turn — never sequentially.
 
 Wait for all selected sub-agents to return, then go to step 7. **Do not** run `sed`/`git show`/`Read` on changed files yourself while waiting — that is simulating the reviewers (see anti-patterns below).
 
@@ -811,46 +509,41 @@ Aggregate all findings into the structured report format defined in `styles/repo
 - Consider the PR's stated intent when evaluating trade-offs
 - Group related issues together rather than repeating similar findings
 
-### Validate every finding's line number against the file (MANDATORY — do this before writing the report)
+### Validate line numbers, assign fids, reconcile prior findings (MANDATORY — scripts)
 
-This is the guard that keeps the **summary body** honest. Inline comments get a second chance to be corrected (GitHub `422`, Azure DevOps `400`, and the "Resolve every finding to a post-change file line" step), but the summary embeds the reviewer's `file:NN` text as-is — so an over-shot number like `:466` on a 322-line file sails straight into the report unless you check it here. Do the check **once**, and use the result for **both** the summary and the inline JSONL so they never disagree.
+After writing `/tmp/pr_inline_findings.jsonl` (and the summary body), run these as Bash calls — do **not** invent ad-hoc `sed`/`wc` loops:
 
-For each finding:
+```bash
+resolve_script() {
+  local name="$1" candidate="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/$name}"
+  if [ -n "${candidate:-}" ] && [ -f "$candidate" ]; then echo "$candidate"; return; fi
+  find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path "*/pr-reviewer/scripts/${name}" 2>/dev/null | head -1
+}
+bash "$(resolve_script assign-fids.sh)"              # fill missing fid
+bash "$(resolve_script validate-findings.sh)"        # re-anchor / drop bad lines
+bash "$(resolve_script reconcile-prior-findings.sh)" # fid buckets + dedup
+# shellcheck disable=SC1091
+source /tmp/pr_state.env
+```
 
-1. Compute the file's new-side length: `LINES=$(git show ${HEAD_SHA}:<file> | wc -l)`.
-2. If `NN > LINES`, or the code at `<file>:NN` (`git show ${HEAD_SHA}:<file> | sed -n "${NN}p"`) does not contain the snippet the finding describes, the number is wrong. Re-anchor it: find the flagged line in `/tmp/pr_full_diff_numbered.patch` and use the number printed in its margin. If the finding is genuinely unlocatable in the new file (e.g. it only described deleted code), drop it rather than cite a fabricated line.
-3. Carry the corrected `NN` into the report body **and** the inline JSONL — the summary line reference and the inline comment for the same finding must be identical.
+**What each script does**
 
-A finding whose line cannot be validated to a real, in-range line in the changed file must not appear in the report with a made-up number.
+| Script | Purpose |
+|---|---|
+| `assign-fids.sh` | `fid = sha1(path\|normalised issue)[:12]` for every finding missing `fid` |
+| `validate-findings.sh` | Drop or re-anchor findings whose `line` is past EOF or unlocatable in `/tmp/pr_full_diff_numbered.patch` / `HEAD` |
+| `reconcile-prior-findings.sh` | Compare current vs `/tmp/pr_prior_findings.jsonl` **by `fid`** → `fixed` / `carried_over` / `new`; line±5 dedup against open threads; writes `/tmp/pr_rereview_delta.md` in re-review mode |
 
-### Assign a `fid` to every current finding
-
-For each finding in the compiled report, compute its `fid` with the `compute_fid` helper (see *Comment markers and finding identity*) from its file path and issue summary sentence. This is required in **both** modes — the markers written this run are what the *next* run reconciles against.
-
-### Reconcile against the prior review (re-review mode only)
-
-When `REVIEW_MODE=rereview`, classify by comparing the current finding set to `/tmp/pr_prior_findings.jsonl` **by `fid`**:
-
-| Bucket | Condition | Posting action (see "Posting the Review") |
+| Bucket (re-review) | Condition | Posting action |
 |---|---|---|
-| **Carried-over** | prior `fid` is still in the current finding set | Leave the existing thread open. **Do not post a duplicate.** |
-| **Fixed** | prior `fid` (status `open`) is **absent** from the current finding set | Reply "resolved as of `<HEAD_SHA>`" on the existing thread and mark it resolved. |
-| **New** | current `fid` not present in the prior set | Post a new inline thread (with marker). |
-| **Already-resolved** | prior `fid` whose thread is already resolved | Ignore — no action. |
+| **Carried-over** | prior `fid` still in current set | Leave thread open — **no duplicate** |
+| **Fixed** | prior open `fid` absent from current set | Reply + resolve |
+| **New** | current `fid` not in prior set | Post new inline thread |
+| **Already-resolved** | prior thread already resolved | Ignore |
 
-Write the three actionable buckets to `/tmp/pr_reconcile.json` (`{"fixed":[...], "carried_over":[...], "new":[...]}`, each entry keyed by `fid` with its `thread_ref`/`comment_ref` from the prior file) so the posting step can act on them without recomputing.
+Prepend `/tmp/pr_rereview_delta.md` into the report body when present. In **initial mode** the reconcile script treats every finding as New. Keep the summary body's `file:NN` references in sync with the validated JSONL.
 
-Then prepend a **Re-review delta** block to the report body (above the Summary), using the template's re-review section:
-
-```
-### Re-review delta
-Reviewed N new commit(s) since the last review (`<RANGE_BASE>`..`<HEAD_SHA>`).
-- ✅ Fixed: <count> previously-flagged issue(s) resolved
-- ⏳ Still open: <count> carried-over issue(s)
-- 🆕 New: <count> issue(s) introduced since the last review
-```
-
-In **initial mode** skip plugin-fid reconciliation entirely — every finding starts as "New" and there is no re-review delta block. External-thread validation (next section) still runs in both modes.
+A finding whose line cannot be validated must not appear with a made-up number — the validate script drops those.
 
 ### Reconcile against existing open review threads (initial and re-review)
 
@@ -908,23 +601,17 @@ One commit per logical fix. Commit message format: `fix: <description>`.
 
 ### 3. Push to the PR branch
 
-The run executes in a temporary Docker container with no stored git credentials, and the `PreToolUse` hook cannot export variables into your shell (it only validates that the token exists). Carry the token **inline on the push command itself** via env-scoped git config:
+The run executes in a temporary Docker container with no stored git credentials, and the `PreToolUse` hook cannot export variables into your shell (it only validates that the token exists). **Run `scripts/push-fixes.sh` as one Bash call** — do not invent credential helpers that write tokens to disk or echo them into the transcript:
 
 ```bash
-REMOTE_URL=$(git remote get-url origin)
-REMOTE_HOST=$(echo "$REMOTE_URL" | sed -E 's|^[a-z+]+://||; s|^[^@/]+@||; s|[:/].*$||')
-case "$REMOTE_URL" in
-  *dev.azure.com*|*visualstudio.com*) PUSH_TOKEN="${AZURE_DEVOPS_TOKEN}" ;;
-  *)                                  PUSH_TOKEN="${GITHUB_TOKEN}" ;;
-esac
-
-GIT_CONFIG_COUNT=1 \
-GIT_CONFIG_KEY_0="url.https://x-access-token:${PUSH_TOKEN}@${REMOTE_HOST}/.insteadOf" \
-GIT_CONFIG_VALUE_0="https://${REMOTE_HOST}/" \
-git push origin HEAD
+PUSH="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/push-fixes.sh}"
+if [ -z "${PUSH:-}" ] || [ ! -f "$PUSH" ]; then
+  PUSH=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/push-fixes.sh' 2>/dev/null | head -1)
+fi
+bash "$PUSH"
 ```
 
-The `GIT_CONFIG_*` prefix scopes the credential to this single command — nothing is written to disk or `~/.gitconfig`, and nothing needs to persist in the throwaway container.
+The script scopes the token to a single `git push` via `GIT_CONFIG_*` — nothing is written to disk or `~/.gitconfig`.
 
 ### 4. Post a fix summary comment
 
@@ -997,9 +684,9 @@ If a finding has no ` ```suggestion ` block, omit `suggestion_start_line` and `s
 
 The reviewers were already instructed (step 6) to return post-change line numbers, but verify here — a wrong line number is the single most common cause of silently dropped inline comments.
 
-Read and follow the instructions in the appropriate provider file:
-- **GitHub** → `providers/github.md`
-- **Azure DevOps** → run `scripts/ado-post-review.sh` (see `providers/azure-devops.md` → *Posting the Review*). Set `VERDICT` and `REVIEW_MODE`, ensure `/tmp/pr_thread_body.md` and `/tmp/pr_inline_findings.jsonl` exist, then execute as **one** `Bash` call. Do **not** invent a shortened curl script — bare custom thread properties are a common cause of the summary comment never appearing. Never hand-build URLs with `AZURE_DEVOPS_ORG` / `PR_NUMBER` — use `source /tmp/pr_azure.env` and `PR_ID`.
+Read and follow the instructions in the appropriate provider file — prefer the **plugin scripts** as one Bash call:
+- **GitHub** → run `scripts/gh-post-review.sh` (see `providers/github.md` → *Posting the final review*). Set `VERDICT` and `REVIEW_MODE`, ensure `/tmp/pr_thread_body.md` and `/tmp/pr_inline_findings.jsonl` exist. Do **not** invent ad-hoc `gh api` loops.
+- **Azure DevOps** → run `scripts/ado-post-review.sh` (see `providers/azure-devops.md` → *Posting the Review*). Set `VERDICT` and `REVIEW_MODE`, ensure `/tmp/pr_thread_body.md` and `/tmp/pr_inline_findings.jsonl` exist. Do **not** invent a shortened curl script — bare custom thread properties are a common cause of the summary comment never appearing. Never hand-build URLs with `AZURE_DEVOPS_ORG` / `PR_NUMBER` — use `source /tmp/pr_azure.env` and `PR_ID`.
 - **Bitbucket or Unknown Platform** → `providers/generic.md`
 
 > **Blocking vs non-blocking on CRITICAL findings:** by **default** a `REQUEST CHANGES` verdict is posted as a *non-blocking* review (GitHub `--comment`, Azure DevOps vote `-5`) so the plugin runs in advisory / shadow mode out of the box. To make `REQUEST CHANGES` *blocking* (GitHub `--request-changes`, Azure DevOps vote `-10`), set `PR_REVIEWER_BLOCK_ON_CRITICAL=true`. Verdict, report body, and inline comments are identical in both modes — only the platform-side review type changes. Provider files contain the exact mapping logic.
