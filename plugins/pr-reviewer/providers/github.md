@@ -57,12 +57,11 @@ GitHub's REST review-comments endpoint returns comment bodies and ids but **not*
 **Prefer the plugin script (one Bash call):**
 
 ```bash
-GH_DETECT="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/gh-detect-prior.sh}"
-if [ -z "${GH_DETECT:-}" ] || [ ! -f "$GH_DETECT" ]; then
-  GH_DETECT=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/gh-detect-prior.sh' 2>/dev/null | head -1)
-fi
-[ -n "${GH_DETECT:-}" ] && [ -f "$GH_DETECT" ] || {
-  echo "ERROR: scripts/gh-detect-prior.sh not found — refuse to invent a GraphQL dump" >&2
+# shellcheck disable=SC1091
+[ -f /tmp/pr_plugin.env ] && source /tmp/pr_plugin.env
+GH_DETECT="${CLAUDE_PLUGIN_ROOT}/scripts/gh-detect-prior.sh"
+[ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "$GH_DETECT" ] || {
+  echo "ERROR: scripts/gh-detect-prior.sh not found — source /tmp/pr_plugin.env from step 0; refuse to invent a GraphQL dump" >&2
   exit 1
 }
 # PR_NUMBER from /tmp/pr_state.env or the invocation argument
@@ -82,12 +81,11 @@ If `/tmp/pr_prior_findings.jsonl` is empty, the run is an **initial** review. Th
 **Prefer the plugin script (one Bash call):**
 
 ```bash
-GH_START="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/gh-start-comment.sh}"
-if [ -z "${GH_START:-}" ] || [ ! -f "$GH_START" ]; then
-  GH_START=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/gh-start-comment.sh' 2>/dev/null | head -1)
-fi
-[ -n "${GH_START:-}" ] && [ -f "$GH_START" ] || {
-  echo "ERROR: scripts/gh-start-comment.sh not found" >&2
+# shellcheck disable=SC1091
+[ -f /tmp/pr_plugin.env ] && source /tmp/pr_plugin.env
+GH_START="${CLAUDE_PLUGIN_ROOT}/scripts/gh-start-comment.sh"
+[ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "$GH_START" ] || {
+  echo "ERROR: scripts/gh-start-comment.sh not found — source /tmp/pr_plugin.env from step 0" >&2
   exit 1
 }
 # PR_NUMBER from the invocation argument or /tmp/pr_state.env
@@ -105,12 +103,11 @@ If posting fails, output one warning line and continue.
 **Do not reinvent this flow.** Agents that invent shortened `gh api` / `gh pr review` snippets skip markers, self-review handling, sub-steps R/E, or the inline loop.
 
 ```bash
-GH_POST="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/gh-post-review.sh}"
-if [ -z "${GH_POST:-}" ] || [ ! -f "$GH_POST" ]; then
-  GH_POST=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/gh-post-review.sh' 2>/dev/null | head -1)
-fi
-[ -n "${GH_POST:-}" ] && [ -f "$GH_POST" ] || {
-  echo "ERROR: scripts/gh-post-review.sh not found — refuse to invent a posting script" >&2
+# shellcheck disable=SC1091
+[ -f /tmp/pr_plugin.env ] && source /tmp/pr_plugin.env
+GH_POST="${CLAUDE_PLUGIN_ROOT}/scripts/gh-post-review.sh"
+[ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "$GH_POST" ] || {
+  echo "ERROR: scripts/gh-post-review.sh not found — source /tmp/pr_plugin.env from step 0; refuse to invent a posting script" >&2
   exit 1
 }
 

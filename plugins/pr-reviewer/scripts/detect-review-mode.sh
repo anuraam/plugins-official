@@ -36,7 +36,10 @@ fi
 
 resolve_script() {
   local name="$1"
-  local candidate="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/$name}"
+  local candidate cand
+  # shellcheck disable=SC1091
+  [ -f /tmp/pr_plugin.env ] && source /tmp/pr_plugin.env
+  candidate="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/$name}"
   if [ -n "${candidate:-}" ] && [ -f "$candidate" ]; then
     echo "$candidate"
     return 0
@@ -45,7 +48,21 @@ resolve_script() {
     echo "${SCRIPT_DIR}/${name}"
     return 0
   fi
-  find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path "*/pr-reviewer/scripts/${name}" 2>/dev/null | head -1
+  for cand in \
+    ${CLAUDE_CONFIG_DIR:+$CLAUDE_CONFIG_DIR/plugins/cache/*/pr-reviewer/*/scripts/$name} \
+    ${HOME:+$HOME/.claude/plugins/cache/*/pr-reviewer/*/scripts/$name} \
+    /workspace/repo/xianix-claude-config/plugins/cache/*/pr-reviewer/*/scripts/"$name"
+  do
+    [ -f "$cand" ] || continue
+    echo "$cand"
+    return 0
+  done
+  find \
+    ${CLAUDE_PLUGIN_ROOT:+"$CLAUDE_PLUGIN_ROOT"} \
+    ${CLAUDE_CONFIG_DIR:+"$CLAUDE_CONFIG_DIR/plugins"} \
+    ${HOME:+"$HOME/.claude/plugins"} \
+    /workspace/repo/xianix-claude-config/plugins \
+    -path "*/pr-reviewer/scripts/${name}" 2>/dev/null | sort -V | tail -1
 }
 
 if [ "$PR_REVIEWER_RECONCILE" = "false" ] || [ "$PLATFORM" = "generic" ]; then

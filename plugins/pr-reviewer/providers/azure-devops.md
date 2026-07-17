@@ -176,12 +176,11 @@ Called from Step 3 of `commands/pr-review.md` to decide initial vs. re-review mo
 **Prefer the plugin script (one Bash call) — do not reinvent this flow.** Agents that invent `THREADS_JSON=$(curl …)` then `json.load` crash on 401 HTML / empty bodies. The script paginates with `x-ms-continuationtoken`, checks HTTP status before parsing JSON, and writes `/tmp/pr_prior.env` so `PRIOR_SUMMARY_SHA` survives across tool calls.
 
 ```bash
-ADO_DETECT="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/ado-detect-prior.sh}"
-if [ -z "${ADO_DETECT:-}" ] || [ ! -f "$ADO_DETECT" ]; then
-  ADO_DETECT=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/ado-detect-prior.sh' 2>/dev/null | head -1)
-fi
-[ -n "${ADO_DETECT:-}" ] && [ -f "$ADO_DETECT" ] || {
-  echo "ERROR: scripts/ado-detect-prior.sh not found — refuse to invent a threads curl" >&2
+# shellcheck disable=SC1091
+[ -f /tmp/pr_plugin.env ] && source /tmp/pr_plugin.env
+ADO_DETECT="${CLAUDE_PLUGIN_ROOT}/scripts/ado-detect-prior.sh"
+[ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "$ADO_DETECT" ] || {
+  echo "ERROR: scripts/ado-detect-prior.sh not found — source /tmp/pr_plugin.env from step 0; refuse to invent a threads curl" >&2
   exit 1
 }
 bash "$ADO_DETECT"
@@ -233,12 +232,11 @@ Before running any analysis, post a plain PR comment thread to inform the author
 **Prefer the plugin script (one Bash call)** — do **not** invent a shortened curl. The script parses the remote, resolves `PR_ID`, posts the thread, and writes `/tmp/pr_azure.env`:
 
 ```bash
-ADO_START="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/ado-start-comment.sh}"
-if [ -z "${ADO_START:-}" ] || [ ! -f "$ADO_START" ]; then
-  ADO_START=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/ado-start-comment.sh' 2>/dev/null | head -1)
-fi
-[ -n "${ADO_START:-}" ] && [ -f "$ADO_START" ] || {
-  echo "ERROR: scripts/ado-start-comment.sh not found — refuse to invent a starting-comment curl" >&2
+# shellcheck disable=SC1091
+[ -f /tmp/pr_plugin.env ] && source /tmp/pr_plugin.env
+ADO_START="${CLAUDE_PLUGIN_ROOT}/scripts/ado-start-comment.sh"
+[ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "$ADO_START" ] || {
+  echo "ERROR: scripts/ado-start-comment.sh not found — source /tmp/pr_plugin.env from step 0; refuse to invent a starting-comment curl" >&2
   exit 1
 }
 # Set PR_NUMBER from the numeric argument when provided; BRANCH_ARG when a branch was given
@@ -254,13 +252,11 @@ If posting the starting comment fails, output a single warning line and continue
 **Prefer the plugin script (one Bash call) — do not reinvent this flow.**
 
 ```bash
-# Resolve the script (CLAUDE_PLUGIN_ROOT is set when the plugin is active)
-ADO_POST="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/ado-post-review.sh}"
-if [ -z "${ADO_POST:-}" ] || [ ! -f "$ADO_POST" ]; then
-  ADO_POST=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/ado-post-review.sh' 2>/dev/null | head -1)
-fi
-[ -n "${ADO_POST:-}" ] && [ -f "$ADO_POST" ] || {
-  echo "ERROR: scripts/ado-post-review.sh not found — refuse to invent a posting script" >&2
+# shellcheck disable=SC1091
+[ -f /tmp/pr_plugin.env ] && source /tmp/pr_plugin.env
+ADO_POST="${CLAUDE_PLUGIN_ROOT}/scripts/ado-post-review.sh"
+[ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "$ADO_POST" ] || {
+  echo "ERROR: scripts/ado-post-review.sh not found — source /tmp/pr_plugin.env from step 0; refuse to invent a posting script" >&2
   exit 1
 }
 

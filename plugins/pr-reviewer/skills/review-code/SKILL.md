@@ -9,14 +9,12 @@ Run a focused code quality review of the current branch changes.
 
 ## Steps
 
-1. Gather the diff via **`scripts/pr-setup.sh` as one Bash call** (do not invent a shortened checkout/diff script):
+1. Gather the diff via **`scripts/pr-setup.sh` as one Bash call** (do not invent a shortened checkout/diff script). Resolve the plugin root first (see step 0 in `commands/pr-review.md` — Xianix Executor often leaves `CLAUDE_PLUGIN_ROOT` unset for Bash tools):
    ```bash
-   SETUP="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/pr-setup.sh}"
-   if [ -z "${SETUP:-}" ] || [ ! -f "$SETUP" ]; then
-     SETUP=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/pr-setup.sh' 2>/dev/null | head -1)
-   fi
+   # Use resolve_pr_script / remember_pr_plugin_root from commands/pr-review.md step 0,
+   # or: source /tmp/pr_plugin.env if a prior step already wrote it.
    # Optional: BRANCH_ARG=<branch-name>
-   bash "$SETUP"
+   bash "$CLAUDE_PLUGIN_ROOT/scripts/pr-setup.sh"
    source /tmp/pr_state.env
    ```
    That writes `/tmp/pr_full_diff_numbered.patch` and `/tmp/pr_changed_files.txt`.

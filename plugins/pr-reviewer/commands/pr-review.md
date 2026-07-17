@@ -83,12 +83,10 @@ On **GitHub** the marker is an HTML comment appended to the comment body — it 
 `fid` must be **deterministic** and **independent of line number** (lines drift as the author edits), so the same logical issue produces the same id on every run. Compute it from the file path plus a normalised issue signature via the plugin script:
 
 ```bash
-FID_SCRIPT="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/compute-fid.sh}"
-if [ -z "${FID_SCRIPT:-}" ] || [ ! -f "$FID_SCRIPT" ]; then
-  FID_SCRIPT=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/compute-fid.sh' 2>/dev/null | head -1)
-fi
+# shellcheck disable=SC1091
+[ -f /tmp/pr_plugin.env ] && source /tmp/pr_plugin.env
+FID=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/compute-fid.sh" "<file>" "<issue-summary-sentence>")
 # fid = first 12 hex of sha1( lowercased path + "|" + normalised issue text )
-FID=$(bash "$FID_SCRIPT" "<file>" "<issue-summary-sentence>")
 ```
 
 Use the **issue summary sentence** (not the code snippet, not the line) as the issue text. The same wording each run keeps the id stable; if the reviewer rephrases an issue slightly between runs it may be treated as new — acceptable, since the worst case is one duplicate rather than a missed regression.
@@ -98,6 +96,52 @@ Use the **issue summary sentence** (not the code snippet, not the line) as the i
 # Procedure
 
 When invoked with a PR number, branch name, or no argument (defaults to current branch vs main):
+
+## 0. Resolve plugin scripts (do this before any `scripts/*.sh` call)
+
+**Why:** In Xianix Executor / Claude Code Bash tools, `CLAUDE_PLUGIN_ROOT` is often **unset** (hooks get it; agent Bash often does not). The plugin may live under `CLAUDE_CONFIG_DIR` or `/workspace/repo/xianix-claude-config/plugins/cache/…` instead of `~/.claude/plugins`. A short `find` of only `.` + `~/.claude/plugins` fails → agents invent broken `curl` and the review dies.
+
+**Hard rule:** If a required script cannot be resolved, **STOP immediately**. Output the error. Do **not** invent ad-hoc `curl`/`gh` replacements for permissions, start-comment, setup, detect-prior, or post-review.
+
+Paste this helper **once** at the start of the first Bash call that needs a script (typically step 1b). It writes `/tmp/pr_plugin.env` so later Bash calls can `source` it:
+
+```bash
+# shellcheck disable=SC1091
+[ -f /tmp/pr_plugin.env ] && source /tmp/pr_plugin.env
+
+resolve_pr_script() {
+  local name="$1" cand
+  if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/scripts/${name}" ]; then
+    echo "${CLAUDE_PLUGIN_ROOT}/scripts/${name}"; return 0
+  fi
+  # Claude Code + Xianix Executor plugin caches (glob; pick any hit)
+  for cand in \
+    ${CLAUDE_CONFIG_DIR:+$CLAUDE_CONFIG_DIR/plugins/cache/*/pr-reviewer/*/scripts/$name} \
+    ${HOME:+$HOME/.claude/plugins/cache/*/pr-reviewer/*/scripts/$name} \
+    /workspace/repo/xianix-claude-config/plugins/cache/*/pr-reviewer/*/scripts/"$name" \
+    /workspace/*/xianix-claude-config/plugins/cache/*/pr-reviewer/*/scripts/"$name"
+  do
+    [ -f "$cand" ] || continue
+    echo "$cand"; return 0
+  done
+  find \
+    ${CLAUDE_PLUGIN_ROOT:+"$CLAUDE_PLUGIN_ROOT"} \
+    ${CLAUDE_CONFIG_DIR:+"$CLAUDE_CONFIG_DIR/plugins"} \
+    ${HOME:+"$HOME/.claude/plugins"} \
+    /workspace/repo/xianix-claude-config/plugins \
+    -path "*/pr-reviewer/scripts/${name}" 2>/dev/null | sort -V | tail -1
+}
+
+remember_pr_plugin_root() {
+  local script_path="$1" root
+  root="$(cd "$(dirname "$script_path")/.." && pwd)"
+  export CLAUDE_PLUGIN_ROOT="$root"
+  printf 'export CLAUDE_PLUGIN_ROOT=%q\n' "$root" > /tmp/pr_plugin.env
+  echo "CLAUDE_PLUGIN_ROOT=$root"
+}
+
+# Example — every later step: source /tmp/pr_plugin.env && bash "$CLAUDE_PLUGIN_ROOT/scripts/<name>.sh"
+```
 
 ## 1. Detect Platform (do this FIRST, before any other tool call)
 
@@ -159,15 +203,17 @@ If the underscored Azure alias is empty but a dashed `AZURE-DEVOPS-TOKEN` exists
 Before posting the starting comment, run **`scripts/check-permissions.sh` as one Bash call**. It verifies auth and the capabilities required to post a review (and warns when vote / fix-mode push may fail). Do **not** invent ad-hoc `gh auth` / `curl` probes.
 
 ```bash
-PERM="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/check-permissions.sh}"
-if [ -z "${PERM:-}" ] || [ ! -f "$PERM" ]; then
-  PERM=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/check-permissions.sh' 2>/dev/null | head -1)
-fi
+# Include the resolve_pr_script / remember_pr_plugin_root helpers from step 0 in this same Bash call.
+export PR_NUMBER="${PR_NUMBER:-}"   # set from the invocation argument
+PERM=$(resolve_pr_script check-permissions.sh)
 [ -n "${PERM:-}" ] && [ -f "$PERM" ] || {
   echo "ERROR: scripts/check-permissions.sh not found" >&2
+  echo "Searched CLAUDE_PLUGIN_ROOT=${CLAUDE_PLUGIN_ROOT:-unset} CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-unset} ~/.claude/plugins /workspace/repo/xianix-claude-config/plugins" >&2
+  echo "Do NOT invent a curl/gh permissions probe — stop the review." >&2
   exit 1
 }
-# Optional: PR_NUMBER=<n> FIX_MODE=true (when --fix)
+remember_pr_plugin_root "$PERM"
+# Optional: FIX_MODE=true (when --fix)
 bash "$PERM"
 # shellcheck disable=SC1091
 source /tmp/pr_permissions.env
@@ -193,11 +239,23 @@ Writes `/tmp/pr_permissions.env` (`PLATFORM`, `AUTH_OK`, `CAP_*`, `PERMISSIONS_W
 Immediately after the permissions check, post a comment so the PR author knows the review has started. **Do not read any files, do not run `find`/`ls`, do not index the codebase before this step.**
 
 Use the platform-appropriate **plugin script** as one `Bash` call — do not invent a shortened version:
-- **GitHub:** `scripts/gh-start-comment.sh` — see `providers/github.md` → *Posting the "review in progress" comment*
-- **Azure DevOps:** `scripts/ado-start-comment.sh` — parses the remote, resolves `PR_ID`, posts the thread, and writes `/tmp/pr_azure.env`. See `providers/azure-devops.md` → *Posting the Starting Comment*.
+
+```bash
+# shellcheck disable=SC1091
+[ -f /tmp/pr_plugin.env ] && source /tmp/pr_plugin.env
+export PR_NUMBER=…   # from the invocation
+case "$PLATFORM" in
+  github) bash "$CLAUDE_PLUGIN_ROOT/scripts/gh-start-comment.sh" ;;
+  azure)  bash "$CLAUDE_PLUGIN_ROOT/scripts/ado-start-comment.sh" ;;
+  *)      echo "Generic platform — skipping start comment" ;;
+esac
+```
+
+- **GitHub:** `scripts/gh-start-comment.sh` — see `providers/github.md`
+- **Azure DevOps:** `scripts/ado-start-comment.sh` — writes `/tmp/pr_azure.env`. See `providers/azure-devops.md`
 - **Generic / unknown platform:** Skip — no API available
 
-Set `PR_NUMBER` from the numeric argument (or `BRANCH_ARG` for a branch name) before running. Resolve the PR number from the argument first; only fall back to a CLI lookup inside the start-comment script if it was not provided.
+If `CLAUDE_PLUGIN_ROOT` is missing, re-run the step 0 resolver — **do not** hand-roll a starting-comment `curl`.
 
 If posting the starting comment fails, output a single warning line and continue — do not stop the review.
 
@@ -214,16 +272,14 @@ The diff is what matters. Resolve the base/head and pull the diff first — for 
 Set `PR_NUMBER` (numeric argument, if any) and `BRANCH_ARG` (branch name argument, if any) before running. You may leave `PLATFORM` unset — the script always resolves it from `origin` and normalizes executor aliases such as `azuredevops`. Canonical values inside the script are only `github`, `azure`, or `generic`. Then run **`scripts/pr-setup.sh` as a single `Bash` call** — do **not** invent a shortened checkout/diff script:
 
 ```bash
-SETUP="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/pr-setup.sh}"
-if [ -z "${SETUP:-}" ] || [ ! -f "$SETUP" ]; then
-  SETUP=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/pr-setup.sh' 2>/dev/null | head -1)
-fi
-[ -n "${SETUP:-}" ] && [ -f "$SETUP" ] || {
-  echo "ERROR: scripts/pr-setup.sh not found — refuse to invent a checkout/diff script" >&2
+# shellcheck disable=SC1091
+[ -f /tmp/pr_plugin.env ] && source /tmp/pr_plugin.env
+[ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "$CLAUDE_PLUGIN_ROOT/scripts/pr-setup.sh" ] || {
+  echo "ERROR: CLAUDE_PLUGIN_ROOT unset — re-run step 0/1b resolve (do NOT invent a checkout/diff script)" >&2
   exit 1
 }
 # PR_NUMBER / BRANCH_ARG already exported from the invocation argument
-bash "$SETUP"
+bash "$CLAUDE_PLUGIN_ROOT/scripts/pr-setup.sh"
 # shellcheck disable=SC1091
 source /tmp/pr_state.env
 ```
@@ -247,15 +303,9 @@ This is the one place reading platform PR comments is required, because it deter
 **Run `scripts/detect-review-mode.sh` as one Bash call** — it invokes the platform detect-prior script (`gh-detect-prior.sh` / `ado-detect-prior.sh`), decides `REVIEW_MODE` / `RANGE_BASE`, writes the incremental diff when needed, and appends mode vars to `/tmp/pr_state.env`. Do **not** invent a shortened `curl`/`gh` dump (Azure agents inventing `THREADS_JSON=$(curl …)` then `json.load` is a common crash on 401 HTML).
 
 ```bash
-MODE="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/detect-review-mode.sh}"
-if [ -z "${MODE:-}" ] || [ ! -f "$MODE" ]; then
-  MODE=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/detect-review-mode.sh' 2>/dev/null | head -1)
-fi
-[ -n "${MODE:-}" ] && [ -f "$MODE" ] || {
-  echo "ERROR: scripts/detect-review-mode.sh not found — refuse to invent a prior-review dump" >&2
-  exit 1
-}
-bash "$MODE"
+# shellcheck disable=SC1091
+[ -f /tmp/pr_plugin.env ] && source /tmp/pr_plugin.env
+bash "$CLAUDE_PLUGIN_ROOT/scripts/detect-review-mode.sh"
 # shellcheck disable=SC1091
 source /tmp/pr_state.env
 # also sources PRIOR_SUMMARY_SHA when present:
@@ -279,11 +329,9 @@ Every line these commands print lands in your context and is paid for on every s
 **Run `scripts/index-codebase.sh` as one Bash call** — do not invent an unbounded `find`/`ls` walk. It skips automatically when `CHANGED_COUNT ≤ 10`.
 
 ```bash
-INDEX="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/index-codebase.sh}"
-if [ -z "${INDEX:-}" ] || [ ! -f "$INDEX" ]; then
-  INDEX=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/index-codebase.sh' 2>/dev/null | head -1)
-fi
-bash "$INDEX"
+# shellcheck disable=SC1091
+[ -f /tmp/pr_plugin.env ] && source /tmp/pr_plugin.env
+bash "$CLAUDE_PLUGIN_ROOT/scripts/index-codebase.sh"
 ```
 
 If indexing was performed, use `Read` on key config/manifest files (`package.json`, `*.csproj`, `go.mod`) and `Grep` to locate patterns such as the main entry point, base classes, or shared utilities referenced by the changed files. Otherwise skip directly to step 5.
@@ -300,11 +348,9 @@ Before launching any agents:
 The review runs on the **cheap Haiku-finder path by default** (step 6A) and only **escalates to the full specialist reviewers** (step 6B) when the diff touches a high-risk surface. Detect high-risk changes from both the file list and the diff content:
 
 ```bash
-TIER="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/review-tier.sh}"
-if [ -z "${TIER:-}" ] || [ ! -f "$TIER" ]; then
-  TIER=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/review-tier.sh' 2>/dev/null | head -1)
-fi
-bash "$TIER"
+# shellcheck disable=SC1091
+[ -f /tmp/pr_plugin.env ] && source /tmp/pr_plugin.env
+bash "$CLAUDE_PLUGIN_ROOT/scripts/review-tier.sh"
 # shellcheck disable=SC1091
 source /tmp/pr_state.env   # REVIEW_TIER=haiku|specialists
 ```
@@ -420,16 +466,10 @@ Deeper coverage for high-risk diffs. Run `code-reviewer` **always**; gate the ot
 **Run the two gating scripts as Bash calls before launching agents** — do not invent your own skip logic or model-slug mapping:
 
 ```bash
-SELECT="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/select-reviewers.sh}"
-MODELS="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/resolve-models.sh}"
-if [ -z "${SELECT:-}" ] || [ ! -f "$SELECT" ]; then
-  SELECT=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/select-reviewers.sh' 2>/dev/null | head -1)
-fi
-if [ -z "${MODELS:-}" ] || [ ! -f "$MODELS" ]; then
-  MODELS=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/resolve-models.sh' 2>/dev/null | head -1)
-fi
-bash "$SELECT"
-bash "$MODELS"
+# shellcheck disable=SC1091
+[ -f /tmp/pr_plugin.env ] && source /tmp/pr_plugin.env
+bash "$CLAUDE_PLUGIN_ROOT/scripts/select-reviewers.sh"
+bash "$CLAUDE_PLUGIN_ROOT/scripts/resolve-models.sh"
 # shellcheck disable=SC1091
 source /tmp/pr_state.env
 # RUN_CODE / RUN_TEST / RUN_SECURITY / RUN_PERFORMANCE
@@ -514,14 +554,11 @@ Aggregate all findings into the structured report format defined in `styles/repo
 After writing `/tmp/pr_inline_findings.jsonl` (and the summary body), run these as Bash calls — do **not** invent ad-hoc `sed`/`wc` loops:
 
 ```bash
-resolve_script() {
-  local name="$1" candidate="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/$name}"
-  if [ -n "${candidate:-}" ] && [ -f "$candidate" ]; then echo "$candidate"; return; fi
-  find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path "*/pr-reviewer/scripts/${name}" 2>/dev/null | head -1
-}
-bash "$(resolve_script assign-fids.sh)"              # fill missing fid
-bash "$(resolve_script validate-findings.sh)"        # re-anchor / drop bad lines
-bash "$(resolve_script reconcile-prior-findings.sh)" # fid buckets + dedup
+# shellcheck disable=SC1091
+[ -f /tmp/pr_plugin.env ] && source /tmp/pr_plugin.env
+bash "$CLAUDE_PLUGIN_ROOT/scripts/assign-fids.sh"              # fill missing fid
+bash "$CLAUDE_PLUGIN_ROOT/scripts/validate-findings.sh"        # re-anchor / drop bad lines
+bash "$CLAUDE_PLUGIN_ROOT/scripts/reconcile-prior-findings.sh" # fid buckets + dedup
 # shellcheck disable=SC1091
 source /tmp/pr_state.env
 ```
@@ -604,11 +641,9 @@ One commit per logical fix. Commit message format: `fix: <description>`.
 The run executes in a temporary Docker container with no stored git credentials, and the `PreToolUse` hook cannot export variables into your shell (it only validates that the token exists). **Run `scripts/push-fixes.sh` as one Bash call** — do not invent credential helpers that write tokens to disk or echo them into the transcript:
 
 ```bash
-PUSH="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/push-fixes.sh}"
-if [ -z "${PUSH:-}" ] || [ ! -f "$PUSH" ]; then
-  PUSH=$(find "${CLAUDE_PLUGIN_ROOT:-.}" ~/.claude/plugins -path '*/pr-reviewer/scripts/push-fixes.sh' 2>/dev/null | head -1)
-fi
-bash "$PUSH"
+# shellcheck disable=SC1091
+[ -f /tmp/pr_plugin.env ] && source /tmp/pr_plugin.env
+bash "$CLAUDE_PLUGIN_ROOT/scripts/push-fixes.sh"
 ```
 
 The script scopes the token to a single `git push` via `GIT_CONFIG_*` — nothing is written to disk or `~/.gitconfig`.
