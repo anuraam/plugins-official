@@ -17,8 +17,7 @@
 #   /tmp/pr_threads.json
 #   /tmp/pr_prior_findings.jsonl
 #   /tmp/pr_open_threads.jsonl
-#   /tmp/pr_prior.env          — PRIOR_SUMMARY_SHA=…, PRIOR_SUMMARY_THREAD_ID=…
-#                                 (source this; shell state does not persist)
+#   /tmp/pr_prior.env          — PRIOR_SUMMARY_SHA=… (source this; shell state does not persist)
 
 set -euo pipefail
 
@@ -180,10 +179,8 @@ prior.close()
 open_threads.close()
 PY
 
-# --- 5. Most-recent summary marker sha + thread id → /tmp/pr_prior.env ---
-# Thread id is needed so a same-sha re-trigger (cost gate) has somewhere to
-# post its no-op acknowledgment reply — see ado-noop-ack.sh.
-SUMMARY_INFO=$(python3 - <<'PY'
+# --- 5. Most-recent summary marker sha → /tmp/pr_prior.env ---
+PRIOR_SUMMARY_SHA=$(python3 - <<'PY'
 import json, re
 data = json.load(open("/tmp/pr_threads.json"))
 
@@ -197,25 +194,19 @@ for t in data.get("value", []):
     kind = prop(t.get("properties") or {}, "pr-reviewer.kind")
     published = (t.get("comments") or [{}])[0].get("publishedDate", "") or t.get("publishedDate", "")
     if kind == "summary" and sha:
-        summaries.append((published, sha, t["id"]))
+        summaries.append((published, sha))
         continue
     body = ((t.get("comments") or [{}])[0].get("content") or "")
     m = re.search(r"<!--\s*pr-reviewer:v1\.2\s+kind=summary\s+sha=([0-9a-fA-F]+)\s*-->", body)
     if m:
-        summaries.append((published, m.group(1), t["id"]))
+        summaries.append((published, m.group(1)))
 summaries.sort()
-if summaries:
-    print(f"{summaries[-1][1]}\t{summaries[-1][2]}")
-else:
-    print("\t")
+print(summaries[-1][1] if summaries else "")
 PY
 )
-PRIOR_SUMMARY_SHA="${SUMMARY_INFO%%$'\t'*}"
-PRIOR_SUMMARY_THREAD_ID="${SUMMARY_INFO##*$'\t'}"
 
 {
   printf 'PRIOR_SUMMARY_SHA=%q\n' "${PRIOR_SUMMARY_SHA}"
-  printf 'PRIOR_SUMMARY_THREAD_ID=%q\n' "${PRIOR_SUMMARY_THREAD_ID}"
 } > /tmp/pr_prior.env
 
 PRIOR_COUNT=$(wc -l < /tmp/pr_prior_findings.jsonl | tr -d ' ')

@@ -165,7 +165,8 @@ assert_eq "already-resolved-and-gone: not in carried_over" "no" "$(bucket_has "$
 assert_eq "already-resolved-and-gone: not in reopened" "no" "$(bucket_has "$OUT1" reopened "$FID_RESOLVED_GONE")"
 assert_eq "new: current fid absent from prior" "yes" "$(bucket_has "$OUT1" new "$FID_NEW")"
 
-# --- Run 2: same-sha re-trigger (Gate A must force carried, even with no current findings) ---
+# --- Run 2: same-sha re-trigger, the everyday case now that re-triggers always
+#     run in full — Gate A must force carried even with no current findings ---
 CURRENT2="$WORK/run2_current.jsonl"
 PRIOR2="$WORK/run2_prior.jsonl"
 OPEN2="$WORK/run2_open.jsonl"
@@ -185,26 +186,6 @@ JSON
 
 assert_eq "Gate A blocks (same sha): forced to carried_over" "yes" "$(bucket_has "$OUT2" carried_over "$FID_REMOVED")"
 assert_eq "Gate A blocks (same sha): fixed bucket stays empty" "no" "$(bucket_has "$OUT2" fixed "$FID_REMOVED")"
-
-echo "=== detect-review-mode.sh no-op condition (logic mirror) ==="
-# detect-review-mode.sh's cost-gate condition can't be exercised end-to-end
-# here without live gh/curl network access (it dispatches to
-# gh-detect-prior.sh / ado-detect-prior.sh before this point ever runs). This
-# reproduces the exact condition from that script — keep it in sync if that
-# condition changes; promote it to a shared, sourceable function instead of
-# copy-pasting again if it drifts a second time.
-noop_condition() {
-  local review_mode="$1" head_sha="$2" prior_summary_sha="$3"
-  if [ "$review_mode" = "rereview" ] && [ -n "$prior_summary_sha" ] && [ "$head_sha" = "$prior_summary_sha" ]; then
-    echo true
-  else
-    echo false
-  fi
-}
-assert_eq "same sha -> noop" "true" "$(noop_condition rereview abc123 abc123)"
-assert_eq "different sha -> not noop" "false" "$(noop_condition rereview abc123 def456)"
-assert_eq "initial mode -> never noop" "false" "$(noop_condition initial abc123 abc123)"
-assert_eq "no prior summary sha -> not noop" "false" "$(noop_condition rereview abc123 "")"
 
 echo
 echo "Results: ${PASS} passed, ${FAIL} failed"

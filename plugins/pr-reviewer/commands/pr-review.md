@@ -323,27 +323,8 @@ source /tmp/pr_state.env
 If the script exits non-zero (missing token, HTTP 401, non-JSON body), **fix auth / env and re-run the script** — do not hand-roll a replacement curl.
 
 > **Why review the full PR diff, not just the increment?** The full diff (`/tmp/pr_full_diff.patch`) stays the authoritative input to the reviewers so the *current* finding set is always complete — an unresolved finding in a file the latest commits didn't touch must still be detected so it stays open. The incremental diff focuses your attention and drives the delta summary; it does not replace the full scan. Reconciliation (step 7 / posting) compares the current finding set to the prior one **by `fid`**, and also validates open external threads against `HEAD`.
-
-### Cost gate: skip re-analysis entirely when HEAD hasn't moved (mandatory)
-
-`detect-review-mode.sh` also exports `PR_REVIEWER_NOOP` to `/tmp/pr_state.env`: `true` when this is a re-review and `HEAD_SHA` is identical to `PRIOR_SUMMARY_SHA` (the sha the last review was posted against) — i.e. the trigger fired again with zero new commits. Check it **before** step 4:
-
-```bash
-# shellcheck disable=SC1091
-source /tmp/pr_state.env
-if [ "${PR_REVIEWER_NOOP:-false}" = "true" ]; then
-  [ -f /tmp/pr_plugin.env ] && source /tmp/pr_plugin.env
-  case "$PLATFORM" in
-    github) bash "$CLAUDE_PLUGIN_ROOT/scripts/gh-noop-ack.sh" ;;
-    azure)  bash "$CLAUDE_PLUGIN_ROOT/scripts/ado-noop-ack.sh" ;;
-    *)      echo "No new commits since the last review — nothing to re-analyze (generic platform, no comment posted)" ;;
-  esac
-  echo "No-op re-review on PR #${PR_NUMBER}: HEAD unchanged at ${HEAD_SHA} since the last review — skipped re-analysis."
-  exit 0
-fi
-```
-
-Do **not** proceed to step 4 (indexing), step 5 (tier selection), step 6 (sub-agent fan-out), or step 7 (reconciliation) when `PR_REVIEWER_NOOP=true` — the whole point is to intercept before any of that cost is paid. The acknowledgement comment carries **no marker**, so it can never be mistaken for a real review by the next run's prior-summary lookup.
+>
+> **A re-trigger with zero new commits still runs the full review — do not skip ahead.** `REVIEW_MODE=rereview` with `RANGE_BASE == HEAD_SHA` (an incremental range of zero commits) is not a signal to stop: finder sub-agents are non-deterministic, and a second pass over the same diff can surface a real issue the first pass missed. Continue to step 4 exactly as for any other re-review. This is safe because reconciliation is fid-based and content-derived (see *Comment markers and finding identity*): a re-found issue recomputes the same `fid` and is correctly folded into `carried_over` (no duplicate post), a genuinely new one gets a fresh `fid` and posts as `new`, and Gate A in `reconcile-prior-findings.sh` refuses to mark anything `fixed` when HEAD hasn't moved since the prior review.
 
 ## 4. Index the Codebase (skip on small PRs)
 

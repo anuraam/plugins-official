@@ -23,10 +23,12 @@
 # A prior "open" finding only moves to `fixed` after passing two gates:
 #   Gate A — HEAD_SHA must differ from PRIOR_SUMMARY_SHA (the sha the prior
 #            review was posted against). Same sha means no commit could
-#            possibly have fixed anything; force it to `carried_over` instead
-#            — this is a mechanical fallback for a same-sha re-trigger that
-#            reaches this script directly (the normal path short-circuits
-#            earlier via detect-review-mode.sh's PR_REVIEWER_NOOP gate).
+#            possibly have fixed anything; force it to `carried_over` instead.
+#            A re-trigger with zero new commits still runs a full re-review
+#            (finder sub-agents are non-deterministic — a second pass over the
+#            same diff can catch something the first pass missed), so this
+#            gate is the normal, load-bearing path on every same-sha run, not
+#            an edge case.
 #   Gate B — recompute fids for every line currently in the flagged file at
 #            HEAD_SHA (same formula as compute-fid.sh/assign-fids.sh) and
 #            confirm this fid is NOT among them. If it still reproduces
@@ -95,7 +97,11 @@ def fids_for_file(path):
 
 # Gate A only blocks when we can positively confirm HEAD hasn't moved since
 # the prior review — an unknown PRIOR_SUMMARY_SHA can't prove sameness, so it
-# doesn't block (there is simply nothing to gate on).
+# doesn't block (there is simply nothing to gate on). This is the everyday
+# case for a same-sha re-trigger, not a rare fallback: those runs are always
+# reviewed in full now (see commands/pr-review.md), and this is what stops a
+# same-sha rescan from ever marking something "fixed" just because this run's
+# finder happened not to re-notice it.
 gate_a_blocks = bool(head_sha) and bool(prior_summary_sha) and head_sha == prior_summary_sha
 
 def load_jsonl(path):
@@ -290,9 +296,18 @@ if [ "$REVIEW_MODE" = "rereview" ]; then
   if [ -n "${RANGE_BASE:-}" ] && [ -n "${HEAD_SHA:-}" ]; then
     COMMIT_COUNT=$(git rev-list --count "${RANGE_BASE}..${HEAD_SHA}" 2>/dev/null || echo 0)
   fi
+  if [ "$COMMIT_COUNT" -eq 0 ]; then
+    # Same-sha re-trigger: still a full re-review (not a no-op), since finder
+    # sub-agents are non-deterministic and a second pass can catch something
+    # the first pass missed — make that explicit rather than printing a
+    # confusing "0 new commits" line with no explanation.
+    DELTA_HEADLINE="Re-scanned \`${HEAD_SHA}\` (no new commits) — re-analysis can surface findings an earlier pass missed."
+  else
+    DELTA_HEADLINE="Reviewed ${COMMIT_COUNT} new commit(s) since the last review (\`${RANGE_BASE}\`..\`${HEAD_SHA}\`)."
+  fi
   cat > /tmp/pr_rereview_delta.md <<EOF
 ### Re-review delta
-Reviewed ${COMMIT_COUNT} new commit(s) since the last review (\`${RANGE_BASE}\`..\`${HEAD_SHA}\`).
+${DELTA_HEADLINE}
 - ✅ Fixed: ${FIXED_COUNT} previously-flagged issue(s) resolved
 - ⏳ Still open: ${CARRIED_COUNT} carried-over issue(s)
 - 🆕 New: ${NEW_COUNT} issue(s) introduced since the last review
