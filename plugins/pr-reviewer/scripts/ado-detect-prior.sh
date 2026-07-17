@@ -138,7 +138,7 @@ for t in data.get("value", []):
     kind = prop(props, "pr-reviewer.kind")
     # Fall back to body HTML marker when properties were stripped on create
     if not fid:
-        m = re.search(r"<!--\s*pr-reviewer:v1\s+kind=finding\s+fid=([0-9a-fA-F]+)", body)
+        m = re.search(r"<!--\s*pr-reviewer:v1\.2\s+kind=finding\s+fid=([0-9a-fA-F]+)", body)
         if m:
             fid = m.group(1)
             kind = kind or "finding"
@@ -197,7 +197,7 @@ for t in data.get("value", []):
         summaries.append((published, sha))
         continue
     body = ((t.get("comments") or [{}])[0].get("content") or "")
-    m = re.search(r"<!--\s*pr-reviewer:v1\s+kind=summary\s+sha=([0-9a-fA-F]+)\s*-->", body)
+    m = re.search(r"<!--\s*pr-reviewer:v1\.2\s+kind=summary\s+sha=([0-9a-fA-F]+)\s*-->", body)
     if m:
         summaries.append((published, m.group(1)))
 summaries.sort()

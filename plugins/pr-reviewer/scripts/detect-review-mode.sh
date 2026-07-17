@@ -15,6 +15,15 @@
 #   /tmp/pr_prior.env
 #   /tmp/pr_incremental_diff.patch  (re-review only, when RANGE_BASE != BASE_SHA)
 #   Appends REVIEW_MODE and RANGE_BASE to /tmp/pr_state.env
+#
+# A re-trigger with zero new commits (HEAD_SHA == PRIOR_SUMMARY_SHA) still runs
+# a full re-review, not a no-op: finder sub-agents are non-deterministic, so a
+# second pass over the same diff can catch something the first pass missed.
+# What keeps this safe is reconcile-prior-findings.sh's Gate A, which forces
+# any "fixed" candidate back to carried_over whenever HEAD hasn't moved since
+# the prior review — the code can't have been fixed if it hasn't changed —
+# while a genuinely new finding still gets its own (content-derived, so
+# duplicate-safe) fid and posts normally.
 
 set -euo pipefail
 
