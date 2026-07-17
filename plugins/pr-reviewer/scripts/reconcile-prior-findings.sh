@@ -63,6 +63,22 @@ current = load_jsonl(current_path)
 prior = load_jsonl(prior_path)
 open_threads = load_jsonl(open_path)
 
+# Enrich prior rows missing file/line from open_threads (same thread_ref)
+threads_by_ref = {}
+for t in open_threads:
+    ref = t.get("thread_ref") or t.get("thread_id")
+    if ref is not None:
+        threads_by_ref[ref] = t
+for p in prior:
+    if p.get("file") or p.get("path"):
+        continue
+    ref = p.get("thread_ref") or p.get("thread_id")
+    t = threads_by_ref.get(ref) if ref is not None else None
+    if t:
+        p["file"] = t.get("file") or t.get("path") or ""
+        if p.get("line") is None:
+            p["line"] = t.get("line")
+
 current_by_fid = {}
 for c in current:
     fid = c.get("fid")
