@@ -82,6 +82,8 @@ AZURE_DEVOPS_TOKEN=<your-pat> claude ...
 
 At the start of every review the plugin runs `scripts/check-permissions.sh`, which re-exports a dashed `AZURE-DEVOPS-TOKEN` if needed, probes `connectionData`, repo/PR read, and thread read, and **warns** when the reviewer/vote endpoint looks unauthorized (summary + inline comments can still succeed without Code Write).
 
+**Vote vs Code Write:** casting a reviewer vote needs Code (Write) *and* an identity Azure will accept on `PUT …/reviewers/{id}`. Note: `GET …/reviewers/{id}` returns **400** when the user is simply not on the PR reviewer list yet — that is normal and does **not** mean the identity is invalid. `check-permissions.sh` confirms vote capability with a temporary `vote:0` PUT (then deletes the probe row). Service/agent PATs that fail that PUT with 401/403 get `VOTE_BLOCK_REASON=authz` or `invalid_reviewer_identity`; use a PAT from a full AAD/org user who can be added as a PR reviewer.
+
 ### Credentials for `git push` (fix mode)
 
 The plugin reuses `AZURE_DEVOPS_TOKEN` for `git push` — no separate `GITHUB_TOKEN` is needed for Azure DevOps remotes. The push command carries the token via an inline `GIT_CONFIG_*` prefix (see `docs/git-auth.md`).

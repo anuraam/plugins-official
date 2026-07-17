@@ -230,19 +230,30 @@ check_azure() {
     return
   fi
   CAP_AUTH=true
-  AUTH_USER=$(python3 -c "
-import json
+  # Parse identity once — display name, id, account email, descriptor type
+  eval "$(python3 -c "
+import json, shlex
 d=json.load(open('$BODY'))
 u=d.get('authenticatedUser') or d.get('authorizedUser') or {}
-print(u.get('providerDisplayName') or u.get('uniqueName') or u.get('id') or '')
-" 2>/dev/null || true)
-  REVIEWER_ID=$(python3 -c "
-import json
-d=json.load(open('$BODY'))
-u=d.get('authenticatedUser') or d.get('authorizedUser') or {}
-print(u.get('id') or '')
-" 2>/dev/null || true)
-  ok "authenticated as ${AUTH_USER:-unknown}"
+props=u.get('properties') or {}
+account=''
+if isinstance(props, dict):
+    acc=props.get('Account') or {}
+    if isinstance(acc, dict):
+        account=acc.get('\$value') or ''
+    elif isinstance(acc, str):
+        account=acc
+desc=u.get('descriptor') or ''
+desc_type=desc.split(';')[0] if desc else ''
+print('AUTH_USER=' + shlex.quote(u.get('providerDisplayName') or u.get('uniqueName') or u.get('id') or ''))
+print('REVIEWER_ID=' + shlex.quote(u.get('id') or ''))
+print('AUTH_ACCOUNT=' + shlex.quote(account))
+print('AUTH_DESCRIPTOR_TYPE=' + shlex.quote(desc_type))
+" 2>/dev/null || true)"
+  ok "authenticated as ${AUTH_USER:-unknown}${AUTH_ACCOUNT:+ ($AUTH_ACCOUNT)}"
+  if [ -n "${AUTH_DESCRIPTOR_TYPE:-}" ]; then
+    echo "Identity descriptor: ${AUTH_DESCRIPTOR_TYPE}"
+  fi
   rm -f "$BODY"
 
   # 2. Code (Read) — repository GET
@@ -295,29 +306,80 @@ print(u.get('id') or '')
     CAP_COMMENT_WRITE=true
   fi
 
-  # 5. Vote capability — Code (Write) + reviewer identity
-  # Azure does not expose PAT scopes; probe a dry reviewer GET. PUT would mutate — skip.
+  # 5. Vote capability — valid PR-reviewer identity + Code (Write)
+  # Azure quirks (confirmed against real orgs):
+  #   GET  …/reviewers/{id} → 200 if already on the PR; **400 if not yet on the
+  #     list** even for a fully valid licensed user. Do NOT treat GET 400 as
+  #     "invalid identity".
+  #   PUT  …/reviewers/{id} with vote:0 is the reliable probe (adds no-vote
+  #     reviewer). We DELETE afterward to avoid leaving a side effect.
+  #   PUT 401/403 → authz / identity cannot vote (service PATs often land here).
+  VOTE_BLOCK_REASON=""
   if [ -n "${REVIEWER_ID:-}" ] && [ -n "$PR_PROBE" ]; then
     HTTP=$($CURL -sS -o /tmp/pr_perm_reviewer.json -w "%{http_code}" -u ":${AZURE_DEVOPS_TOKEN}" \
       "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_PROBE}/reviewers/${REVIEWER_ID}?api-version=7.1" || echo "000")
+    REV_MSG=$(python3 -c "
+import json
+try:
+  d=json.load(open('/tmp/pr_perm_reviewer.json'))
+  print((d.get('message') or '')[:200])
+except Exception:
+  print('')
+" 2>/dev/null || true)
     case "$HTTP" in
-      200|404)
-        # 404 = reviewer not on PR yet (normal); identity resolve worked
+      200)
         CAP_VOTE=true
-        ok "reviewer identity resolvable (vote likely possible if PAT has Code Write)"
+        ok "reviewer already on PR #${PR_PROBE} — vote path available"
+        ;;
+      400|404)
+        # Not on the reviewer list yet (normal). Confirm with a no-vote PUT, then remove.
+        echo "Reviewer GET HTTP ${HTTP} (not on PR list yet) — probing with vote:0 PUT…"
+        PUT_HTTP=$($CURL -sS -o /tmp/pr_perm_vote_probe.json -w "%{http_code}" \
+          -u ":${AZURE_DEVOPS_TOKEN}" -X PUT -H "Content-Type: application/json" \
+          -d "{\"vote\":0,\"id\":\"${REVIEWER_ID}\"}" \
+          "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_PROBE}/reviewers/${REVIEWER_ID}?api-version=7.1" \
+          || echo "000")
+        if echo "$PUT_HTTP" | grep -qE '^2'; then
+          CAP_VOTE=true
+          ok "vote probe PUT vote:0 succeeded (HTTP ${PUT_HTTP}) — identity can cast votes"
+          # Best-effort cleanup so we don't leave a no-vote reviewer row
+          $CURL -sS -o /dev/null -u ":${AZURE_DEVOPS_TOKEN}" -X DELETE \
+            "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_PROBE}/reviewers/${REVIEWER_ID}?api-version=7.1" \
+            >/dev/null 2>&1 || true
+        elif [ "$PUT_HTTP" = "401" ] || [ "$PUT_HTTP" = "403" ]; then
+          CAP_VOTE=false
+          VOTE_BLOCK_REASON=authz
+          warn "vote probe PUT HTTP ${PUT_HTTP} — need Code (Read & Write) and a licensed org user that can be a PR reviewer"
+          warn "authenticated as ${AUTH_USER:-unknown}${AUTH_ACCOUNT:+ ($AUTH_ACCOUNT)}; summary/inline may still post"
+        else
+          CAP_VOTE=false
+          VOTE_BLOCK_REASON=invalid_reviewer_identity
+          PUT_MSG=$(python3 -c "
+import json
+try:
+  print((json.load(open('/tmp/pr_perm_vote_probe.json')).get('message') or '')[:200])
+except Exception:
+  print('')
+" 2>/dev/null || true)
+          warn "vote probe PUT HTTP ${PUT_HTTP}${PUT_MSG:+ — $PUT_MSG}"
+          warn "PAT identity cannot cast PR votes (connectionData id=${REVIEWER_ID:0:8}…). Use a PAT from a full AAD/org user who can be added as a PR reviewer — Code Write alone may not be enough for service/agent identities."
+        fi
         ;;
       401|403)
         CAP_VOTE=false
-        warn "reviewer endpoint HTTP ${HTTP} — vote will likely fail (need Code Read & Write). Summary/inline threads may still post."
+        VOTE_BLOCK_REASON=authz
+        warn "reviewer endpoint HTTP ${HTTP} — vote will likely fail (need Code Read & Write, and a licensed org user). Summary/inline threads may still post."
         ;;
       *)
         CAP_VOTE=false
-        warn "reviewer probe HTTP ${HTTP} — vote may fail; continuing"
+        VOTE_BLOCK_REASON=unknown
+        warn "reviewer probe HTTP ${HTTP}${REV_MSG:+ — $REV_MSG} — vote may fail; continuing"
         ;;
     esac
   else
     if [ -z "${REVIEWER_ID:-}" ]; then
       warn "could not resolve reviewer id from connectionData — vote may be skipped"
+      VOTE_BLOCK_REASON=no_reviewer_id
     fi
     CAP_VOTE=false
   fi
@@ -334,7 +396,14 @@ print(u.get('id') or '')
   # co-scoped on standard PATs; surface the required scope list clearly.
   echo "Required PAT scopes: Code (Read & Write), Pull Request Threads (Read & Write), User Profile (Read)"
   if [ "$CAP_VOTE" = false ]; then
-    warn "without Code (Write) the summary + inline comments can still post, but the reviewer vote will be skipped (HTTP 401)"
+    case "${VOTE_BLOCK_REASON:-}" in
+      invalid_reviewer_identity)
+        warn "summary + inline comments can still post; reviewer VOTE will be skipped until the PAT belongs to a valid PR-reviewer identity (Code Write alone will not fix this)"
+        ;;
+      *)
+        warn "without a working vote path the summary + inline comments can still post, but the reviewer vote will be skipped"
+        ;;
+    esac
   fi
 }
 
@@ -368,6 +437,9 @@ WARN_JOINED=$(printf '%s | ' "${WARNINGS[@]+"${WARNINGS[@]}"}" | sed 's/ | $//')
   echo "export CAP_COMMENT_WRITE=$(printf %q "$CAP_COMMENT_WRITE")"
   echo "export CAP_VOTE=$(printf %q "$CAP_VOTE")"
   echo "export CAP_PUSH=$(printf %q "$CAP_PUSH")"
+  echo "export AUTH_ACCOUNT=$(printf %q "${AUTH_ACCOUNT:-}")"
+  echo "export AUTH_DESCRIPTOR_TYPE=$(printf %q "${AUTH_DESCRIPTOR_TYPE:-}")"
+  echo "export VOTE_BLOCK_REASON=$(printf %q "${VOTE_BLOCK_REASON:-}")"
   echo "export SCOPES_SEEN=$(printf %q "${SCOPES_SEEN:-}")"
   echo "export PERMISSIONS_WARNINGS=$(printf %q "${WARN_JOINED:-}")"
   echo "export HARD_FAIL=$(printf %q "$HARD_FAIL")"
