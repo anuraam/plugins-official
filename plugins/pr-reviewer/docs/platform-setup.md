@@ -19,6 +19,8 @@ For CI or scripts, set **`GH_TOKEN`** or **`GITHUB_TOKEN`** instead of interacti
 
 **Token scopes:** `repo` (private repos) or `public_repo` (public repos only), `read:org` (optional).
 
+At the start of every review the plugin runs `scripts/check-permissions.sh`, which authenticates via `gh` / `GH_TOKEN`, confirms repo (and PR) read access, and verifies classic PAT scopes include `repo` or `public_repo`. Fine-grained tokens are capability-probed instead of scope-listed.
+
 The plugin does **not** use the GitHub MCP server. See `providers/github.md` for `gh` usage.
 
 ### Credentials for `git push` (fix mode)
@@ -77,6 +79,10 @@ AZURE_DEVOPS_TOKEN=<your-pat> claude ...
 - `Code` → Read & Write (`vso.code_write` — required to cast the reviewer vote and for fix-mode `git push`; Read alone is not enough)
 - `Pull Request Threads` → Read & Write
 - `User Profile` → Read (required to resolve the reviewer ID for casting the vote)
+
+At the start of every review the plugin runs `scripts/check-permissions.sh`, which re-exports a dashed `AZURE-DEVOPS-TOKEN` if needed, probes `connectionData`, repo/PR read, and thread read, and **warns** when the reviewer/vote endpoint looks unauthorized (summary + inline comments can still succeed without Code Write).
+
+**Vote vs Code Write:** casting a reviewer vote needs Code (Write) *and* an identity Azure will accept on `PUT …/reviewers/{id}`. Note: `GET …/reviewers/{id}` returns **400** when the user is simply not on the PR reviewer list yet — that is normal and does **not** mean the identity is invalid. `check-permissions.sh` confirms vote capability with a temporary `vote:0` PUT (then deletes the probe row). Service/agent PATs that fail that PUT with 401/403 get `VOTE_BLOCK_REASON=authz` or `invalid_reviewer_identity`; use a PAT from a full AAD/org user who can be added as a PR reviewer.
 
 ### Credentials for `git push` (fix mode)
 

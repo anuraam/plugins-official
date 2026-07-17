@@ -39,7 +39,7 @@ fi
 PR_ID="${PR_ID:-${PR_NUMBER:-}}"
 [ -n "$PR_ID" ] && [ -n "${API_BASE:-}" ] && [ -n "${AZURE_REPO:-}" ] || {
   echo "ERROR: detect prior review needs /tmp/pr_azure.env (API_BASE, AZURE_REPO, PR_ID)" >&2
-  echo "Run the Azure starting-comment script first (providers/azure-devops.md)." >&2
+  echo "Run scripts/ado-start-comment.sh first (or parse the remote via lib-azure-remote.sh)." >&2
   exit 1
 }
 
@@ -145,26 +145,29 @@ for t in data.get("value", []):
     is_plugin = kind == "finding" and bool(fid)
     status = t.get("status", "active")
     resolved = status in RESOLVED
-    if is_plugin:
-        prior.write(json.dumps({
-            "fid": fid,
-            "status": "resolved" if resolved else "open",
-            "thread_ref": t["id"],
-        }) + "\n")
     ctx = t.get("threadContext") or {}
-    file_path = ctx.get("filePath") or ""
-    if resolved or not file_path:
-        continue
-    author = ((first.get("author") or {}) or {}).get("displayName") or \
-             ((first.get("author") or {}) or {}).get("uniqueName") or ""
+    file_path = (ctx.get("filePath") or "").lstrip("/")
     line = None
     for side in ("rightFileStart", "leftFileStart"):
         loc = ctx.get(side) or {}
         if loc.get("line"):
             line = loc["line"]
             break
+    if is_plugin:
+        prior.write(json.dumps({
+            "fid": fid,
+            "file": file_path,
+            "line": line,
+            "status": "resolved" if resolved else "open",
+            "thread_ref": t["id"],
+            "comment_ref": first.get("id"),
+        }) + "\n")
+    if resolved or not file_path:
+        continue
+    author = ((first.get("author") or {}) or {}).get("displayName") or \
+             ((first.get("author") or {}) or {}).get("uniqueName") or ""
     open_threads.write(json.dumps({
-        "file": file_path.lstrip("/"),
+        "file": file_path,
         "line": line,
         "body": body,
         "author": author,

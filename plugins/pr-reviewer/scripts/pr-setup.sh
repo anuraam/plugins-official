@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+# pr-setup.sh — platform detect, PR/branch checkout, base/head resolution, diffs.
+#
+# Why this exists as a real script (not just markdown): agents invent shortened
+# checkout/diff flows that leave HEAD on the default branch or use a stale base.
+# Run this file instead of retyping.
+#
+# Usage:
+#   PR_NUMBER=123 bash "${CLAUDE_PLUGIN_ROOT}/scripts/pr-setup.sh"
+#   BRANCH_ARG=feature/foo bash "${CLAUDE_PLUGIN_ROOT}/scripts/pr-setup.sh"
+#
+# Inputs:
+#   PR_NUMBER / BRANCH_ARG  — optional; leave both empty for current branch vs default
+#   PLATFORM                — optional hint (normalized; origin is authoritative)
+#   AZURE_DEVOPS_TOKEN      — required for Azure PR metadata / checkout fallback
+#   gh CLI                  — required for GitHub PR metadata
+#   /tmp/pr_azure.env       — optional; written by ado-start-comment.sh
+#
+# Outputs:
+#   /tmp/pr_state.env
+#   /tmp/pr_changed_files.txt
+#   /tmp/pr_full_diff.patch
+#   /tmp/pr_full_diff_numbered.patch
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib-azure-remote.sh"
+
+# --- 0. Resolve PLATFORM from origin (authoritative). Never default to github. ---
+REMOTE_URL=$(git remote get-url origin 2>/dev/null || echo "")
+[ -n "$REMOTE_URL" ] || { echo "ERROR: no git remote 'origin' — cannot detect platform" >&2; exit 1; }
+case "$REMOTE_URL" in
+  *github.com*) DETECTED=github ;;
+  *dev.azure.com*|*visualstudio.com*) DETECTED=azure ;;
+  *) DETECTED=generic ;;
+esac
+# Strip case/hyphen/underscore so azuredevops, azure-devops, azure_devops, ADO → azure
+PLATFORM_HINT_RAW="${PLATFORM:-}"
+case "$(printf '%s' "$PLATFORM_HINT_RAW" | tr '[:upper:]' '[:lower:]' | tr -d '_-')" in
+  azuredevops|ado|azure) PLATFORM_HINT=azure ;;
+  github|gh) PLATFORM_HINT=github ;;
+  bitbucket|generic) PLATFORM_HINT=generic ;;
+  "") PLATFORM_HINT="" ;;
+  *) PLATFORM_HINT="$PLATFORM_HINT_RAW" ;;
+esac
+if [ -n "$PLATFORM_HINT" ] && [ "$PLATFORM_HINT" != "$DETECTED" ]; then
+  echo "WARN: PLATFORM hint '${PLATFORM_HINT_RAW}' (normalized=${PLATFORM_HINT}) disagrees with origin (${DETECTED}) — using origin" >&2
+fi
+PLATFORM="$DETECTED"
+export PLATFORM
+echo "PLATFORM=${PLATFORM} (from origin; env hint was '${PLATFORM_HINT_RAW:-unset}')"
+CHECKED_OUT=""
+
+# --- 1. Checkout the revision under review ---
+if [ -n "${PR_NUMBER:-}" ]; then
+  case "$PLATFORM" in
+    azure*) CANDIDATE_REFS="refs/pull/${PR_NUMBER}/merge refs/pull/${PR_NUMBER}/head" ;;
+    *)      CANDIDATE_REFS="refs/pull/${PR_NUMBER}/head refs/pull/${PR_NUMBER}/merge" ;;
+  esac
+  for ref in $CANDIDATE_REFS; do
+    if git fetch origin "$ref" 2>/dev/null; then
+      git checkout --detach FETCH_HEAD
+      CHECKED_OUT="$ref"
+      break
+    fi
+  done
+  if [ -z "$CHECKED_OUT" ]; then
+    echo "WARN: no synthetic PR ref found — resolving source branch via platform API" >&2
+    case "$PLATFORM" in
+      azure*)
+        if [ -f /tmp/pr_azure.env ]; then
+          # shellcheck disable=SC1091
+          source /tmp/pr_azure.env
+        fi
+        if [ -z "${API_BASE:-}" ] || [ -z "${AZURE_REPO:-}" ]; then
+          parse_azure_remote || exit 1
+        fi
+        PR_ID="${PR_ID:-${PR_NUMBER:-}}"
+        if [ -z "$PR_ID" ] || [ -z "${API_BASE:-}" ] || [ -z "${AZURE_REPO:-}" ]; then
+          echo "ERROR: Azure checkout fallback needs PR_NUMBER and a parsed API_BASE/AZURE_REPO" >&2
+          exit 1
+        fi
+        if [ -z "${AZURE_DEVOPS_TOKEN:-}" ]; then
+          echo "ERROR: AZURE_DEVOPS_TOKEN unset — cannot resolve Azure PR source branch" >&2
+          exit 1
+        fi
+        SRC=$(curl -sS -u ":${AZURE_DEVOPS_TOKEN}" \
+          "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests/${PR_ID}?api-version=7.1" \
+          | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('sourceRefName','').replace('refs/heads/',''))")
+        [ -n "$SRC" ] || { echo "ERROR: could not resolve Azure PR source branch for PR #${PR_ID}" >&2; exit 1; }
+        git fetch origin "refs/heads/${SRC}"
+        git checkout --detach FETCH_HEAD
+        CHECKED_OUT="refs/heads/${SRC}"
+        ;;
+      *)
+        SRC=$(gh pr view "$PR_NUMBER" --json headRefName --jq '.headRefName')
+        git fetch origin "refs/heads/${SRC}"
+        git checkout --detach FETCH_HEAD
+        CHECKED_OUT="refs/heads/${SRC}"
+        ;;
+    esac
+  fi
+  echo "Checked out PR #${PR_NUMBER} via ${CHECKED_OUT} at $(git rev-parse HEAD)"
+elif [ -n "${BRANCH_ARG:-}" ]; then
+  git fetch origin "$BRANCH_ARG"
+  git checkout --detach FETCH_HEAD
+  CHECKED_OUT="refs/heads/${BRANCH_ARG}"
+  echo "Checked out branch ${BRANCH_ARG} at $(git rev-parse HEAD)"
+fi
+
+# --- 2. Resolve target branch name ---
+if [ -n "${PR_NUMBER:-}" ]; then
+  case "$PLATFORM" in
+    azure*)
+      if [ -f /tmp/pr_azure.env ]; then
+        # shellcheck disable=SC1091
+        source /tmp/pr_azure.env
+      fi
+      if [ -z "${API_BASE:-}" ] || [ -z "${AZURE_REPO:-}" ]; then
+        echo "WARN: /tmp/pr_azure.env incomplete — re-parsing remote for Azure metadata" >&2
+        parse_azure_remote || exit 1
+      fi
+      PR_ID="${PR_ID:-${PR_NUMBER:-}}"
+      if [ -z "$PR_ID" ] || [ -z "${API_BASE:-}" ] || [ -z "${AZURE_REPO:-}" ]; then
+        echo "ERROR: Azure metadata needs PR_NUMBER and a parsed API_BASE/AZURE_REPO" >&2
+        exit 1
+      fi
+      if [ -z "${AZURE_DEVOPS_TOKEN:-}" ]; then
+        echo "ERROR: AZURE_DEVOPS_TOKEN unset — cannot fetch Azure PR metadata" >&2
+        exit 1
+      fi
+      PR_JSON=$(curl -sS -u ":${AZURE_DEVOPS_TOKEN}" \
+        "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests/${PR_ID}?api-version=7.1")
+      BASE=$(echo "$PR_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('targetRefName','').replace('refs/heads/',''))")
+      PR_HEAD_BRANCH=$(echo "$PR_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('sourceRefName','').replace('refs/heads/',''))")
+      EXPECTED_HEAD=$(echo "$PR_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('lastMergeSourceCommit',{}).get('commitId',''))")
+      PR_TITLE=$(echo "$PR_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('title',''))")
+      PR_BODY=$(echo "$PR_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('description','') or '')")
+      PR_AUTHOR=$(echo "$PR_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('createdBy',{}).get('displayName',''))")
+      ;;
+    *)
+      PR_METADATA=$(gh pr view "$PR_NUMBER" --json baseRefName,headRefName,headRefOid,title,body,author)
+      BASE=$(echo "$PR_METADATA" | jq -r '.baseRefName')
+      PR_HEAD_BRANCH=$(echo "$PR_METADATA" | jq -r '.headRefName')
+      PR_TITLE=$(echo "$PR_METADATA" | jq -r '.title')
+      PR_BODY=$(echo "$PR_METADATA" | jq -r '.body // ""')
+      PR_AUTHOR=$(echo "$PR_METADATA" | jq -r '.author.login')
+      EXPECTED_HEAD=$(echo "$PR_METADATA" | jq -r '.headRefOid')
+      ;;
+  esac
+else
+  BASE=$(git ls-remote --symref origin HEAD 2>/dev/null | awk '/^ref:/ {sub("refs/heads/","",$2); print $2}')
+  : "${BASE:=main}"
+  PR_TITLE=""
+  PR_BODY=""
+  PR_AUTHOR=""
+  EXPECTED_HEAD=""
+  PR_HEAD_BRANCH=""
+fi
+
+# --- 3. Resolve HEAD_SHA and fetch fresh base tip ---
+if [ "${CHECKED_OUT:-}" = "refs/pull/${PR_NUMBER:-}/merge" ]; then
+  HEAD_SHA=$(git rev-parse HEAD^2)
+else
+  HEAD_SHA=$(git rev-parse HEAD)
+fi
+
+if [ -n "${PR_NUMBER:-}" ] && [ -n "${EXPECTED_HEAD:-}" ] && [ "$HEAD_SHA" != "$EXPECTED_HEAD" ]; then
+  echo "ERROR: checked-out HEAD ($HEAD_SHA) does not match PR headRefOid ($EXPECTED_HEAD) — checkout failed" >&2
+  exit 1
+fi
+
+if git fetch origin "refs/heads/${BASE}" 2>/dev/null; then
+  BASE_TIP=$(git rev-parse FETCH_HEAD)
+else
+  echo "WARN: could not fetch origin/${BASE} — falling back to local refs, base may be stale" >&2
+  BASE_TIP=""
+  for candidate in "refs/remotes/origin/${BASE}" "refs/heads/${BASE}"; do
+    git show-ref --verify --quiet "$candidate" && { BASE_TIP=$(git rev-parse "$candidate"); break; }
+  done
+fi
+[ -n "$BASE_TIP" ] || { echo "ERROR: could not resolve base branch '${BASE}'" >&2; exit 1; }
+
+BASE_SHA=$(git merge-base "$BASE_TIP" "$HEAD_SHA")
+echo "Base: $BASE (tip $BASE_TIP -> merge-base $BASE_SHA)"
+echo "Head: $HEAD_SHA"
+
+# --- 4. Sanity check commit count (GitHub only; skip azure/generic) ---
+if [ -n "${PR_NUMBER:-}" ] && [ "$PLATFORM" = "github" ]; then
+  GIT_COMMIT_COUNT=$(git rev-list --count "${BASE_SHA}..${HEAD_SHA}")
+  GH_COMMIT_COUNT=$(gh pr view "$PR_NUMBER" --json commits --jq '.commits | length')
+  echo "Git commit count: $GIT_COMMIT_COUNT"
+  echo "GitHub commit count: $GH_COMMIT_COUNT"
+  if [ "$GIT_COMMIT_COUNT" -gt "$GH_COMMIT_COUNT" ]; then
+    echo "ERROR: git reports more commits than GitHub — base is stale; re-fetch origin/${BASE} and retry" >&2
+    exit 1
+  fi
+  echo "✓ Commit count OK (git=$GIT_COMMIT_COUNT, github=$GH_COMMIT_COUNT)"
+fi
+
+# --- 5. Generate diffs and metadata ---
+git log --oneline "${BASE_SHA}..${HEAD_SHA}"
+git diff --stat "${BASE_SHA}"..."${HEAD_SHA}"
+git diff --name-only "${BASE_SHA}"..."${HEAD_SHA}" | tee /tmp/pr_changed_files.txt
+git diff "${BASE_SHA}"..."${HEAD_SHA}" > /tmp/pr_full_diff.patch
+git log -1 --format="%an <%ae>" "${HEAD_SHA}"
+git log --format="%s%n%b" "${BASE_SHA}..${HEAD_SHA}"
+
+CHANGED_COUNT=$(wc -l < /tmp/pr_changed_files.txt | tr -d ' ')
+echo "Changed files: $CHANGED_COUNT"
+
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [ "$CURRENT_BRANCH" = "HEAD" ]; then
+  CURRENT_BRANCH=$(git branch --contains "$HEAD_SHA" \
+    | sed 's|^[* ] *||' | grep -v '^(' | head -1 || true)
+fi
+
+# --- 6. Annotate diff with post-change line numbers ---
+awk '
+  /^@@/ {
+    s = substr($0, index($0, "+") + 1); newln = s + 0
+    print "      | " $0; next
+  }
+  /^(diff |index |--- |\+\+\+ |new file|deleted file|similarity|rename |Binary )/ {
+    print "      | " $0; next
+  }
+  /^\+/ { printf "%5d |+%s\n", newln, substr($0, 2); newln++; next }
+  /^ /  { printf "%5d | %s\n", newln, substr($0, 2); newln++; next }
+  /^-/  { printf "    - |-%s\n", substr($0, 2); next }
+  { print "      | " $0 }
+' /tmp/pr_full_diff.patch > /tmp/pr_full_diff_numbered.patch
+echo "Annotated diff written: $(wc -l < /tmp/pr_full_diff_numbered.patch) lines"
+
+# --- 7. Persist state for later tool calls ---
+{
+  echo "PLATFORM=$PLATFORM"
+  echo "HEAD_SHA=$HEAD_SHA"
+  echo "BASE_SHA=$BASE_SHA"
+  echo "BASE=$BASE"
+  echo "BASE_TIP=$BASE_TIP"
+  echo "CHANGED_COUNT=$CHANGED_COUNT"
+  echo "CHECKED_OUT=$CHECKED_OUT"
+  printf 'PR_NUMBER=%q\n' "${PR_NUMBER:-}"
+  printf 'CURRENT_BRANCH=%q\n' "${CURRENT_BRANCH:-}"
+  printf 'PR_TITLE=%q\n' "${PR_TITLE:-}"
+  printf 'PR_BODY=%q\n' "${PR_BODY:-}"
+  printf 'PR_AUTHOR=%q\n' "${PR_AUTHOR:-}"
+  printf 'PR_HEAD_BRANCH=%q\n' "${PR_HEAD_BRANCH:-}"
+} > /tmp/pr_state.env
+echo "State written to /tmp/pr_state.env"

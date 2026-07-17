@@ -18,6 +18,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib-azure-remote.sh"
+
 : "${VERDICT:=NEEDS DISCUSSION}"
 : "${REVIEW_MODE:=initial}"
 
@@ -33,33 +37,7 @@ if [ -f /tmp/pr_azure.env ]; then
   source /tmp/pr_azure.env
 else
   echo "WARN: /tmp/pr_azure.env missing — re-parsing remote" >&2
-  REMOTE=$(git remote get-url origin)
-  if echo "$REMOTE" | grep -qE '(ssh\.dev\.azure\.com|vs-ssh\.visualstudio\.com)'; then
-    V3_PATH=$(echo "$REMOTE" | sed -E 's|^ssh://||; s|^[^@]+@||; s|^[^:/]+[:/]+||')
-    REMOTE="https://dev.azure.com/$(echo "$V3_PATH" | cut -d/ -f2)/$(echo "$V3_PATH" | cut -d/ -f3)/_git/$(echo "$V3_PATH" | cut -d/ -f4)"
-  fi
-  REMOTE_CLEAN=$(echo "$REMOTE" | sed -E 's|https?://[^@]+@|https://|; s|\.git$||')
-  AZURE_HOST=$(echo "$REMOTE_CLEAN" | awk -F/ '{print $3}')
-  PATH_PARTS=$(echo "$REMOTE_CLEAN" | awk -F/ '{for (i=4; i<=NF; i++) print $i}')
-  GIT_LINE=$(echo "$PATH_PARTS" | grep -nx '_git' | head -1 | cut -d: -f1 || true)
-  [ -n "$GIT_LINE" ] || { echo "ERROR: not an Azure DevOps git URL" >&2; exit 1; }
-  AZURE_PROJECT=$(echo "$PATH_PARTS" | sed -n "$((GIT_LINE - 1))p")
-  AZURE_REPO=$(echo    "$PATH_PARTS" | sed -n "$((GIT_LINE + 1))p")
-  if [ "$AZURE_HOST" = "dev.azure.com" ]; then
-    AZURE_ORG=$(echo "$PATH_PARTS" | sed -n '1p'); PREFIX_START=2
-    HOST_AND_ORG_PATH="https://dev.azure.com/${AZURE_ORG}"
-  else
-    AZURE_ORG=$(echo "$AZURE_HOST" | cut -d'.' -f1); PREFIX_START=1
-    HOST_AND_ORG_PATH="https://${AZURE_HOST}"
-  fi
-  PROJECT_LINE=$((GIT_LINE - 1))
-  if [ "$PROJECT_LINE" -gt "$PREFIX_START" ]; then
-    AZURE_COLLECTION=$(echo "$PATH_PARTS" | sed -n "${PREFIX_START},$((PROJECT_LINE - 1))p" | tr '\n' '/' | sed 's|/$||')
-    API_BASE="${HOST_AND_ORG_PATH}/${AZURE_COLLECTION}/${AZURE_PROJECT}"
-  else
-    AZURE_COLLECTION=""
-    API_BASE="${HOST_AND_ORG_PATH}/${AZURE_PROJECT}"
-  fi
+  parse_azure_remote || exit 1
 fi
 PR_ID="${PR_ID:-${PR_NUMBER:-}}"
 if [ -z "$PR_ID" ]; then
@@ -278,8 +256,8 @@ PY
     STATUS=$(echo "$RESP" | sed -n 's/^HTTP_STATUS://p')
     if echo "${STATUS:-}" | grep -qE '^2'; then echo ok >> /tmp/pr_resolved.log; else echo "fail $THREAD_ID HTTP ${STATUS:-?}" >> /tmp/pr_resolved.log; fi
   done
-  RESOLVED_OK=$(grep -c '^ok' /tmp/pr_resolved.log 2>/dev/null || echo 0)
-  RESOLVED_FAIL=$(grep -c '^fail' /tmp/pr_resolved.log 2>/dev/null || echo 0)
+  RESOLVED_OK=$(grep -c '^ok' /tmp/pr_resolved.log 2>/dev/null || true); RESOLVED_OK=${RESOLVED_OK:-0}
+  RESOLVED_FAIL=$(grep -c '^fail' /tmp/pr_resolved.log 2>/dev/null || true); RESOLVED_FAIL=${RESOLVED_FAIL:-0}
   export RESOLVED_OK RESOLVED_FAIL
   echo "Reconciled: ${RESOLVED_OK} prior finding(s) resolved (${RESOLVED_FAIL} failed)"
 fi
@@ -308,8 +286,8 @@ PY
     STATUS=$(echo "$RESP" | sed -n 's/^HTTP_STATUS://p')
     if echo "${STATUS:-}" | grep -qE '^2'; then echo ok >> /tmp/pr_external_replies.log; else echo "fail $THREAD_ID HTTP ${STATUS:-?}" >> /tmp/pr_external_replies.log; fi
   done
-  EXTERNAL_REPLY_OK=$(grep -c '^ok' /tmp/pr_external_replies.log 2>/dev/null || echo 0)
-  EXTERNAL_REPLY_FAIL=$(grep -c '^fail' /tmp/pr_external_replies.log 2>/dev/null || echo 0)
+  EXTERNAL_REPLY_OK=$(grep -c '^ok' /tmp/pr_external_replies.log 2>/dev/null || true); EXTERNAL_REPLY_OK=${EXTERNAL_REPLY_OK:-0}
+  EXTERNAL_REPLY_FAIL=$(grep -c '^fail' /tmp/pr_external_replies.log 2>/dev/null || true); EXTERNAL_REPLY_FAIL=${EXTERNAL_REPLY_FAIL:-0}
   export EXTERNAL_REPLY_OK EXTERNAL_REPLY_FAIL
   echo "External replies: ${EXTERNAL_REPLY_OK} addressed thread(s) acknowledged (${EXTERNAL_REPLY_FAIL} failed) — threads left open"
 fi
