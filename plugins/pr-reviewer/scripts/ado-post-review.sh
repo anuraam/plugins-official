@@ -14,7 +14,10 @@
 #   VERDICT, REVIEW_MODE           — env vars
 #   AZURE_DEVOPS_TOKEN             — required
 #
-# Optional: /tmp/pr_reconcile.json, /tmp/pr_external_reconcile.json
+# Optional: /tmp/pr_reconcile.json (fixed[]/carried_over[]/reopened[]/new[]), /tmp/pr_external_reconcile.json
+#
+# Emits RESOLVED_OK/FAIL, REOPENED_OK/FAIL, EXTERNAL_REPLY_OK/FAIL,
+# INLINE_OK/FAIL/TOTAL, MARKER_VERIFY_FAILED (post-POST audit, warn-only).
 
 set -euo pipefail
 
@@ -170,10 +173,12 @@ import os, pathlib
 sha = os.environ["HEAD_SHA"]
 path = pathlib.Path("/tmp/pr_thread_body.md")
 body = path.read_text()
-marker = f"\n\n<!-- pr-reviewer:v1 kind=summary sha={sha} -->\n"
-if "pr-reviewer:v1 kind=summary" not in body:
+marker = f"\n\n<!-- pr-reviewer:v1.2 kind=summary sha={sha} -->\n"
+if "pr-reviewer:v1.2 kind=summary" not in body:
     path.write_text(body.rstrip() + marker)
 PY
+
+MARKER_VERIFY_FAILED=0
 
 # Seed first payload (full PropertiesCollection form), then retry in bash if needed
 python3 - <<'PY' > /tmp/pr_thread_payload.json
@@ -201,6 +206,14 @@ post_summary() {
   SUM_STATUS=$(echo "$SUM_RESP" | sed -n 's/^HTTP_STATUS://p')
   if echo "${SUM_STATUS:-}" | grep -qE '^2'; then
     echo "Summary thread posted (HTTP $SUM_STATUS, mode=$label)"
+    # Post-POST marker verification (audit trail): Azure properties can be
+    # stripped on create (that's exactly why the markdown/bare fallbacks
+    # above exist) — re-inspect the response body for the marker we sent.
+    SUM_RESP_BODY=$(echo "$SUM_RESP" | sed '$d')
+    if ! echo "$SUM_RESP_BODY" | grep -q 'pr-reviewer:v1\.2.*kind=summary'; then
+      echo "ERROR: posted summary thread is missing its expected marker in the response body — re-review detection will fail on the next run." >&2
+      MARKER_VERIFY_FAILED=$((MARKER_VERIFY_FAILED + 1))
+    fi
     return 0
   fi
   echo "WARN: summary thread failed HTTP ${SUM_STATUS:-curl-error} (mode=$label) — body: $(echo "$SUM_RESP" | sed '$d')" >&2
@@ -262,6 +275,40 @@ PY
   echo "Reconciled: ${RESOLVED_OK} prior finding(s) resolved (${RESOLVED_FAIL} failed)"
 fi
 
+# --- 5b2. Re-review: reactivate reopened findings (regression signal) ---
+REOPENED_OK=0
+REOPENED_FAIL=0
+if [ "${REVIEW_MODE}" = "rereview" ] && [ -f /tmp/pr_reconcile.json ]; then
+  : > /tmp/pr_reopened.log
+  HEAD_SHA=$(git rev-parse HEAD)
+  python3 -c "import json; [print(json.dumps(x)) for x in json.load(open('/tmp/pr_reconcile.json')).get('reopened',[])]" \
+  | while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    THREAD_ID=$(echo "$f" | python3 -c "import sys,json; print(json.load(sys.stdin)['thread_ref'])")
+    cat > /tmp/pr_reopen_body.md <<BODY
+⚠️ This finding still reproduces as of \`${HEAD_SHA}\` despite being marked resolved. Reactivating.
+BODY
+    python3 - <<'PY' > /tmp/pr_reopen_payload.json
+import json
+print(json.dumps({"content": open('/tmp/pr_reopen_body.md').read(), "commentType": 1}))
+PY
+    curl -sS -o /dev/null -H "Content-Type: application/json" -u ":${AZURE_DEVOPS_TOKEN}" -X POST \
+      --data @/tmp/pr_reopen_payload.json \
+      "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads/${THREAD_ID}/comments?api-version=7.1" || true
+    RESP=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" -H "Content-Type: application/json" \
+      -u ":${AZURE_DEVOPS_TOKEN}" -X PATCH -d '{"status":"active"}' \
+      "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullRequests/${PR_ID}/threads/${THREAD_ID}?api-version=7.1" || true)
+    STATUS=$(echo "$RESP" | sed -n 's/^HTTP_STATUS://p')
+    if echo "${STATUS:-}" | grep -qE '^2'; then echo ok >> /tmp/pr_reopened.log; else echo "fail $THREAD_ID HTTP ${STATUS:-?}" >> /tmp/pr_reopened.log; fi
+  done
+  REOPENED_OK=$(grep -c '^ok' /tmp/pr_reopened.log 2>/dev/null || true); REOPENED_OK=${REOPENED_OK:-0}
+  REOPENED_FAIL=$(grep -c '^fail' /tmp/pr_reopened.log 2>/dev/null || true); REOPENED_FAIL=${REOPENED_FAIL:-0}
+  export REOPENED_OK REOPENED_FAIL
+  # A reopened finding is a regression signal and expected to be rare — surface
+  # it whenever non-zero rather than folding it silently into ordinary counts.
+  [ "$REOPENED_OK" -gt 0 ] && echo "Reopened: ${REOPENED_OK} previously-fixed finding(s) still reproduce (${REOPENED_FAIL} failed to reactivate)"
+fi
+
 # --- 5c. Reply on addressed external threads — never resolve ---
 EXTERNAL_REPLY_OK=0
 EXTERNAL_REPLY_FAIL=0
@@ -312,8 +359,8 @@ fid = f.get("fid") or ""
 if not file_path or not line_no or not body:
     raise SystemExit("missing file/line/body in finding")
 sha = os.environ["HEAD_SHA"]
-if fid and "pr-reviewer:v1 kind=finding" not in body:
-    body = body.rstrip() + f"\n\n<!-- pr-reviewer:v1 kind=finding fid={fid} sha={sha} -->\n"
+if fid and "pr-reviewer:v1.2 kind=finding" not in body:
+    body = body.rstrip() + f"\n\n<!-- pr-reviewer:v1.2 kind=finding fid={fid} sha={sha} -->\n"
 print(json.dumps({
     "comments": [{"content": body, "commentType": 1}],
     "status": "active",
@@ -343,6 +390,13 @@ PY
   STATUS=$(echo "$RESP" | sed -n 's/^HTTP_STATUS://p')
   if echo "${STATUS:-}" | grep -qE '^2'; then
     INLINE_OK=$((INLINE_OK + 1))
+    # Post-POST marker verification (audit trail) — see post_summary()'s
+    # comment above for why this can't just trust the HTTP status.
+    RESP_BODY=$(echo "$RESP" | sed '$d')
+    if ! echo "$RESP_BODY" | grep -q 'pr-reviewer:v1\.2.*kind=finding'; then
+      echo "ERROR: posted inline thread is missing its expected marker in the response body — re-review detection for this finding will fail on the next run." >&2
+      MARKER_VERIFY_FAILED=$((MARKER_VERIFY_FAILED + 1))
+    fi
   else
     # Retry without custom properties (keep file anchor + markdown)
     if ! HEAD_SHA=$(git rev-parse HEAD) python3 - <<'PY' > /tmp/pr_thread_payload.json 2>>/tmp/pr_inline_failures.log
@@ -353,8 +407,8 @@ line_no = int(f.get("line") or f.get("line_number") or 0)
 body = f.get("body") or f.get("comment") or ""
 fid = f.get("fid") or ""
 sha = os.environ["HEAD_SHA"]
-if fid and "pr-reviewer:v1 kind=finding" not in body:
-    body = body.rstrip() + f"\n\n<!-- pr-reviewer:v1 kind=finding fid={fid} sha={sha} -->\n"
+if fid and "pr-reviewer:v1.2 kind=finding" not in body:
+    body = body.rstrip() + f"\n\n<!-- pr-reviewer:v1.2 kind=finding fid={fid} sha={sha} -->\n"
 print(json.dumps({
     "comments": [{"content": body, "commentType": 1}],
     "status": "active",
@@ -382,6 +436,11 @@ PY
     if echo "${STATUS2:-}" | grep -qE '^2'; then
       INLINE_OK=$((INLINE_OK + 1))
       echo "WARN: inline posted without custom properties after HTTP ${STATUS:-?} (fid retained in body marker)" >&2
+      RESP2_BODY=$(echo "$RESP2" | sed '$d')
+      if ! echo "$RESP2_BODY" | grep -q 'pr-reviewer:v1\.2.*kind=finding'; then
+        echo "ERROR: posted inline thread is missing its expected marker in the response body — re-review detection for this finding will fail on the next run." >&2
+        MARKER_VERIFY_FAILED=$((MARKER_VERIFY_FAILED + 1))
+      fi
     else
       INLINE_FAIL=$((INLINE_FAIL + 1))
       { echo "---"; echo "finding: $line"; echo "HTTP ${STATUS:-?} then retry ${STATUS2:-?}:"; echo "$RESP2" | sed '$d'; } >> /tmp/pr_inline_failures.log
@@ -394,6 +453,15 @@ if [ "$INLINE_FAIL" -gt 0 ]; then
   echo "WARN: see /tmp/pr_inline_failures.log" >&2
   head -40 /tmp/pr_inline_failures.log >&2
 fi
-export INLINE_OK INLINE_FAIL INLINE_TOTAL
+if [ "$MARKER_VERIFY_FAILED" -gt 0 ]; then
+  echo "ERROR: ${MARKER_VERIFY_FAILED} posted comment(s) failed marker verification — see warnings above" >&2
+fi
+export INLINE_OK INLINE_FAIL INLINE_TOTAL MARKER_VERIFY_FAILED
 EXTERNAL_REPLY_OK="${EXTERNAL_REPLY_OK:-0}"
-echo "Review posted on PR #${PR_ID}: ${VERDICT} — ${INLINE_OK}/${INLINE_TOTAL} inline — ${EXTERNAL_REPLY_OK} external replies — ${API_BASE}/_git/${AZURE_REPO}/pullrequest/${PR_ID}"
+REOPENED_OK="${REOPENED_OK:-0}"
+CONFIRM="Review posted on PR #${PR_ID}: ${VERDICT} — ${INLINE_OK}/${INLINE_TOTAL} inline — ${EXTERNAL_REPLY_OK} external replies — ${API_BASE}/_git/${AZURE_REPO}/pullrequest/${PR_ID}"
+[ "$REOPENED_OK" -gt 0 ] && CONFIRM="${CONFIRM} — ${REOPENED_OK} reopened (regression)"
+echo "$CONFIRM"
+if [ "$MARKER_VERIFY_FAILED" -gt 0 ]; then
+  echo "WARN: ${MARKER_VERIFY_FAILED} posted comment(s) failed marker verification — re-review detection for those findings may fail next run."
+fi

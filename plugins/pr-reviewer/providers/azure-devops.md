@@ -221,7 +221,7 @@ For PR threads, put Markdown in `comments[].content`. Also set thread `propertie
 }
 ```
 
-Also append an HTML marker to the comment body (`<!-- pr-reviewer:v1 kind=summary sha=… -->`) so re-review detection still works if properties are stripped. `scripts/ado-post-review.sh` does both and retries `full → markdown-only → bare` until the summary thread lands.
+Also append an HTML marker to the comment body (`<!-- pr-reviewer:v1.2 kind=summary sha=… -->`) so re-review detection still works if properties are stripped. `scripts/ado-post-review.sh` does both and retries `full → markdown-only → bare` until the summary thread lands.
 
 ---
 
@@ -453,8 +453,8 @@ import os, pathlib
 sha = os.environ["HEAD_SHA"]
 path = pathlib.Path("/tmp/pr_thread_body.md")
 body = path.read_text()
-marker = f"\n\n<!-- pr-reviewer:v1 kind=summary sha={sha} -->\n"
-if "pr-reviewer:v1 kind=summary" not in body:
+marker = f"\n\n<!-- pr-reviewer:v1.2 kind=summary sha={sha} -->\n"
+if "pr-reviewer:v1.2 kind=summary" not in body:
     path.write_text(body.rstrip() + marker)
 PY
 python3 - <<'PY' > /tmp/pr_thread_payload.json
@@ -748,8 +748,8 @@ HEAD_SHA=$(git rev-parse HEAD) python3 - <<'PY' > /tmp/pr_thread_payload.json
 import json, os, pathlib
 sha = os.environ["HEAD_SHA"]
 body = pathlib.Path("/tmp/pr_thread_body.md").read_text()
-if "pr-reviewer:v1 kind=summary" not in body:
-    body = body.rstrip() + f"\n\n<!-- pr-reviewer:v1 kind=summary sha={sha} -->\n"
+if "pr-reviewer:v1.2 kind=summary" not in body:
+    body = body.rstrip() + f"\n\n<!-- pr-reviewer:v1.2 kind=summary sha={sha} -->\n"
 print(json.dumps({
     "comments": [{"content": body, "commentType": 1}],
     "status": "active",
@@ -820,8 +820,8 @@ f = json.load(open('/tmp/pr_inline_finding.json'))
 sha = os.environ["HEAD_SHA"]
 body = f["body"]
 fid = f.get("fid", "")
-if fid and "pr-reviewer:v1 kind=finding" not in body:
-    body = body.rstrip() + f"\n\n<!-- pr-reviewer:v1 kind=finding fid={fid} sha={sha} -->\n"
+if fid and "pr-reviewer:v1.2 kind=finding" not in body:
+    body = body.rstrip() + f"\n\n<!-- pr-reviewer:v1.2 kind=finding fid={fid} sha={sha} -->\n"
 print(json.dumps({
     "comments": [{"content": body, "commentType": 1}],
     "status": "active",

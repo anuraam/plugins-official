@@ -14,7 +14,10 @@
 #   /tmp/pr_inline_findings.jsonl  — one JSON object per finding
 #   VERDICT, REVIEW_MODE           — env vars
 #   gh CLI authenticated
-#   Optional: /tmp/pr_reconcile.json, /tmp/pr_external_reconcile.json
+#   Optional: /tmp/pr_reconcile.json (fixed[]/carried_over[]/reopened[]/new[]), /tmp/pr_external_reconcile.json
+#
+# Emits RESOLVED_OK/FAIL, REOPENED_OK/FAIL, EXTERNAL_REPLY_OK/FAIL,
+# INLINE_OK/FAIL/TOTAL, MARKER_VERIFY_FAILED (post-POST audit, warn-only).
 
 set -euo pipefail
 
@@ -142,11 +145,15 @@ case "${VERDICT}" in
 esac
 
 HEAD_SHA="${HEAD_SHA:-$(git rev-parse HEAD)}"
-if ! grep -q 'pr-reviewer:v1 kind=summary' /tmp/pr_thread_body.md; then
-  printf '\n\n<!-- pr-reviewer:v1 kind=summary sha=%s -->\n' "$HEAD_SHA" >> /tmp/pr_thread_body.md
+if ! grep -q 'pr-reviewer:v1.2 kind=summary' /tmp/pr_thread_body.md; then
+  printf '\n\n<!-- pr-reviewer:v1.2 kind=summary sha=%s -->\n' "$HEAD_SHA" >> /tmp/pr_thread_body.md
 fi
 
 # --- Cast verdict + post summary ---
+# Marker verification for the summary is best-effort only: `gh pr review`'s own
+# response isn't easily inspected for the posted body, unlike the per-finding
+# REST POSTs below, which return the created comment and are checked for real.
+MARKER_VERIFY_FAILED=0
 if ! gh pr review "$PR_NUMBER" $REVIEW_FLAG --body "$(cat /tmp/pr_thread_body.md)" 2>/tmp/pr_review_err.txt; then
   echo "WARN: gh pr review failed: $(cat /tmp/pr_review_err.txt)" >&2
   echo "WARN: falling back to gh pr comment for the summary body" >&2
@@ -173,7 +180,7 @@ if [ "${REVIEW_MODE}" = "rereview" ] && [ -f /tmp/pr_reconcile.json ]; then
       --method POST \
       --field body="✅ Resolved as of \`${HEAD_SHA}\`. This finding no longer reproduces against the current head.
 
-<!-- pr-reviewer:v1 kind=resolve sha=${HEAD_SHA} -->" \
+<!-- pr-reviewer:v1.2 kind=resolve sha=${HEAD_SHA} -->" \
       >/dev/null 2>/tmp/pr_resolve_err.txt || true
 
     if gh api graphql -f query='
@@ -188,6 +195,41 @@ if [ "${REVIEW_MODE}" = "rereview" ] && [ -f /tmp/pr_reconcile.json ]; then
   RESOLVED_FAIL=$(grep -c '^fail' /tmp/pr_resolved.log 2>/dev/null || true); RESOLVED_FAIL=${RESOLVED_FAIL:-0}
   export RESOLVED_OK RESOLVED_FAIL
   echo "Reconciled: ${RESOLVED_OK} prior finding(s) resolved (${RESOLVED_FAIL} failed)"
+fi
+
+# --- Sub-step R2: reactivate reopened prior findings (regression signal) ---
+REOPENED_OK=0
+REOPENED_FAIL=0
+: > /tmp/pr_reopened.log
+if [ "${REVIEW_MODE}" = "rereview" ] && [ -f /tmp/pr_reconcile.json ]; then
+  python3 -c "import json; [print(json.dumps(x)) for x in json.load(open('/tmp/pr_reconcile.json')).get('reopened',[])]" \
+  | while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    COMMENT_ID=$(echo "$f" | python3 -c "import sys,json; print(json.load(sys.stdin).get('comment_ref') or '')")
+    THREAD_ID=$(echo  "$f" | python3 -c "import sys,json; print(json.load(sys.stdin).get('thread_ref') or '')")
+    [ -n "$COMMENT_ID" ] && [ -n "$THREAD_ID" ] || { echo "fail missing refs" >> /tmp/pr_reopened.log; continue; }
+
+    gh api "repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}/comments/${COMMENT_ID}/replies" \
+      --method POST \
+      --field body="⚠️ This finding still reproduces as of \`${HEAD_SHA}\` despite being marked resolved. Reactivating.
+
+<!-- pr-reviewer:v1.2 kind=reopen sha=${HEAD_SHA} -->" \
+      >/dev/null 2>/tmp/pr_reopen_err.txt || true
+
+    if gh api graphql -f query='
+        mutation($id:ID!) { unresolveReviewThread(input:{threadId:$id}) { thread { isResolved } } }' \
+        -F id="$THREAD_ID" >/dev/null 2>>/tmp/pr_reopen_err.txt; then
+      echo ok >> /tmp/pr_reopened.log
+    else
+      echo "fail $THREAD_ID" >> /tmp/pr_reopened.log
+    fi
+  done
+  REOPENED_OK=$(grep -c '^ok' /tmp/pr_reopened.log 2>/dev/null || true); REOPENED_OK=${REOPENED_OK:-0}
+  REOPENED_FAIL=$(grep -c '^fail' /tmp/pr_reopened.log 2>/dev/null || true); REOPENED_FAIL=${REOPENED_FAIL:-0}
+  export REOPENED_OK REOPENED_FAIL
+  # A reopened finding is a regression signal and expected to be rare — surface
+  # it whenever non-zero rather than folding it silently into ordinary counts.
+  [ "$REOPENED_OK" -gt 0 ] && echo "Reopened: ${REOPENED_OK} previously-fixed finding(s) still reproduce (${REOPENED_FAIL} failed to reactivate)"
 fi
 
 # --- Sub-step E: reply on addressed external threads — never resolve ---
@@ -205,7 +247,7 @@ if [ -f /tmp/pr_external_reconcile.json ]; then
       --method POST \
       --field body="Looks addressed as of \`${HEAD_SHA}\` — leaving this thread open for the original author to resolve.
 
-<!-- pr-reviewer:v1 kind=external-ack sha=${HEAD_SHA} -->" \
+<!-- pr-reviewer:v1.2 kind=external-ack sha=${HEAD_SHA} -->" \
       >/dev/null 2>/tmp/pr_external_reply_err.txt \
       && echo ok >> /tmp/pr_external_replies.log \
       || echo "fail $COMMENT_ID" >> /tmp/pr_external_replies.log
@@ -244,8 +286,8 @@ print('F_SUGGEST_START=' + shlex.quote(str(d.get('suggestion_start_line', ''))))
     continue
   fi
 
-  if [ -n "$F_FID" ] && ! grep -q 'pr-reviewer:v1 kind=finding' /tmp/pr_inline_body.md; then
-    printf '\n\n<!-- pr-reviewer:v1 kind=finding fid=%s sha=%s -->\n' "$F_FID" "$COMMIT_ID" >> /tmp/pr_inline_body.md
+  if [ -n "$F_FID" ] && ! grep -q 'pr-reviewer:v1.2 kind=finding' /tmp/pr_inline_body.md; then
+    printf '\n\n<!-- pr-reviewer:v1.2 kind=finding fid=%s sha=%s -->\n' "$F_FID" "$COMMIT_ID" >> /tmp/pr_inline_body.md
   fi
 
   # Build optional suggestion-range args without tripping `set -u` on empty arrays.
@@ -263,8 +305,17 @@ print('F_SUGGEST_START=' + shlex.quote(str(d.get('suggestion_start_line', ''))))
     --field commit_id="$COMMIT_ID" \
     "$@" \
     --field body="$(cat /tmp/pr_inline_body.md)" \
-    >/dev/null 2>/tmp/pr_inline_err.txt; then
+    >/tmp/pr_inline_resp.json 2>/tmp/pr_inline_err.txt; then
     INLINE_OK=$((INLINE_OK + 1))
+    # Post-POST marker verification (audit trail): re-inspect the created
+    # comment's own response body for the marker we sent. GitHub echoes the
+    # persisted body back on create, so this is a real round-trip check, not
+    # just an HTTP-status assumption — see gh-detect-prior.sh's marker regex,
+    # which is what actually depends on this having landed.
+    if [ -n "$F_FID" ] && ! grep -q 'pr-reviewer:v1.2.*kind=finding' /tmp/pr_inline_resp.json; then
+      echo "ERROR: posted inline comment is missing its expected marker in the response body — re-review detection for this finding will fail on the next run." >&2
+      MARKER_VERIFY_FAILED=$((MARKER_VERIFY_FAILED + 1))
+    fi
   else
     INLINE_FAIL=$((INLINE_FAIL + 1))
     {
@@ -280,13 +331,22 @@ if [ "$INLINE_FAIL" -gt 0 ]; then
   echo "WARN: see /tmp/pr_inline_failures.log for failure details" >&2
   head -40 /tmp/pr_inline_failures.log >&2
 fi
+if [ "$MARKER_VERIFY_FAILED" -gt 0 ]; then
+  echo "ERROR: ${MARKER_VERIFY_FAILED} posted comment(s) failed marker verification — see warnings above" >&2
+fi
 
-export INLINE_OK INLINE_FAIL INLINE_TOTAL
+export INLINE_OK INLINE_FAIL INLINE_TOTAL MARKER_VERIFY_FAILED
 EXTERNAL_REPLY_OK="${EXTERNAL_REPLY_OK:-0}"
 RESOLVED_OK="${RESOLVED_OK:-0}"
+REOPENED_OK="${REOPENED_OK:-0}"
 
 if [ "$REVIEW_MODE" = "rereview" ]; then
-  echo "Re-review posted on PR #${PR_NUMBER}: ${VERDICT} — ${INLINE_OK}/${INLINE_TOTAL} new — ${RESOLVED_OK} resolved — ${EXTERNAL_REPLY_OK} external replies — https://github.com/${OWNER}/${REPO}/pull/${PR_NUMBER}"
+  CONFIRM="Re-review posted on PR #${PR_NUMBER}: ${VERDICT} — ${INLINE_OK}/${INLINE_TOTAL} new — ${RESOLVED_OK} resolved — ${EXTERNAL_REPLY_OK} external replies — https://github.com/${OWNER}/${REPO}/pull/${PR_NUMBER}"
+  [ "$REOPENED_OK" -gt 0 ] && CONFIRM="${CONFIRM} — ${REOPENED_OK} reopened (regression)"
+  echo "$CONFIRM"
 else
   echo "Review posted on PR #${PR_NUMBER}: ${VERDICT} — ${INLINE_OK}/${INLINE_TOTAL} inline comments — ${EXTERNAL_REPLY_OK} external replies — https://github.com/${OWNER}/${REPO}/pull/${PR_NUMBER}"
+fi
+if [ "$MARKER_VERIFY_FAILED" -gt 0 ]; then
+  echo "WARN: ${MARKER_VERIFY_FAILED} posted comment(s) failed marker verification — re-review detection for those findings may fail next run."
 fi

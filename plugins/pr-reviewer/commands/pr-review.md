@@ -65,7 +65,7 @@ Re-review depends on the plugin being able to recognise its **own** previous com
 Stamp every comment the plugin posts with a hidden marker string:
 
 ```
-<!-- pr-reviewer:v1 kind=<finding|summary> fid=<finding-id> sha=<HEAD_SHA> -->
+<!-- pr-reviewer:v1.2 kind=<finding|summary|resolve|reopen|external-ack> fid=<finding-id> sha=<HEAD_SHA> -->
 ```
 
 - `kind` — `finding` for an inline finding thread, `summary` for the PR-level report comment.
@@ -74,22 +74,24 @@ Stamp every comment the plugin posts with a hidden marker string:
 
 On **GitHub** the marker is an HTML comment appended to the comment body — it renders invisibly. On **Azure DevOps**, HTML comments are *not* reliably hidden, so the same fields are stored as thread **`properties`** (`pr-reviewer.kind`, `pr-reviewer.fid`, `pr-reviewer.sha`) instead of in the body. The provider files show the exact mechanics.
 
-**Plugin-owned threads** (carrying this marker) are the only ones the plugin may **resolve**. On re-review, fixed plugin findings get a reply and the thread is marked resolved — same as before.
+**Plugin-owned threads** (carrying this marker) are the only ones the plugin may **resolve** or **reopen**. On re-review, fixed plugin findings get a reply and the thread is marked resolved; a plugin finding that was previously marked resolved/fixed but whose `fid` reproduces again gets a reply and the thread is **reactivated** (`kind=reopen`) — see *Sub-step R* below.
 
-**External threads** (humans, other bots, unmarked comments) are never resolved by this plugin. When an open external thread looks addressed at `HEAD`, the plugin may **reply** that it appears fixed and leave the thread open for the original author. Still-open external threads are left untouched (no reply every run — avoid notification spam). All open inline threads — plugin and external — are used for awareness and dedup so the plugin does not re-post the same finding.
+**External threads** (humans, other bots, unmarked comments) are never resolved or reopened by this plugin. When an open external thread looks addressed at `HEAD`, the plugin may **reply** that it appears fixed and leave the thread open for the original author. Still-open external threads are left untouched (no reply every run — avoid notification spam). All open inline threads — plugin and external — are used for awareness and dedup so the plugin does not re-post the same finding.
 
 ### 2. The finding id `fid` (matches a finding across revisions)
 
-`fid` must be **deterministic** and **independent of line number** (lines drift as the author edits), so the same logical issue produces the same id on every run. Compute it from the file path plus a normalised issue signature via the plugin script:
+`fid` must be **deterministic** and **independent of line number** (lines drift as the author edits), so the same logical issue produces the same id on every run. Compute it from the file path plus the **on-disk snippet text at the flagged line** (not the LLM-authored issue sentence — that's regenerated per run and unstable across re-reviews) plus an occurrence index that disambiguates duplicate lines within the same file:
 
 ```bash
 # shellcheck disable=SC1091
 [ -f /tmp/pr_plugin.env ] && source /tmp/pr_plugin.env
-FID=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/compute-fid.sh" "<file>" "<issue-summary-sentence>")
-# fid = first 12 hex of sha1( lowercased path + "|" + normalised issue text )
+FID=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/compute-fid.sh" "<file>" "<on-disk snippet text at that line>" "<occurrence-index>")
+# fid = first 12 hex of sha1( lowercased path + "|" + normalised snippet + "|" + occurrence-index )
 ```
 
-Use the **issue summary sentence** (not the code snippet, not the line) as the issue text. The same wording each run keeps the id stable; if the reviewer rephrases an issue slightly between runs it may be treated as new — acceptable, since the worst case is one duplicate rather than a missed regression.
+In practice this is computed for you by `scripts/assign-fids.sh` in step 7 — reading the snippet from disk and assigning the occurrence index is not something to hand-roll per finding. Because the fid is derived from on-disk content rather than free text, `reconcile-prior-findings.sh` can **deterministically re-verify** that a "fixed" finding's code is actually gone (Gate B) rather than trusting that this run's LLM scan simply didn't reproduce it — see that script.
+
+**Why `v1.2`, not `v1`.** The fid formula changed from `sha1(file + issue-sentence)` (`v1`) to `sha1(file + on-disk snippet + occurrence-index)` (current). These are different hash spaces — a `v1` fid and a current fid for the same finding will not match, so bumping the marker is required: `v1`-marked threads from before this change now fail the marker regex entirely and fall through to generic **external**-thread handling (reply-only, never auto-resolved/auto-reopened) instead of being silently mismatched against new-formula fids. The one-time cost: a PR last reviewed under `v1` runs its next review as a full **initial**-mode pass (everything re-scanned) rather than an incremental re-review; every review after that behaves normally under `v1.2`. This is a deliberate, safe degrade — not a data migration — and is strictly better than the alternative (an unrelated old-formula fid coincidentally failing Gate B and a still-open finding getting silently marked Fixed).
 
 ---
 
@@ -322,6 +324,27 @@ If the script exits non-zero (missing token, HTTP 401, non-JSON body), **fix aut
 
 > **Why review the full PR diff, not just the increment?** The full diff (`/tmp/pr_full_diff.patch`) stays the authoritative input to the reviewers so the *current* finding set is always complete — an unresolved finding in a file the latest commits didn't touch must still be detected so it stays open. The incremental diff focuses your attention and drives the delta summary; it does not replace the full scan. Reconciliation (step 7 / posting) compares the current finding set to the prior one **by `fid`**, and also validates open external threads against `HEAD`.
 
+### Cost gate: skip re-analysis entirely when HEAD hasn't moved (mandatory)
+
+`detect-review-mode.sh` also exports `PR_REVIEWER_NOOP` to `/tmp/pr_state.env`: `true` when this is a re-review and `HEAD_SHA` is identical to `PRIOR_SUMMARY_SHA` (the sha the last review was posted against) — i.e. the trigger fired again with zero new commits. Check it **before** step 4:
+
+```bash
+# shellcheck disable=SC1091
+source /tmp/pr_state.env
+if [ "${PR_REVIEWER_NOOP:-false}" = "true" ]; then
+  [ -f /tmp/pr_plugin.env ] && source /tmp/pr_plugin.env
+  case "$PLATFORM" in
+    github) bash "$CLAUDE_PLUGIN_ROOT/scripts/gh-noop-ack.sh" ;;
+    azure)  bash "$CLAUDE_PLUGIN_ROOT/scripts/ado-noop-ack.sh" ;;
+    *)      echo "No new commits since the last review — nothing to re-analyze (generic platform, no comment posted)" ;;
+  esac
+  echo "No-op re-review on PR #${PR_NUMBER}: HEAD unchanged at ${HEAD_SHA} since the last review — skipped re-analysis."
+  exit 0
+fi
+```
+
+Do **not** proceed to step 4 (indexing), step 5 (tier selection), step 6 (sub-agent fan-out), or step 7 (reconciliation) when `PR_REVIEWER_NOOP=true` — the whole point is to intercept before any of that cost is paid. The acknowledgement comment carries **no marker**, so it can never be mistaken for a real review by the next run's prior-summary lookup.
+
 ## 4. Index the Codebase (skip on small PRs)
 
 Every line these commands print lands in your context and is paid for on every subsequent turn — keep the index small. The caps are mandatory, not decorative.
@@ -551,14 +574,14 @@ Aggregate all findings into the structured report format defined in `styles/repo
 
 ### Validate line numbers, assign fids, reconcile prior findings (MANDATORY — scripts)
 
-After writing `/tmp/pr_inline_findings.jsonl` (and the summary body), run these as Bash calls — do **not** invent ad-hoc `sed`/`wc` loops:
+After writing `/tmp/pr_inline_findings.jsonl` (and the summary body), run these as Bash calls, **in this exact order** — do **not** invent ad-hoc `sed`/`wc` loops, and do **not** run `assign-fids.sh` before `validate-findings.sh`: fid computation reads the on-disk line the finding is anchored to, so line numbers must already be corrected or the fid is computed against the wrong snippet.
 
 ```bash
 # shellcheck disable=SC1091
 [ -f /tmp/pr_plugin.env ] && source /tmp/pr_plugin.env
-bash "$CLAUDE_PLUGIN_ROOT/scripts/assign-fids.sh"              # fill missing fid
-bash "$CLAUDE_PLUGIN_ROOT/scripts/validate-findings.sh"        # re-anchor / drop bad lines
-bash "$CLAUDE_PLUGIN_ROOT/scripts/reconcile-prior-findings.sh" # fid buckets + dedup
+bash "$CLAUDE_PLUGIN_ROOT/scripts/validate-findings.sh"        # re-anchor / drop bad lines FIRST
+bash "$CLAUDE_PLUGIN_ROOT/scripts/assign-fids.sh"              # fill missing fid from the now-correct line
+bash "$CLAUDE_PLUGIN_ROOT/scripts/reconcile-prior-findings.sh" # fid buckets + Gate A/B + dedup
 # shellcheck disable=SC1091
 source /tmp/pr_state.env
 ```
@@ -567,16 +590,19 @@ source /tmp/pr_state.env
 
 | Script | Purpose |
 |---|---|
-| `assign-fids.sh` | `fid = sha1(path\|normalised issue)[:12]` for every finding missing `fid` |
 | `validate-findings.sh` | Drop or re-anchor findings whose `line` is past EOF or unlocatable in `/tmp/pr_full_diff_numbered.patch` / `HEAD` |
-| `reconcile-prior-findings.sh` | Compare current vs `/tmp/pr_prior_findings.jsonl` **by `fid`** → `fixed` / `carried_over` / `new`; line±5 dedup against open threads; writes `/tmp/pr_rereview_delta.md` in re-review mode |
+| `assign-fids.sh` | `fid = sha1(path\|normalised on-disk snippet\|occurrence-index)[:12]` for every finding missing `fid` |
+| `reconcile-prior-findings.sh` | Compare current vs `/tmp/pr_prior_findings.jsonl` **by `fid`** → `fixed` / `carried_over` / `reopened` / `new`; line±5 dedup against open threads; writes `/tmp/pr_rereview_delta.md` in re-review mode |
 
 | Bucket (re-review) | Condition | Posting action |
 |---|---|---|
-| **Carried-over** | prior `fid` still in current set | Leave thread open — **no duplicate** |
-| **Fixed** | prior open `fid` absent from current set | Reply + resolve |
+| **Carried-over** | prior open `fid` still in current set | Leave thread open — **no duplicate** |
+| **Reopened** | prior *resolved* `fid` still in current set | Reply + reactivate — regression signal |
+| **Fixed** | prior open `fid` absent from current set **and** passes Gate A (HEAD actually advanced past the prior review's sha) **and** Gate B (recomputing fids for every line currently in the file does not reproduce this `fid`) | Reply + resolve |
 | **New** | current `fid` not in prior set | Post new inline thread |
-| **Already-resolved** | prior thread already resolved | Ignore |
+| **Already-resolved** | prior *resolved* `fid` absent from current set (genuinely gone) | Ignore |
+
+A `fixed` candidate that fails Gate A or Gate B stays `carried_over` instead — the finder simply didn't reproduce it this pass, which is not evidence the underlying code changed. This is a mechanical check, not an LLM judgment call: `reconcile-prior-findings.sh` performs it directly (same-sha comparison for Gate A, a deterministic re-hash of the file's current lines for Gate B).
 
 Prepend `/tmp/pr_rereview_delta.md` into the report body when present. In **initial mode** the reconcile script treats every finding as New. Keep the summary body's `file:NN` references in sync with the validated JSONL.
 
@@ -660,13 +686,14 @@ Use the platform-appropriate method from the Posting the Review section below wi
 
 # Posting the Review
 
-After compiling the report (and applying fixes if in fix mode), post it to the platform detected in Step 1 immediately without waiting for user input. Posting has the sub-steps below; all are mandatory when the platform supports them and the run is incomplete if any are skipped. Sub-step **R** runs only in re-review mode. Sub-step **E** runs whenever `/tmp/pr_external_reconcile.json` has an non-empty `addressed` list.
+After compiling the report (and applying fixes if in fix mode), post it to the platform detected in Step 1 immediately without waiting for user input. Posting has the sub-steps below; all are mandatory when the platform supports them and the run is incomplete if any are skipped. Sub-steps **R** and **R2** run only in re-review mode. Sub-step **E** runs whenever `/tmp/pr_external_reconcile.json` has an non-empty `addressed` list.
 
 | # | Sub-step | GitHub | Azure DevOps | Generic |
 |---|---|---|---|---|
 | A | Cast the verdict / vote | `gh pr review` flag | `PUT .../reviewers/{id}` with vote | n/a |
 | B | Post the full report body (incl. delta) as one PR-level comment, **with the summary marker** | `gh pr review --body` | `POST .../threads` (no `threadContext`) | write to `pr-review-report.md` |
 | R | **Re-review only:** reconcile prior **plugin** findings — resolve **Fixed** threads (with a reply), leave **Carried-over** threads open (no duplicate) | reply + `resolveReviewThread` (GraphQL) | reply + `PATCH .../threads/{id}` `status:fixed` | n/a |
+| R2 | **Re-review only:** reactivate **Reopened** threads (a prior resolved finding whose `fid` reproduced again) — reply with a regression warning, unresolve | reply + `unresolveReviewThread` (GraphQL) | reply + `PATCH .../threads/{id}` `status:active` | n/a |
 | E | Reply on **addressed external** open threads (reply only — **never resolve**) | reply via `.../comments/{id}/replies` | reply via `POST .../threads/{id}/comments` | n/a |
 | C | Post **one inline thread per finding** (initial mode: every surviving finding; re-review mode: **only the New bucket** after dedup), **each with a finding marker** | `gh api .../pulls/<n>/comments` per finding | `POST .../threads` with `threadContext` per finding | n/a (skip with note) |
 
@@ -682,6 +709,14 @@ Skip in initial mode and on the generic platform. Drive this from `/tmp/pr_recon
 - **Carried-over** (`carried_over[]`): take **no** action. The thread is already open; do not reply on every run (avoid notification spam) and never re-post the finding as a new thread.
 
 Track a counter (`RESOLVED_OK` / `RESOLVED_FAIL`) the same way inline posting does, and include resolved-count in the final confirmation line.
+
+### Sub-step R2 — reactivate reopened findings (re-review mode only)
+
+Skip in initial mode and on the generic platform. Drive this from `/tmp/pr_reconcile.json`'s `reopened[]` array (built in step 7) — a finding whose `fid` was previously marked resolved/fixed on the platform but reproduced again in this run's scan. This is a **regression signal** and is expected to be rare.
+
+- For each entry in `reopened[]`, post a reply on the existing thread — `⚠️ This finding still reproduces as of \`<HEAD_SHA>\` despite being marked resolved. Reactivating.` — with a `kind=reopen` marker, then reactivate the thread (unresolve on GitHub, `status:active` on Azure DevOps).
+
+Track `REOPENED_OK` / `REOPENED_FAIL`. **Always** include the reopened count in the final confirmation line when `REOPENED_OK > 0` — unlike Carried-over, this should stand out rather than blend into ordinary re-review noise.
 
 ### Sub-step E — reply on addressed external threads
 
@@ -743,7 +778,9 @@ Review posted on PR #<number>: <verdict> — <INLINE_OK>/<EXPECTED_INLINE> inlin
 Re-review posted on PR #<number>: <verdict> — <INLINE_OK>/<EXPECTED_INLINE> new — <RESOLVED_OK> resolved — <carried_over count> still open — <EXTERNAL_REPLY_OK> external replies — <URL>
 ```
 
-Omit the `external replies` segment when `EXTERNAL_REPLY_OK` is unset or 0 and there was nothing to address.
+Omit the `external replies` segment when `EXTERNAL_REPLY_OK` is unset or 0 and there was nothing to address. **Never omit the reopened count when `REOPENED_OK > 0`** — append `— ${REOPENED_OK} reopened (regression)` to the re-review line in that case; omit it entirely when zero (a regression signal should stand out, not clutter every ordinary re-review).
+
+If `MARKER_VERIFY_FAILED` (from the posting script's post-POST audit) is non-zero, append a line: `WARN: ${MARKER_VERIFY_FAILED} posted comment(s) failed marker verification — re-review detection for those findings may fail next run.`
 
 If `INLINE_OK < EXPECTED_INLINE`, append a second line:
 
