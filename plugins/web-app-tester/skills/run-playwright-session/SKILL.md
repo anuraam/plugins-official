@@ -41,7 +41,7 @@ A list of result entries (held inline, not written to a file). **Every test case
   attempts,                               # 1..3 — how many tries it took (always 1 for first-try PASSED)
   duration_ms,                            # wall-clock milliseconds from test case start to test case end (null for BLOCKED test cases that never started)
   reason,                                 # null for PASSED; short failure/blocked cause otherwise
-  screenshot                              # path to _wat_screenshot_N.png if captured, else null
+  screenshot                              # path to _wat_run/screenshots/step_N_fail.png if captured, else null
 }
 ```
 
@@ -67,6 +67,7 @@ Capture these fields as you execute each test case — they are mandatory inputs
 - Never guess selectors — use ARIA snapshots and visible labels from exploration to find stable locators.
 - Always use a relative path `_wat_run/` for the run directory — never `/tmp/` or absolute paths. All file paths in Bash commands and Python scripts must be relative (e.g. `_wat_run/test_script.py`, not `C:/Project/.../_wat_run/test_script.py`).
 - Detect Python with: `PYTHON=$(command -v python3 2>/dev/null || command -v python 2>/dev/null)` — use `$PYTHON` for all subsequent calls.
+- **Force UTF-8 mode on every `$PYTHON` invocation** by prefixing it with `PYTHONUTF8=1` (e.g. `PYTHONUTF8=1 $PYTHON _wat_run/explore.py`). On Windows, Python defaults stdio and `open()` to a legacy codepage (cp1252) and crashes with `UnicodeEncodeError` when printing page content containing non-ASCII glyphs. Prefix each call — shell state does not persist between Bash commands, so a one-time `export` is not enough. Open log files with `encoding="utf-8"` for the same reason.
 
 ---
 
@@ -77,7 +78,7 @@ Detect Python and check whether Chromium is already installed:
 ```bash
 PYTHON=$(command -v python3 2>/dev/null || command -v python 2>/dev/null)
 echo "Using Python: $PYTHON"
-$PYTHON -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); b.close(); p.stop(); print('CHROMIUM_OK')" 2>&1
+PYTHONUTF8=1 $PYTHON -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); b.close(); p.stop(); print('CHROMIUM_OK')" 2>&1
 ```
 
 If output is `CHROMIUM_OK` → continue to Step 2.
@@ -85,8 +86,8 @@ If output is `CHROMIUM_OK` → continue to Step 2.
 If Chromium is missing → install it immediately without waiting:
 
 ```bash
-$PYTHON -m playwright install chromium 2>&1 && \
-$PYTHON -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); b.close(); p.stop(); print('CHROMIUM_OK')" 2>&1
+PYTHONUTF8=1 $PYTHON -m playwright install chromium 2>&1 && \
+PYTHONUTF8=1 $PYTHON -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); b.close(); p.stop(); print('CHROMIUM_OK')" 2>&1
 ```
 
 Re-run the probe. If it still fails with `libnss3`, `libglib`, `libatk`, `libdbus`, `shared libraries`, or `missing dependencies` → **immediately** mark every test case in `TEST_PLAN` as `🔴 BLOCKED` with reason:
@@ -122,14 +123,14 @@ with sync_playwright() as p:
     page = context.new_page()
     page.goto("${TEST_URL}", wait_until="domcontentloaded", timeout=30000)
     print("=== step 0:", page.title(), page.url)
-    print(page.accessibility.snapshot())
+    print(page.locator("body").aria_snapshot())
     # Walk the full plan path, dumping a snapshot after each navigation/interaction:
     # page.get_by_role("link", name="Orders").click(); page.wait_for_load_state()
-    # print("=== step 1:", page.url); print(page.accessibility.snapshot())
+    # print("=== step 1:", page.url); print(page.locator("body").aria_snapshot())
     # ...one block per plan step that needs selector confirmation...
     browser.close()
 PYEOF
-$PYTHON _wat_run/explore.py
+PYTHONUTF8=1 $PYTHON _wat_run/explore.py
 ```
 
 Read the printed snapshots to derive stable locators (role + accessible name) for every interactive step in the plan. Use these in the final script — never guess CSS selectors. If a snapshot shows an unexpected auth page, apply the auth-gate ladder in Step 3 rather than iterating on exploration.
@@ -145,7 +146,7 @@ Expected runtime: ~25–35 seconds for a 9-test-case plan on a cached browser.
 **Create the run directory using a single-line Python call (works on all platforms):**
 
 ```bash
-$PYTHON -c "import os; os.makedirs('_wat_run/screenshots', exist_ok=True)"
+PYTHONUTF8=1 $PYTHON -c "import os; os.makedirs('_wat_run/screenshots', exist_ok=True)"
 ```
 
 **Write `_wat_run/test_script.py` using a bash heredoc redirected to `cat`** — this is the most reliable cross-platform approach in bash (including Git Bash on Windows). Never use `$PYTHON - <<'PYEOF'` for file writing — that stdin-heredoc pattern fails on Windows:
@@ -203,7 +204,7 @@ import time
 
 MUTATIONS_ALLOWED = "${MUTATIONS_ALLOWED}" != "false"
 STORAGE_STATE = "${STORAGE_STATE}"  # empty string when not configured — the file PATH only, never its contents
-LOG = open("_wat_run/log.txt", "w")
+LOG = open("_wat_run/log.txt", "w", encoding="utf-8")
 RUN_START = time.time()
 
 def log_step(n, status, desc, reason="", duration_ms=0, signal=None):
@@ -303,7 +304,7 @@ LOG.close()
 **Execute the script:**
 
 ```bash
-$PYTHON _wat_run/test_script.py 2>&1
+PYTHONUTF8=1 $PYTHON _wat_run/test_script.py 2>&1
 ```
 
 **Read the log:**

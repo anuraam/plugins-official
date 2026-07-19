@@ -1,6 +1,6 @@
 {
   "name": "web-app-tester",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Automated web app behaviour verification triggered from a GitHub PR/Issue or Azure DevOps PR/Bug. Resolves the target URL from named environments in .web-app-tester.json (or scrapes it from comments), runs authenticated via Playwright storage states, executes or auto-generates a test plan using the Webwright workflow (Python/Playwright, headless Chromium), and posts a structured test execution report. Includes a bug-verification mode (/verify-bug) that re-verifies a reported bug and posts a STILL REPRODUCIBLE / NOT REPRODUCIBLE / INCONCLUSIVE verdict on the bug itself.",
   "author": {
     "name": "Xianix",

@@ -162,6 +162,9 @@ Install the `gh` CLI using the instructions above.
 **`gh auth status` fails**
 Run `gh auth login` or export `GITHUB_TOKEN` with a valid personal access token.
 
+**`UnicodeEncodeError: 'charmap' codec can't encode character ...` (Windows)**
+Windows defaults Python's stdio and `open()` to a legacy codepage (cp1252), which crashes when a script prints page content containing non-ASCII glyphs (e.g. "❯"). The plugin's skill runs every Python invocation with `PYTHONUTF8=1` and opens its log file with `encoding="utf-8"` to prevent this. If you run scripts manually, apply the same prefix: `PYTHONUTF8=1 python script.py`.
+
 **`_wat_run/` directory left in project directory**
 The plugin deletes this directory at the end of every run, including failed runs. If it persists, the run was interrupted before cleanup. Delete it manually: `rm -rf _wat_run/`.
 

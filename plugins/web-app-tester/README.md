@@ -250,7 +250,7 @@ Overall: FAILED
 - **Observed:** Button element was not present in the DOM on any of the 3 attempts; toolbar rendered without it
 - **Status:** ❌ FAILED
 - **Attempts:** 3
-- **Screenshot:** captured at point of failure (`_wat_screenshot_4.png`)
+- **Screenshot:** captured at point of failure (`_wat_run/screenshots/step_4_fail.png`)
 - **Reason:** New Order button not found after 3 retries — element not in DOM
 
 ### Step 5 — Verify order form appears
