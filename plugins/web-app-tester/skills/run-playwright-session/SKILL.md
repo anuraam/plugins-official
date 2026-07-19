@@ -77,7 +77,7 @@ Detect Python and check whether Chromium is already installed:
 ```bash
 PYTHON=$(command -v python3 2>/dev/null || command -v python 2>/dev/null)
 echo "Using Python: $PYTHON"
-$PYTHON -c "from playwright.sync_api import sync_playwright; p=sync_playwright().__enter__(); b=p.chromium.launch(headless=True); b.close(); p.__exit__(None,None,None); print('CHROMIUM_OK')" 2>&1
+$PYTHON -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); b.close(); p.stop(); print('CHROMIUM_OK')" 2>&1
 ```
 
 If output is `CHROMIUM_OK` → continue to Step 2.
@@ -86,7 +86,7 @@ If Chromium is missing → install it immediately without waiting:
 
 ```bash
 $PYTHON -m playwright install chromium 2>&1 && \
-$PYTHON -c "from playwright.sync_api import sync_playwright; p=sync_playwright().__enter__(); b=p.chromium.launch(headless=True); b.close(); p.__exit__(None,None,None); print('CHROMIUM_OK')" 2>&1
+$PYTHON -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); b.close(); p.stop(); print('CHROMIUM_OK')" 2>&1
 ```
 
 Re-run the probe. If it still fails with `libnss3`, `libglib`, `libatk`, `libdbus`, `shared libraries`, or `missing dependencies` → **immediately** mark every test case in `TEST_PLAN` as `🔴 BLOCKED` with reason:
