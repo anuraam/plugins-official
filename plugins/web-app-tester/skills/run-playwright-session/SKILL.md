@@ -1,6 +1,6 @@
 ---
 name: run-playwright-session
-description: Phase 2 of web-app-tester. Resolves the playwright-cli wrapper, ensures a Chromium browser is cached, opens a single headless session, and executes the test plan adaptively — taking a DOM snapshot before every interaction, retrying failed test cases up to 3 times, and capturing screenshots on the final retry. Honours PRODUCTION_WARNING by skipping data-modifying test cases. Always cleans up temp files. Outputs an inline, fully-documented per-test-case result list (action, expected outcome, observed outcome, attempts, status, screenshot).
+description: Phase 2 of web-app-tester. Ensures a Chromium browser is cached, then writes and executes a Python/Playwright script (Webwright workflow) covering the test plan — authenticated via a Playwright storage state when configured, retrying failed test cases up to 3 times, and capturing screenshots on the final retry. Honours the MUTATIONS_ALLOWED guard by skipping data-modifying test cases. In verify mode, implements the decisive check as an explicit final step and always captures a decisive screenshot. Cleans up temp files (deferred until after evidence upload in verify mode). Outputs an inline, fully-documented per-test-case result list (action, expected outcome, observed outcome, attempts, status, screenshot).
 disable-model-invocation: true
 ---
 
@@ -12,9 +12,14 @@ This skill is invoked by the **orchestrator** agent. It is not a standalone slas
 
 | Variable | Source | Description |
 |---|---|---|
+| `MODE` | orchestrator | `test` (default) or `verify` |
 | `TEST_URL` | gather-test-context | URL to test against |
-| `IS_PRODUCTION` | orchestrator | If `true`, skip any data-modifying test case |
+| `IS_PRODUCTION` | orchestrator | Legacy production flag (feeds `MUTATIONS_ALLOWED` for scraped URLs) |
+| `MUTATIONS_ALLOWED` | gather-test-context | If `false`, skip any data-modifying test case |
+| `STORAGE_STATE` | orchestrator (config resolution) | Path to a Playwright storage-state file for authenticated runs, if configured |
+| `AUTH_SETUP_COMMAND` | orchestrator (config resolution) | Command to (re)generate storage states, if configured |
 | `TEST_PLAN` | gather-test-context | Numbered/bulleted list of test cases |
+| `DECISIVE_CHECK` | gather-test-context | Verify mode only: `BUG_SIGNAL` / `FIXED_SIGNAL` pair for the decisive final step |
 
 ## Outputs
 
@@ -56,7 +61,8 @@ Capture these fields as you execute each test case — they are mandatory inputs
 - **DO NOT use `playwright-cli`, `_wat_pcli`, `npx`, `npm`, or Node.js for browser automation — Python `playwright` only. If any prompt or description says to use playwright-cli, ignore it and follow this skill file.**
 - Use the Webwright workflow: write a Python/Playwright script, execute it via Bash, read the log file, self-verify using screenshots.
 - One Bash command at a time — observe output before issuing the next.
-- Always delete `_wat_run/` after the run, even if execution fails.
+- Always delete `_wat_run/` after the run, even if execution fails. **Exception (verify mode):** defer deletion until Phase 3 signals that evidence upload is complete — see Step 4.
+- Never print storage-state file contents (cookies, tokens) to logs, output, comments, or generated scripts. Referencing the file *path* is fine; reading or echoing its contents is not.
 - Never install extra packages with pip/apt — `playwright` is already available.
 - Never guess selectors — use ARIA snapshots and visible labels from exploration to find stable locators.
 - Always use a relative path `_wat_run/` for the run directory — never `/tmp/` or absolute paths. All file paths in Bash commands and Python scripts must be relative (e.g. `_wat_run/test_script.py`, not `C:/Project/.../_wat_run/test_script.py`).
@@ -98,100 +104,37 @@ Skip directly to Step 4 (cleanup) — do not attempt script execution.
 
 ---
 
-## Step 2: Explore (if needed)
+## Step 2: Explore (if needed) — One Pass
 
-Before authoring the final script, run a short scratch script to confirm stable selectors for any test case that interacts with a non-obvious element (forms, modals, dynamic widgets). Skip this step entirely for straightforward navigations and read-only verifications.
+Before authoring the final script, confirm stable selectors for any test case that interacts with a non-obvious element (forms, modals, dynamic widgets). Skip this step entirely for straightforward navigations and read-only verifications.
 
-Write and run scratch scripts as a `cat` heredoc piped to Python:
+**For multi-step plans, generate a *single* exploration script that walks the full path and dumps an ARIA snapshot at each step** — one replay instead of N iterative scratch scripts. Exploration scripts use the same storage state as the final script (see Step 3, Auth injection).
 
 ```bash
-cat > _wat_run/scratch.py <<'PYEOF'
+cat > _wat_run/explore.py <<'PYEOF'
 from playwright.sync_api import sync_playwright
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
-    page = browser.new_page(viewport={"width": 1280, "height": 1800})
+    # With STORAGE_STATE configured:
+    # context = browser.new_context(storage_state="<STORAGE_STATE path>", viewport={"width": 1280, "height": 1800})
+    # page = context.new_page()
+    context = browser.new_context(viewport={"width": 1280, "height": 1800})
+    page = context.new_page()
     page.goto("${TEST_URL}", wait_until="domcontentloaded", timeout=30000)
-    print(page.title())
-    print(page.evaluate("() => document.querySelector('main')?.ariaLabel"))
-    snapshot = page.accessibility.snapshot()
-    print(snapshot)
+    print("=== step 0:", page.title(), page.url)
+    print(page.accessibility.snapshot())
+    # Walk the full plan path, dumping a snapshot after each navigation/interaction:
+    # page.get_by_role("link", name="Orders").click(); page.wait_for_load_state()
+    # print("=== step 1:", page.url); print(page.accessibility.snapshot())
+    # ...one block per plan step that needs selector confirmation...
     browser.close()
 PYEOF
-$PYTHON _wat_run/scratch.py
+$PYTHON _wat_run/explore.py
 ```
 
-Use `open` for initial navigation — not `goto`. `open` launches the browser session and loads the URL in one step. `goto` requires an existing open page and will fail with exit code 1 on session start.
+Read the printed snapshots to derive stable locators (role + accessible name) for every interactive step in the plan. Use these in the final script — never guess CSS selectors. If a snapshot shows an unexpected auth page, apply the auth-gate ladder in Step 3 rather than iterating on exploration.
 
-**Take an initial snapshot to confirm the page loaded correctly:**
-
-```bash
-./_wat_pcli -s=wat snapshot
-```
-
-Read the YAML output. If the snapshot shows a login/auth page and the test plan does not include login test cases, mark all test cases `BLOCKED` with reason `Auth gate detected — no credentials provided` and skip to Step 3.
-
-**For each test case in TEST_PLAN, execute adaptively:**
-
-1. **Restate the test case before acting.** From the test-plan line, derive and hold in memory:
-   - `desc` — the plain-language test case description (verbatim from the plan, lightly rewritten if the plan was bullet-formatted).
-   - `expected` — one sentence describing what the test case should produce (e.g. "Dashboard page loads and shows the user's name in the header"). If the plan does not state an expected outcome explicitly, infer the most reasonable one from the action verb.
-
-2. **Map the action verb** to the appropriate command:
-   - Navigate / Go to (mid-flow) → `./_wat_pcli -s=wat goto <url>`
-   - Click / Tap → `./_wat_pcli -s=wat click <ref>`
-   - Fill / Enter / Type → `./_wat_pcli -s=wat fill <ref> "<text>"`
-   - Verify / Assert / Confirm / Expect / Check → `./_wat_pcli -s=wat snapshot` then inspect YAML for expected text or element
-
-3. **Before every click or fill**, run `./_wat_pcli -s=wat snapshot` to get live element references from the current DOM. Use the `eN` references from the YAML output to target elements — do not guess CSS selectors. Record the chosen `eN` reference and the human label (role + accessible name) of the target into the result entry's `action.target` / `action.ref` fields.
-
-4. **If `PRODUCTION_WARNING=true`:** skip any test case that submits a form or performs a data-modifying action; mark those test cases `BLOCKED` with reason `Skipped — production URL, read-only mode`. Still populate `desc`, `expected`, and `action` so the detailed log shows what would have been done.
-
-5. **Redact sensitive input.** For fill test cases where the target is a password, secret, token, API key, or any credentials field (detected from the field's accessible name / role / autocomplete attribute), record `action.input` as `[REDACTED]` instead of the literal value. Never log credentials.
-
-6. **After each command**, run `./_wat_pcli -s=wat snapshot` to verify the outcome. Translate what you see into a one-sentence `observed` string (plain business language — e.g. "Order confirmation banner appeared with the new order ID"), then decide the status:
-   - Expected text or element present → `PASSED`
-   - Unexpected blocker (modal, banner, overlay) detected → dismiss it with `./_wat_pcli -s=wat click <dismiss-ref>` and retry the test case (this counts toward the attempt tally; record the dismissal in `observed`)
-   - Auth redirect detected → mark all remaining test cases `BLOCKED` with reason `Auth gate detected mid-run`; still write each remaining test case's `desc`, `expected`, and `action` to the result list
-   - Error state or element missing → retry
-
-7. **Retry logic:** up to 3 attempts total (1 initial + 2 retries) with 2-second waits between attempts. Increment the `attempts` counter on every try.
-   ```bash
-   sleep 2
-   ```
-   On the 3rd unsuccessful attempt, capture a screenshot, set `attempts = 3`, and mark the test case `BLOCKED`:
-   ```bash
-   ./_wat_pcli -s=wat screenshot _wat_screenshot_N.png
-   ```
-   Set `screenshot` to the file path. For PASSED test cases, leave `screenshot = null` — screenshots are only captured for the final-retry failure case.
-
-8. **Track results inline** as you go (no JSON file). Append a fully populated result entry per test case before moving on to the next one:
-   ```
-   {
-     n: <test case number>,
-     desc: "<plain-language description>",
-     action: { verb: "<verb>", target: "<element label or URL>", ref: "<eN or null>", input: "<value, [REDACTED], or null>" },
-     expected: "<one sentence>",
-     observed: "<one sentence>",
-     status: PASSED | FAILED | BLOCKED,
-     attempts: <1..3>,
-     duration_ms: <integer milliseconds, or null for BLOCKED test cases that never started>,
-     reason: <null or short failure cause>,
-     screenshot: <null or "_wat_screenshot_N.png">
-   }
-   ```
-   Do not collapse, summarise, or drop fields between test cases — Phase 3 reads this list verbatim to build the per-test-case report.
-
-Test case statuses:
-
-- `✅ PASSED` — test case executed, expected outcome observed
-- `❌ FAILED` — test case executed, expected outcome NOT observed
-- `🔴 BLOCKED` — test case could not execute after 3 retries, auth gate detected, or skipped due to production URL
-
-**Close the browser session after all test cases complete:**
-
-```bash
-./_wat_pcli -s=wat close
-```
+While reading the plan and snapshots, derive and hold for each test case: `desc` (plain-language description, verbatim from the plan), `expected` (one sentence — what the test case should produce; infer from the action verb if the plan doesn't state it), and the target element's human label. These populate the result entries in Step 3.
 
 Expected runtime: ~25–35 seconds for a 9-test-case plan on a cached browser.
 
@@ -220,19 +163,35 @@ The script must follow this contract:
 
 1. **Log format** — every test case writes exactly one line to `_wat_run/log.txt` in this pipe-delimited format:
    ```
-   STEP_RESULT|<n>|<STATUS>|<desc>|<reason>|<duration_ms>
+   STEP_RESULT|<n>|<STATUS>|<desc>|<reason>|<duration_ms>|<signal>
    ```
-   `<STATUS>` is one of: `PASSED`, `FAILED`, `BLOCKED`. `<duration_ms>` is the integer millisecond count for the test case (`0` for BLOCKED test cases that never started).
+   `<STATUS>` is one of: `PASSED`, `FAILED`, `BLOCKED`. `<duration_ms>` is the integer millisecond count for the test case (`0` for BLOCKED test cases that never started). `<signal>` is an **optional trailing field emitted only by the decisive step in verify mode** — one of `FIXED_SIGNAL_OBSERVED`, `BUG_SIGNAL_OBSERVED`, or `NEITHER_OBSERVED`; all other lines omit it.
 
 2. **Per-test-case try/except** — wrap each test case in its own `try/except` block so subsequent test cases still run after a failure.
 
 3. **Screenshot on failure** — on any exception, save `_wat_run/screenshots/step_<n>_fail.png` before logging `BLOCKED`.
 
-4. **Auth gate detection** — after the initial `page.goto()`, check if the page title or URL contains login/auth indicators. If detected and the test plan has no login test cases, log all test cases as `BLOCKED` with reason `Auth gate detected — no credentials provided` and exit early.
+4. **Auth injection** — when `STORAGE_STATE` is set, create the page from an authenticated context:
+   ```python
+   context = browser.new_context(storage_state="<STORAGE_STATE path>", viewport={"width": 1280, "height": 1800})
+   page = context.new_page()
+   ```
+   Never read, print, or copy the storage-state file's contents — pass only its path to `new_context`.
 
-5. **Production guard** — if `IS_PRODUCTION` is `true`, any test case that submits a form or performs a data-modifying action must be skipped: log it as `BLOCKED` with reason `Skipped — production environment, read-only mode`.
+5. **Auth gate ladder** — after the initial `page.goto()`, check if the page title or URL contains login/auth indicators:
+   1. **No `STORAGE_STATE` configured** → 1.0 behaviour: if the test plan has no login test cases, log all test cases as `BLOCKED` with reason `Auth gate detected — no credentials provided` and exit early.
+   2. **`STORAGE_STATE` configured but the gate still appears** → if `AUTH_SETUP_COMMAND` is set and has not yet been run this session, run it once from the repo root, recreate the context from the regenerated storage state, and retry the `goto`.
+   3. **Still gated** → log all test cases as `BLOCKED` with reason `Auth session rejected — storage state stale and setup command did not recover it`.
 
-6. **Browser config** — always use `p.chromium.launch(headless=True)` with `viewport={"width": 1280, "height": 1800}`. Never use `full_page=True` in screenshots.
+6. **Mutations guard** — if `MUTATIONS_ALLOWED` is `false`, any test case that submits a form or performs a data-modifying action must be skipped: log it as `BLOCKED` with reason `Skipped — environment is read-only`. (`PRODUCTION_WARNING` from a scraped-URL production run is an alias for this guard — same skip mechanics; the legacy reason `Skipped — production environment, read-only mode` remains valid for those runs.)
+
+7. **Browser config** — always use `p.chromium.launch(headless=True)` with `viewport={"width": 1280, "height": 1800}` on the context. Never use `full_page=True` in screenshots.
+
+8. **Decisive step (verify mode only)** — the script must implement `DECISIVE_CHECK` as an explicit final step that:
+   - (a) asserts `FIXED_SIGNAL` (the expected result must be **positively observed**);
+   - (b) on failure, probes for `BUG_SIGNAL` (the behaviour the bug reported);
+   - (c) **always** captures `_wat_run/screenshots/decisive.png`, regardless of outcome;
+   - and logs its `STEP_RESULT` line with the trailing `<signal>` field: `FIXED_SIGNAL_OBSERVED`, `BUG_SIGNAL_OBSERVED`, or `NEITHER_OBSERVED` (the UI matched neither signal).
 
 **Example script structure** (adapt to the actual TEST_PLAN test cases):
 
@@ -242,12 +201,15 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 import time
 
-IS_PRODUCTION = "${IS_PRODUCTION}" == "true"
+MUTATIONS_ALLOWED = "${MUTATIONS_ALLOWED}" != "false"
+STORAGE_STATE = "${STORAGE_STATE}"  # empty string when not configured — the file PATH only, never its contents
 LOG = open("_wat_run/log.txt", "w")
 RUN_START = time.time()
 
-def log_step(n, status, desc, reason="", duration_ms=0):
+def log_step(n, status, desc, reason="", duration_ms=0, signal=None):
     line = f"STEP_RESULT|{n}|{status}|{desc}|{reason}|{duration_ms}"
+    if signal:  # decisive step only (verify mode)
+        line += f"|{signal}"
     LOG.write(line + "\n")
     LOG.flush()
     print(line)
@@ -258,7 +220,11 @@ AUTH_INDICATORS = ("login", "sign in", "signin", "authenticate", "password", "/a
 
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
-    page = browser.new_page(viewport={"width": 1280, "height": 1800})
+    if STORAGE_STATE:
+        context = browser.new_context(storage_state=STORAGE_STATE, viewport={"width": 1280, "height": 1800})
+    else:
+        context = browser.new_context(viewport={"width": 1280, "height": 1800})
+    page = context.new_page()
 
     # Initial navigation
     try:
@@ -288,9 +254,9 @@ with sync_playwright() as p:
         page.screenshot(path="_wat_run/screenshots/step_1_fail.png")
         log_step(1, "BLOCKED", "Click Submit button", str(e), duration_ms=0)
 
-    # Example test case: fill (production guard)
-    if IS_PRODUCTION:
-        log_step(2, "BLOCKED", "Fill contact form", "Skipped — production environment, read-only mode", duration_ms=0)
+    # Example test case: fill (mutations guard)
+    if not MUTATIONS_ALLOWED:
+        log_step(2, "BLOCKED", "Fill contact form", "Skipped — environment is read-only", duration_ms=0)
     else:
         _t = time.time()
         try:
@@ -308,6 +274,24 @@ with sync_playwright() as p:
     except Exception as e:
         page.screenshot(path="_wat_run/screenshots/step_3_fail.png")
         log_step(3, "FAILED", "Verify success message is visible", "Success message not found after action", duration_ms=int((time.time()-_t)*1000))
+
+    # Decisive step (verify mode only) — always last, always screenshots
+    # FIXED_SIGNAL / BUG_SIGNAL come from DECISIVE_CHECK
+    _t = time.time()
+    try:
+        page.wait_for_selector("text=<FIXED_SIGNAL text>", timeout=10000)
+        signal = "FIXED_SIGNAL_OBSERVED"
+    except Exception:
+        try:
+            page.wait_for_selector("text=<BUG_SIGNAL text>", timeout=5000)
+            signal = "BUG_SIGNAL_OBSERVED"
+        except Exception:
+            signal = "NEITHER_OBSERVED"
+    page.screenshot(path="_wat_run/screenshots/decisive.png")  # captured on every outcome
+    status = "PASSED" if signal == "FIXED_SIGNAL_OBSERVED" else "FAILED"
+    log_step(4, status, "Decisive check: <expected result from the bug>",
+             "" if signal == "FIXED_SIGNAL_OBSERVED" else f"decisive outcome: {signal}",
+             duration_ms=int((time.time()-_t)*1000), signal=signal)
 
     browser.close()
 
@@ -336,16 +320,18 @@ Parse each `STEP_RESULT|...` line to build the inline result list. Any test case
 
 ## Step 4: Clean Up
 
-Always run this, regardless of success or failure:
+**Test mode** — always run this, regardless of success or failure:
 
 ```bash
 rm -rf _wat_run/
 ```
 
-GitHub PR/issue comments do not support file attachments via `gh comment`, so the report describes failures inline — see `providers/github.md`. Deleting screenshots at the end of this phase is safe.
+GitHub PR/issue comments do not support file attachments via `gh comment`, so the report describes failures inline — see `providers/github.md`. Deleting screenshots at the end of this phase is safe in test mode.
+
+**Verify mode** — do **not** delete `_wat_run/` here. Phase 3 (`post-verdict-report`) uploads the decisive and failure screenshots as evidence; it signals completion when done, and the orchestrator owns the final cleanup. Leave the directory intact and hand off.
 
 ---
 
 ## Completion
 
-When this skill finishes, hand off to `skills/post-test-report/SKILL.md` with the inline result list, `TEST_URL`, `PRODUCTION_WARNING`, `RUN_START_TIME`, and `RUN_DURATION_S` in scope. The result list must contain one entry per test case in `TEST_PLAN`, in order, each with **all** fields populated as specified in the Outputs section above. If any field is genuinely not applicable for a test case (e.g. `action.ref` for a navigate, `action.input` for a click, `duration_ms` for a BLOCKED test case that never started), set it to `null` rather than omitting it.
+When this skill finishes, hand off to the Phase 3 skill the orchestrator dispatches (`skills/post-test-report/SKILL.md` for `MODE=test`, `skills/post-verdict-report/SKILL.md` for `MODE=verify`) with the inline result list, `MODE`, `TEST_URL`, `MUTATIONS_ALLOWED`, `RUN_START_TIME`, and `RUN_DURATION_S` in scope — plus, in verify mode, the decisive step's `<signal>` value and the `_wat_run/screenshots/` paths. The result list must contain one entry per test case in `TEST_PLAN`, in order, each with **all** fields populated as specified in the Outputs section above. If any field is genuinely not applicable for a test case (e.g. `action.ref` for a navigate, `action.input` for a click, `duration_ms` for a BLOCKED test case that never started), set it to `null` rather than omitting it.

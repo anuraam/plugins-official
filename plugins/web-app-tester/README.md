@@ -5,9 +5,12 @@ description: Automated web app behaviour verification triggered from a GitHub PR
 
 The **Web App Tester** verifies web app behaviour for a GitHub or Azure DevOps PR, Issue, or Bug by running browser-based tests via **Python Playwright** (Webwright workflow, headless Chromium).
 
-It is **PR/Issue/Bug-driven**: point it at a PR number, issue number, or Azure DevOps work item ID and it finds the testable preview URL from comments, uses the existing test plan (or generates one automatically — using bug repro steps as the seed for ADO Bugs), executes each step in a fresh headless browser session, and posts a structured test execution report directly on the PR or work item.
+It is **PR/Issue/Bug-driven**: point it at a PR number, issue number, or Azure DevOps work item ID and it resolves the target URL (from `.web-app-tester.json` named environments, `--env`/`--url` arguments, or comments), runs authenticated when a Playwright storage state is configured, uses the existing test plan (or generates one automatically — using bug repro steps as the seed for ADO Bugs), executes each step in a fresh headless browser session, and posts a structured test execution report directly on the PR or work item.
 
-Single command: **`/test-web-app`**
+Two commands:
+
+- **`/test-web-app`** — run a test plan and post a test execution report
+- **`/verify-bug`** — re-verify a reported bug and post a STILL REPRODUCIBLE / NOT REPRODUCIBLE / INCONCLUSIVE verdict on the bug itself
 
 ---
 
@@ -15,25 +18,26 @@ Single command: **`/test-web-app`**
 
 ```mermaid
 flowchart TD
-    A[/test-web-app pr N / issue N / wi ID] --> P[Detect platform from git remote]
-    P --> B[Phase 1 — Gather test context]
+    A[/test-web-app or /verify-bug] --> P[Detect platform from git remote]
+    P --> P1[Resolve .web-app-tester.json — env URL, storage state, mutations policy]
+    P1 --> B[Phase 1 — Gather test context]
     B --> B1[Fetch PR/Issue/Bug content, comments, linked items]
-    B1 --> C{Test URL found?}
+    B1 --> C{Test URL resolved from args/config/comments?}
     C -- No --> D[Post 'no URL found' comment and STOP]
     C -- Yes --> E{Test plan found or Bug repro steps?}
-    E -- Yes --> F[Use existing plan / repro steps]
+    E -- Yes --> F[Use existing plan / repro steps — verify mode adds a decisive check]
     E -- No --> G[Auto-generate test plan and post comment]
     F --> H[Phase 2 — Run Playwright session]
     G --> H
     H --> H1{Chromium already cached?}
     H1 -- Yes --> I[Skip install]
     H1 -- No --> J[Install Chromium via playwright install chromium]
-    I --> K[Write and execute Python/Playwright script]
+    I --> K[Write and execute Python/Playwright script — authenticated via storage state when configured]
     J --> K
-    K --> L[Execute steps adaptively — snapshot, act, verify, retry up to 3x]
+    K --> L[Execute steps — retry up to 3x; verify mode ends with the decisive check + screenshot]
     L --> M[Close session, clean up temp files]
-    M --> N[Phase 3 — Post test execution report]
-    N --> O[Post via GitHub gh CLI or Azure DevOps REST API]
+    M --> N[Phase 3 — Post report]
+    N --> O[Test mode: execution report on PR/issue. Verify mode: verdict comment on the bug itself]
 ```
 
 The orchestrator runs three sequential phases, each backed by its own skill file:
@@ -53,12 +57,12 @@ The orchestrator runs three sequential phases, each backed by its own skill file
    - Retries failed steps up to 3 times with 2-second waits; captures a screenshot on the final retry.
    - Closes the session and deletes the `_wat_run/` directory.
 
-3. **Phase 3 — Post test execution report** (`skills/post-test-report/SKILL.md`)
-   - Computes the overall verdict (`PASSED` / `FAILED` / `BLOCKED`).
-   - Composes a comment that strictly conforms to `styles/report-template.md` — no recommendations, no commentary, no root-cause analysis.
+3. **Phase 3 — Post the report** (`skills/post-test-report/SKILL.md` for test runs; `skills/post-verdict-report/SKILL.md` for verify runs)
+   - Test mode: computes the overall verdict (`PASSED` / `FAILED` / `BLOCKED`) and composes a comment that strictly conforms to `styles/report-template.md` — no recommendations, no commentary, no root-cause analysis.
+   - Verify mode: computes the bug verdict (`STILL REPRODUCIBLE` / `NOT REPRODUCIBLE` / `INCONCLUSIVE`) per `styles/verdict-template.md` and posts it on the bug itself, with the decisive screenshot attached on Azure DevOps.
    - **GitHub**: posts as a single `gh pr comment` / `gh issue comment`.
    - **Azure DevOps PR**: posts as a PR thread comment via the ADO REST API.
-   - **Azure DevOps Work Item (`wi`)**: posts the full report on the linked PR thread, plus a brief notification comment on the work item.
+   - **Azure DevOps Work Item (`wi`)**: test mode posts the full report on the linked PR thread plus a brief notification on the work item; verify mode posts only on the work item.
 
 ---
 
@@ -67,8 +71,9 @@ The orchestrator runs three sequential phases, each backed by its own skill file
 | Input | Source | Required | Description |
 |---|---|---|---|
 | `target_id` | Command argument | Yes | GitHub: PR number (`pr 42`) or Issue number (`issue 88`). Azure DevOps: PR number (`pr 42`) or Work Item ID (`wi 1234`) |
-| Test URL | PR/issue/work item comments | Yes | URL labelled `Preview URL:`, `Staging URL:`, `Deploy preview:`, etc. |
+| Test URL | `--url`/`--env` args, `.web-app-tester.json`, or PR/issue/work item comments | Yes | Resolved by precedence: `--url` → `--env` → `defaultEnvironment` → comment-scraping (`Preview URL:`, `Staging URL:`, etc.) |
 | Test plan | PR/issue/work item comments | No | Structured numbered/bulleted steps; auto-generated if absent. For ADO Bugs, repro steps are used as the plan seed. |
+| Auth / read-only policy | `.web-app-tester.json` | No | Role → storage-state mappings, `mutationsAllowed`, `authSetupCommand` — see [docs/configuration.md](docs/configuration.md) |
 
 ---
 
@@ -101,6 +106,59 @@ The orchestrator runs three sequential phases, each backed by its own skill file
 /test-web-app
 ```
 
+**Test against a named environment as a specific role:**
+```text
+/test-web-app wi 1234 --env staging --role admin
+```
+
+**Re-verify a bug:**
+```text
+/verify-bug wi 1234 --env staging
+```
+
+---
+
+## Configuration File (`.web-app-tester.json`)
+
+A consumer repo may place `.web-app-tester.json` at its root to define named environments (`staging`, `qa`, …), per-environment read-only policy (`mutationsAllowed`), role → Playwright storage-state mappings for authenticated runs, and an `authSetupCommand` that regenerates stale sessions. The file is optional — without it the plugin behaves exactly as 1.0.
+
+URL resolution precedence (all modes): `--url` → `--env` → `defaultEnvironment` → comment-scraping → stop with "no testable URL". When the URL comes from config, `mutationsAllowed` is authoritative for read-only enforcement; the URL substring heuristic applies only to scraped/`--url` URLs.
+
+Full schema and security notes: [docs/configuration.md](docs/configuration.md).
+
+---
+
+## Authenticated Testing
+
+When the resolved environment defines `storageStates`, the browser context starts pre-authenticated via Playwright's `storage_state` for the requested role (`--role`, or the environment's `defaultRole`). If the app still shows an auth gate — the session is stale — and an `authSetupCommand` is configured, the plugin runs it once, regenerates the context, and retries. If the gate persists (or no storage state is configured at all), steps are BLOCKED exactly as in 1.0.
+
+Storage-state files must be gitignored by the consumer; the plugin never prints their contents (cookies, tokens) to logs, comments, or generated scripts — only paths.
+
+---
+
+## Bug Verification Mode (`/verify-bug`)
+
+`/verify-bug <wi <id> | issue <n>>` re-verifies a reported bug against a deployed environment and posts a verdict comment **on the bug itself**. ADO work items must be of type `Bug`; `pr` is not a valid verify target.
+
+The verification plan is derived from the bug's repro steps, plus a **decisive check** — the single observation that discriminates the verdicts: `BUG_SIGNAL` (what the reporter observed) vs `FIXED_SIGNAL` (the expected result, which must be positively observed).
+
+| Verdict | Meaning |
+|---|---|
+| ❌ **STILL REPRODUCIBLE** | The decisive check observed the bug's reported behaviour |
+| ✅ **NOT REPRODUCIBLE — appears fixed** | All steps executed and the expected result was positively observed |
+| ⚪ **INCONCLUSIVE** | Anything else — blocked step, auth/env failure, missing precondition, or neither signal observed |
+
+**A blocked run is never reported as fixed.** A bug's repro steps are an unhappy path — the plan "not failing" proves nothing; only positively observing the expected result justifies "appears fixed", and the wording is always qualified. Bugs that aren't browser-verifiable (backend-only, API-only, build/tooling) are triaged out before any browser launches.
+
+On Azure DevOps the decisive screenshot is uploaded via the attachments API and embedded in the verdict comment; on GitHub the decisive observation is described inline.
+
+---
+
+## Interactive vs Autonomous
+
+- **Autonomous (default, and always on the Xianix executor):** never pauses; INCONCLUSIVE verify runs post a brief neutral note so the run isn't silent; work item state is **never** changed.
+- **Interactive (`--interactive`, or an interactive Claude Code session):** pauses at **Gate A** — plan confirmation before any browser opens (verify mode: including the decisive check, preconditions, and mutating steps) — and **Gate B** — draft-comment approval before posting. In verify mode, after posting, the matching work item state transition is offered and applied only on a second explicit yes.
+
 ---
 
 ## Step Statuses
@@ -130,9 +188,12 @@ The auto-generated plan is posted as a GitHub comment before execution begins.
 
 - **No URL found** → posts a comment and stops immediately
 - **Production environment** — set `ENVIRONMENT=production` in the Xianix Agent `rules.json` `with-envs` to enable read-only mode; form submissions and destructive actions are skipped and marked BLOCKED. If `ENVIRONMENT` is not set, all steps execute without restriction
+- **Config-driven read-only mode** — an environment with `mutationsAllowed: false` in `.web-app-tester.json` is authoritative: mutating steps are skipped with `Skipped — environment is read-only`, regardless of the URL
+- **Blocked never means fixed** — in verify mode, any step blocked on the path to the decisive check yields INCONCLUSIVE, never "appears fixed"
 - **Report is strictly bounded** — the posted comment contains only the defined results table and failure details; no suggested fixes, recommendations, or commentary are ever added
-- **Credentials** — never included in any posted comment
-- **Temp files** — always deleted after the run (`_wat_run/` working directory), even if execution fails
+- **Credentials** — never included in any posted comment; storage-state contents (cookies, tokens) never appear in logs, comments, or generated scripts
+- **State transitions** — never performed autonomously; offered only in interactive verify runs and applied only on a second explicit yes
+- **Temp files** — always deleted after the run (`_wat_run/` working directory), even if execution fails; in verify mode deletion waits until screenshot evidence is uploaded
 
 ---
 
@@ -270,23 +331,28 @@ web-app-tester/
 │   ├── plugin.json                       # Manifest (no MCP server — CLI-based)
 │   └── settings.json                     # Default agent: orchestrator
 ├── commands/
-│   └── test-web-app.md                   # /test-web-app [pr <n> | issue <n> | wi <id>]
+│   ├── test-web-app.md                   # /test-web-app [pr <n> | issue <n> | wi <id>] [--env|--url|--role|--interactive]
+│   ├── web-app-test.md                   # Alias for /test-web-app
+│   └── verify-bug.md                     # /verify-bug <wi <id> | issue <n>> — bug re-verification (MODE=verify)
 ├── agents/
-│   └── orchestrator.md                   # Coordinator — detects platform, parses input, dispatches phases
+│   └── orchestrator.md                   # Coordinator — detects platform, resolves config, dispatches phases, owns gates
 ├── skills/
-│   ├── gather-test-context/SKILL.md      # Phase 1: fetch PR/issue/bug, find URL, find/generate test plan
-│   ├── run-playwright-session/SKILL.md   # Phase 2: Python/Playwright script generation + execution + cleanup
-│   └── post-test-report/SKILL.md         # Phase 3: compose verdict + post via provider
+│   ├── gather-test-context/SKILL.md      # Phase 1: fetch entry, resolve URL, plan (+ verify triage & decisive check)
+│   ├── run-playwright-session/SKILL.md   # Phase 2: Python/Playwright script (auth via storage state) + execution + cleanup
+│   ├── post-test-report/SKILL.md         # Phase 3 (test mode): compose verdict + post via provider
+│   └── post-verdict-report/SKILL.md      # Phase 3 (verify mode): compute bug verdict + post on the bug with evidence
 ├── providers/
 │   ├── github.md                         # gh CLI commands for fetching and posting
-│   └── azure-devops.md                   # curl REST API commands for ADO fetching and posting
+│   └── azure-devops.md                   # curl REST API commands — incl. attachments, verdict comment, state update
 ├── styles/
-│   └── report-template.md                # Strict report structure with boundary rules
+│   ├── report-template.md                # Strict test-report structure with boundary rules
+│   └── verdict-template.md               # Strict bug-verification comment structure
 ├── hooks/
 │   ├── hooks.json
-│   └── validate-prerequisites.sh         # Checks node + platform prereqs (gh or curl+token) before any command
+│   └── validate-prerequisites.sh         # Checks platform prereqs + validates .web-app-tester.json when present
 ├── docs/
-│   └── setup.md                          # Python 3.10+, gh CLI, and Azure DevOps PAT setup guide
+│   ├── setup.md                          # Python 3.10+, gh CLI, and Azure DevOps PAT setup guide
+│   └── configuration.md                  # .web-app-tester.json schema, storage states, authSetupCommand contract
 └── README.md
 ```
 

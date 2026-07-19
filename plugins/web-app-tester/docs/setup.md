@@ -2,6 +2,8 @@
 
 The `web-app-tester` plugin has three prerequisites: Python 3.10+ with Playwright, and a platform CLI or token depending on whether your repository is on GitHub or Azure DevOps.
 
+For named environments, authenticated testing (storage states), and read-only enforcement, add a `.web-app-tester.json` to the consumer repo — see [configuration.md](configuration.md). Without it, the plugin scrapes the test URL from comments as before.
+
 ---
 
 ## Python 3.10+
@@ -116,7 +118,7 @@ The plugin uses `curl` with a Personal Access Token (PAT) to read PR/work item c
 
 | Scope | Access | Why it's needed |
 |---|---|---|
-| **Work Items** | Read & Write | Fetch bug repro steps and acceptance criteria; post notification comments |
+| **Work Items** | Read & Write | Fetch bug repro steps and acceptance criteria; post notification comments. Verify mode (`/verify-bug`) also needs Write to post the verdict comment, upload screenshot attachments, and (interactive only) apply a confirmed state transition |
 | **Code** | Read | Access PR metadata, threads, and linked items |
 | **Pull Requests** | Read & Write | Fetch PR content and post test execution report |
 

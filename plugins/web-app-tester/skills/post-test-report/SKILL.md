@@ -8,6 +8,8 @@ disable-model-invocation: true
 
 This skill is invoked by the **orchestrator** agent. It is not a standalone slash command.
 
+**This skill handles `MODE=test` only.** Verify runs (`MODE=verify`, from `/verify-bug`) are posted by `skills/post-verdict-report/SKILL.md` instead — the orchestrator dispatches on `MODE`.
+
 ## Inputs
 
 | Variable | Source | Description |
@@ -38,7 +40,7 @@ Determine the overall result from the per-test-case statuses:
 | --- | --- |
 | All test cases passed | **PASSED** |
 | One or more test cases failed (all test cases were attempted) | **FAILED** |
-| One or more test cases could not execute (element not found, page error, timeout, auth gate, production-mode skip) | **BLOCKED** |
+| One or more test cases could not execute (element not found, page error, timeout, auth gate, read-only-environment skip) | **BLOCKED** |
 
 A run with both FAILED and BLOCKED test cases uses **BLOCKED** as the overall result.
 
@@ -71,6 +73,8 @@ Determine the entry label from `ENTRY_TYPE`:
 - `wi` → `Work Item`
 
 If `TEST_URL` starts with `http://localhost` or `http://127.0.0.1`, append a parenthetical local-stack note. If there is a known reason for using a local stack (e.g. Vercel preview protected by SSO, detected from PR comments or context), include it; otherwise use `local stack`.
+
+When read-only mode came from a config-driven environment (`.web-app-tester.json` with `mutationsAllowed: false`) rather than `IS_PRODUCTION`, use the wording `(read-only environment — mutating test cases skipped)` on the Environment line; the per-test-case skip reason is `Skipped — environment is read-only`.
 
 ### 2b. Test Plan Summary
 

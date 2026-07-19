@@ -182,6 +182,16 @@ curl -s -u ":${AZURE-DEVOPS-TOKEN}" \
   -d '{"text":"🤖 **Web app test in progress**\n\nInstalling Playwright if needed, launching a browser session, and executing the test plan against the deployed app. The full test execution report will be posted as a comment when complete — this may take a few minutes."}'
 ```
 
+**Verify mode (`MODE=verify`) — post the verification variant on the bug work item:**
+
+```bash
+curl -s -u ":${AZURE-DEVOPS-TOKEN}" \
+  -X POST \
+  -H "Content-Type: application/json" \
+  "${API_BASE}/_apis/wit/workitems/${WORK_ITEM_ID}/comments?format=markdown&api-version=7.1-preview.4" \
+  -d '{"text":"🤖 **Bug verification in progress**\n\nReplaying the repro steps against the deployed environment and running a decisive check against the expected result. A STILL REPRODUCIBLE / NOT REPRODUCIBLE / INCONCLUSIVE verdict will be posted here when complete — this may take a few minutes."}'
+```
+
 If posting the starting comment fails, output a single warning line and continue — do not stop the run.
 
 ---
@@ -339,9 +349,67 @@ REPORT
 
 ---
 
+## Uploading an Attachment (verify mode)
+
+Used by `post-verdict-report` to attach the decisive screenshot (and any failure screenshots) as evidence on the bug.
+
+```bash
+curl -s -u ":${AZURE-DEVOPS-TOKEN}" \
+  -X POST \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary "@_wat_run/screenshots/decisive.png" \
+  "${API_BASE}/_apis/wit/attachments?fileName=decisive.png&api-version=7.1"
+```
+
+The response contains the attachment `url`. Embed it in the markdown work item comment as:
+
+```markdown
+![decisive](<attachment url>)
+```
+
+---
+
+## Posting the Verdict Comment (verify mode)
+
+Post the rendered verdict template (see `styles/verdict-template.md`) as a markdown comment **on the bug work item** — the same comment API as the other work item posts:
+
+```bash
+curl -s -u ":${AZURE-DEVOPS-TOKEN}" \
+  -X POST \
+  -H "Content-Type: application/json" \
+  "${API_BASE}/_apis/wit/workitems/${WORK_ITEM_ID}/comments?format=markdown&api-version=7.1-preview.4" \
+  -d "$(python3 -c "
+import json, sys
+body = sys.stdin.read()
+print(json.dumps({'text': body}))
+" <<'VERDICT'
+${VERDICT_BODY}
+VERDICT
+)"
+```
+
+No PR posting in verify mode — the verdict always lands on the bug itself.
+
+---
+
+## Updating Work Item State (interactive verify only)
+
+Only after the user explicitly confirms the offered transition — never in autonomous mode. Target state names differ per process template (Agile: `Active`/`Resolved`; Scrum: `Committed`/`Done`; CMMI: `Active`/`Resolved`; custom templates vary) — the orchestrator must present the choice to the user, never guess.
+
+```bash
+curl -s -u ":${AZURE-DEVOPS-TOKEN}" \
+  -X PATCH \
+  -H "Content-Type: application/json-patch+json" \
+  "${API_BASE}/_apis/wit/workitems/${WORK_ITEM_ID}?api-version=7.1" \
+  -d '[{"op":"add","path":"/fields/System.State","value":"<state>"}]'
+```
+
+---
+
 ## Output
 
 On completion:
 ```
-web-app-tester complete for {ENTRY_TYPE} #{ENTRY_ID}: {OVERALL_RESULT} — {PASSED}/{TOTAL} test cases passed
+MODE=test:   web-app-tester complete for {ENTRY_TYPE} #{ENTRY_ID}: {OVERALL_RESULT} — {PASSED}/{TOTAL} test cases passed
+MODE=verify: verify-bug complete for {ENTRY_TYPE} #{ENTRY_ID}: {VERDICT}
 ```

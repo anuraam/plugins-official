@@ -99,6 +99,17 @@ EOF
 )"
 ```
 
+**Verify mode (`MODE=verify`) — post the verification variant on the issue:**
+
+```bash
+gh issue comment ${ISSUE_NUMBER} --body "$(cat <<'EOF'
+🤖 **Bug verification in progress**
+
+I'm replaying the repro steps against the deployed environment and running a decisive check against the expected result. A STILL REPRODUCIBLE / NOT REPRODUCIBLE / INCONCLUSIVE verdict will be posted here when complete — this may take a few minutes.
+EOF
+)"
+```
+
 If posting fails, output a single warning line and continue — do not stop the run.
 
 ---
@@ -165,9 +176,27 @@ EOF
 
 ---
 
+## Posting the Verdict Comment (verify mode)
+
+Post the rendered verdict template (see `styles/verdict-template.md`) **on the issue itself**:
+
+```bash
+gh issue comment ${ISSUE_NUMBER} --body "$(cat <<'EOF'
+${VERDICT_BODY}
+EOF
+)"
+```
+
+GitHub comments do not support file attachments via the CLI, so the decisive screenshot is **not** uploaded — the decisive observation sentence in the verdict body carries the evidence inline (same convention as test-mode failure screenshots).
+
+For the interactive-only state-transition offer (see `skills/post-verdict-report/SKILL.md`), the equivalent commands are `gh issue reopen ${ISSUE_NUMBER}` (STILL REPRODUCIBLE) and `gh issue close ${ISSUE_NUMBER}` (NOT REPRODUCIBLE) — apply only on a second explicit user confirmation, never autonomously.
+
+---
+
 ## Output
 
 On completion:
 ```
-web-app-tester complete for {ENTRY_TYPE} #{ENTRY_ID}: {OVERALL_RESULT} — {PASSED}/{TOTAL} test cases passed
+MODE=test:   web-app-tester complete for {ENTRY_TYPE} #{ENTRY_ID}: {OVERALL_RESULT} — {PASSED}/{TOTAL} test cases passed
+MODE=verify: verify-bug complete for {ENTRY_TYPE} #{ENTRY_ID}: {VERDICT}
 ```

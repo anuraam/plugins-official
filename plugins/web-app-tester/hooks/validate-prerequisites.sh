@@ -26,6 +26,25 @@ if ! python3 -c "import playwright" > /dev/null 2>&1; then
     exit 0
 fi
 
+# Validate .web-app-tester.json when present (warn, don't fail — authSetupCommand may create missing storage states)
+if [ -f ".web-app-tester.json" ]; then
+    if ! python3 -c "import json; json.load(open('.web-app-tester.json'))" > /dev/null 2>&1; then
+        echo '{"decision": "block", "reason": ".web-app-tester.json exists but is not valid JSON. Fix or remove it — see docs/configuration.md"}'
+        exit 0
+    fi
+    MISSING_STATES=$(python3 -c "
+import json, os
+cfg = json.load(open('.web-app-tester.json'))
+missing = [p for env in cfg.get('environments', {}).values()
+           for p in env.get('storageStates', {}).values()
+           if not os.path.isfile(p)]
+print(';'.join(missing))
+" 2>/dev/null || echo "")
+    if [ -n "$MISSING_STATES" ]; then
+        echo "Warning: .web-app-tester.json references storage-state files that do not exist yet: ${MISSING_STATES}. The configured authSetupCommand may create them at run time." >&2
+    fi
+fi
+
 # Detect platform from git remote
 REMOTE_URL=$(git remote get-url origin 2>/dev/null || echo "")
 if echo "$REMOTE_URL" | grep -q "github.com"; then

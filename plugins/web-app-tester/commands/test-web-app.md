@@ -1,7 +1,7 @@
 ---
 name: test-web-app
-description: Verify web app behaviour for a GitHub PR/Issue or Azure DevOps PR/Bug using the Webwright workflow (Python/Playwright, headless Chromium). Finds the testable URL from comments, runs (or auto-generates) a structured test plan, and posts a step-by-step test execution report. Usage: /test-web-app [pr <n> | issue <n> | wi <id>]
-argument-hint: [pr <n> | issue <n> | wi <id>]
+description: Verify web app behaviour for a GitHub PR/Issue or Azure DevOps PR/Bug using the Webwright workflow (Python/Playwright, headless Chromium). Resolves the testable URL from --url/--env arguments, .web-app-tester.json, or comments; runs authenticated via a configured storage state; runs (or auto-generates) a structured test plan; and posts a step-by-step test execution report. Usage: /test-web-app [pr <n> | issue <n> | wi <id>] [--env <name>] [--url <url>] [--role <role>] [--interactive]
+argument-hint: [pr <n> | issue <n> | wi <id>] [--env <name>] [--url <url>] [--role <role>] [--interactive]
 ---
 
 Run automated web app behaviour verification for $ARGUMENTS.
@@ -24,6 +24,31 @@ Invokes the **orchestrator** agent to:
 | **Issue number** | GitHub only | `/test-web-app issue 88` | Fetches issue content, linked PRs, and executes browser tests |
 | **Work item ID** | Azure DevOps only | `/test-web-app wi 1234` | Fetches bug repro steps, finds linked PR for URL, executes browser tests |
 | **No argument** | GitHub or Azure DevOps | `/test-web-app` | Infers the PR from the current branch |
+
+## Optional Arguments
+
+| Flag | Meaning |
+|---|---|
+| `--env <name>` | Test against the named environment from `.web-app-tester.json` |
+| `--url <url>` | Test against this URL directly |
+| `--role <role>` | Authenticate with this role's storage state from the environment config |
+| `--interactive` | Pause for plan confirmation before the browser opens and for comment approval before posting |
+
+## URL Resolution
+
+The test URL is resolved in this precedence order (first match wins):
+
+1. `--url` argument
+2. `--env` argument → `environments.<name>.baseUrl` from `.web-app-tester.json`
+3. `defaultEnvironment` from `.web-app-tester.json`
+4. Comment-scraping (`Preview URL:`, `Staging URL:`, `Deploy preview:`, etc. — the 1.0 behaviour)
+5. Stop with "no testable URL"
+
+When the URL comes from the config file, its `mutationsAllowed` flag is authoritative for read-only enforcement; the URL substring heuristic applies only to scraped or `--url` URLs. See `docs/configuration.md` for the full config schema.
+
+## Authenticated Testing
+
+When the resolved environment defines `storageStates` in `.web-app-tester.json`, the browser session starts pre-authenticated using the Playwright storage state for the requested role (`--role`, or the environment's `defaultRole`). If the session is stale and the config defines an `authSetupCommand`, the plugin runs it once to regenerate the state and retries. With no storage state configured, auth-gate behaviour is unchanged from 1.0 — gated steps are BLOCKED.
 
 ## Test Plan Discovery
 
@@ -48,7 +73,8 @@ Failed and blocked steps are retried up to 3 times before being marked final.
 
 - The production URL check is **off by default** — all URLs are tested without restriction unless the environment is explicitly declared as production
 - Set `ENVIRONMENT=production` in `with-envs` in the Xianix Agent `rules.json` to enable the check. When active, a URL with no `staging`, `preview`, `dev`, `test`, or `localhost` indicator triggers **read-only mode** — form submissions and destructive actions are skipped. If `ENVIRONMENT` is not set, it is treated as non-production
-- Credentials and tokens are never included in posted comments
+- When the URL comes from `.web-app-tester.json`, the environment's `mutationsAllowed` flag is authoritative — `false` enforces read-only mode regardless of the URL substring heuristic
+- Credentials and tokens are never included in posted comments; storage-state file contents (cookies, tokens) are never printed to logs, output, or comments
 - The browser session is always closed after the run
 
 ## Prerequisites
