@@ -63,7 +63,7 @@
       "name": "perf-optimizer",
       "source": "./plugins/perf-optimizer",
       "description": "Whole-codebase performance bottleneck detection triggered from a GitHub issue or Azure DevOps work item. Analyzes latency, CPU, memory, and I/O patterns across the repository's default branch and opens a single pull request containing focused, low-risk optimizations together with an embedded performance report. Works with GitHub and Azure DevOps.",
-      "version": "2.0.0",
+      "version": "2.1.0",
       "author": {
         "name": "99x",
         "email": "xianix-agent@99x.io"
