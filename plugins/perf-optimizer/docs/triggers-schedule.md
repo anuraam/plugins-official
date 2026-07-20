@@ -26,6 +26,52 @@ The `/perf-optimize` command detects this mode via the `--schedule` flag, which 
 
 ---
 
+## Cron expression syntax
+
+`cron` is a standard **5-field** expression. Each field, left to right, restricts a different unit of time; a field set to `*` means "every value" (no restriction):
+
+```
+ ┌───────────── minute        (0–59)
+ │ ┌─────────── hour          (0–23)
+ │ │ ┌───────── day-of-month  (1–31)
+ │ │ │ ┌─────── month         (1–12, or JAN–DEC)
+ │ │ │ │ ┌───── day-of-week   (0–7, where 0 and 7 = Sunday, or SUN–SAT)
+ │ │ │ │ │
+ * * * * *
+```
+
+| Position | Field | Allowed values | `*` means |
+|---|---|---|---|
+| 1 | minute | `0`–`59` | every minute |
+| 2 | hour | `0`–`23` (24-hour clock) | every hour |
+| 3 | day-of-month | `1`–`31` | every day of the month |
+| 4 | month | `1`–`12` or `JAN`–`DEC` | every month |
+| 5 | day-of-week | `0`–`7` (`0`/`7` = Sunday) or `SUN`–`SAT` | every day of the week |
+
+Common value forms in any field:
+
+| Form | Example | Meaning |
+|---|---|---|
+| Single value | `30` in minute | exactly minute 30 |
+| `*` | `*` in day-of-month | every day |
+| Step (`*/n`) | `*/5` in minute | every 5 minutes (0, 5, 10, …) |
+| List | `1,15` in day-of-month | the 1st and 15th |
+| Range | `1-5` in day-of-week | Monday through Friday |
+
+**Worked examples:**
+
+| Expression | Reads as |
+|---|---|
+| `0 2 * * *` | minute 0, hour 2, every day → **daily at 02:00** |
+| `30 17 * * *` | minute 30, hour 17, every day → **daily at 17:30** |
+| `0 2 * * 1` | minute 0, hour 2, only day-of-week 1 → **every Monday at 02:00** |
+| `*/5 * * * *` | every 5th minute, every hour/day → **every 5 minutes** |
+| `0 9 1 * *` | minute 0, hour 9, day-of-month 1 → **09:00 on the 1st of every month** |
+
+Times are always evaluated against the rule set's `timezone` (see below), **not** the server's local time.
+
+---
+
 ## Choosing a `cron` expression
 
 Pick a cadence that matches how often you actually want a new optimization PR to review — a whole-codebase scan is more expensive than a diff review, and the idempotency guard means a too-frequent cron mostly just no-ops until the last scheduled PR is merged or closed:
