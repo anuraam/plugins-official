@@ -5,7 +5,7 @@ Use this provider when `git remote get-url origin` contains `github.com`.
 ## How this fits with the rest of the plugin
 
 - **Reading / analysis** — uses **git** against the repository's default branch. No `gh` is needed to fetch files; the analyzer operates on the full working tree.
-- **GitHub-specific** — `gh` is used to (a) read the trigger issue body, (b) post a "review in progress" comment on the issue, (c) open the pull request, and (d) post a link-back comment on the issue after the PR is open.
+- **GitHub-specific** — `gh` is used to (a) read the trigger issue body (`trigger_mode=issue` only), (b) post a "review in progress" comment on the issue (`issue` only), (c) check for an already-open scheduled PR (`trigger_mode=schedule` only), (d) open the pull request, and (e) post a link-back comment on the issue after the PR is open (`issue` only).
 
 ## Prerequisites
 
@@ -16,10 +16,10 @@ Use this provider when `git remote get-url origin` contains `github.com`.
 
 | Permission | Access | Purpose |
 |---|---|---|
-| **Contents** | Read & Write | Read repository code, push the new `perf/issue-*` branch |
+| **Contents** | Read & Write | Read repository code, push the new `perf/issue-*` / `perf/scheduled-*` branch |
 | **Metadata** | Read | Resolve repository metadata (default branch, etc.) |
-| **Issues** | Read & Write | Read the trigger issue body / scope hints and post a link-back comment |
-| **Pull requests** | Read & Write | Open the optimization PR and update it with the report |
+| **Issues** | Read & Write | `trigger_mode=issue` only — read the trigger issue body / scope hints and post a link-back comment. Not used for scheduled runs. |
+| **Pull requests** | Read & Write | Open the optimization PR, list open PRs for the scheduled-run dedupe check, and update it with the report |
 
 For classic tokens: `repo` (private repos) or `public_repo` (public only); `read:org` if the repository is under an organization.
 
@@ -36,6 +36,27 @@ REMOTE=$(git remote get-url origin)
 OWNER=$(echo "$REMOTE" | sed 's|https://github.com/||;s|git@github.com:||' | cut -d'/' -f1)
 REPO=$(echo  "$REMOTE" | sed 's|https://github.com/||;s|git@github.com:||' | cut -d'/' -f2 | sed 's|\.git$||')
 ```
+
+---
+
+## Checking for an already-open scheduled PR
+
+**`trigger_mode=schedule` only** (orchestrator Step 1a). `gh` has no server-side "filter by head branch prefix" flag, so list open PRs against the default branch and filter client-side:
+
+```bash
+EXISTING_SCHEDULED_PR=$(gh pr list \
+  --base "${DEFAULT_BRANCH}" \
+  --state open \
+  --json headRefName,url \
+  --jq '[.[] | select(.headRefName | startswith("perf/scheduled-"))][0].url // ""')
+
+if [ -n "${EXISTING_SCHEDULED_PR}" ]; then
+  echo "Skipped: performance PR ${EXISTING_SCHEDULED_PR} from a prior scheduled run is still open — review or merge it before the next scheduled optimization PR is opened."
+  exit 0
+fi
+```
+
+Run this **before** Step 0 (indexing) so a run with an already-open scheduled PR does no analysis work at all — not just no PR-opening work.
 
 ---
 
@@ -97,17 +118,30 @@ git push -u origin "${NEW_BRANCH}"
 
 ### 2. Create the PR
 
+Title and the `## Summary` / traceability paragraph depend on `TRIGGER_MODE` — resolve both **before** calling `gh pr create`:
+
 ```bash
+if [ "${TRIGGER_MODE}" = "schedule" ]; then
+  RUN_DATE_DISPLAY=$(date -u +%Y-%m-%d)
+  PR_TITLE="perf: scheduled optimization scan (${RUN_DATE_DISPLAY})"
+  SUMMARY_PARAGRAPH="Automated output of a scheduled (cron) whole-codebase performance scan — the Performance Optimizer runs on a recurring schedule with no originating issue or work item. Contains focused, low-risk performance optimizations applied across the codebase based on a whole-repository analysis of the default branch."
+  TRACEABILITY_LINE="Trigger: Scheduled run @ ${BASELINE_SHA}"
+else
+  PR_TITLE="perf: ${ISSUE_TITLE}"
+  SUMMARY_PARAGRAPH="Automated response to issue #${ISSUE_NUMBER} from the Performance Optimizer. Contains focused, low-risk performance optimizations applied across the codebase based on a whole-repository analysis of the default branch."
+  TRACEABILITY_LINE="Closes #${ISSUE_NUMBER}"
+fi
+
 gh pr create \
   --base  "${DEFAULT_BRANCH}" \
   --head  "${NEW_BRANCH}" \
-  --title "perf: ${ISSUE_TITLE}" \
+  --title "${PR_TITLE}" \
   --body  "$(cat <<EOF
 ## Summary
 
-Automated response to issue #${ISSUE_NUMBER} from the Performance Optimizer. Contains focused, low-risk performance optimizations applied across the codebase based on a whole-repository analysis of the default branch.
+${SUMMARY_PARAGRAPH}
 
-Closes #${ISSUE_NUMBER}
+${TRACEABILITY_LINE}
 
 ## Applied optimizations
 
@@ -140,6 +174,8 @@ The `${REPORT_BODY}` substitution is the full, already-compiled report body prod
 
 ### 3. Link the PR back to the issue
 
+**Skip this step entirely when `TRIGGER_MODE=schedule`** — there is no issue to comment on. Go straight to Step 4.
+
 ```bash
 NEW_PR_URL=$(gh pr view "${NEW_BRANCH}" --json url --jq .url)
 
@@ -148,8 +184,13 @@ gh issue comment "${ISSUE_NUMBER}" --body "Performance PR opened with focused, l
 
 ### 4. Output
 
-```
-Performance PR opened: ${NEW_PR_URL} — targets ${DEFAULT_BRANCH}, closes issue #${ISSUE_NUMBER}
+```bash
+NEW_PR_URL=$(gh pr view "${NEW_BRANCH}" --json url --jq .url)
+if [ "${TRIGGER_MODE}" = "schedule" ]; then
+  echo "Performance PR opened: ${NEW_PR_URL} — targets ${DEFAULT_BRANCH}, scheduled run @ ${BASELINE_SHA}"
+else
+  echo "Performance PR opened: ${NEW_PR_URL} — targets ${DEFAULT_BRANCH}, closes issue #${ISSUE_NUMBER}"
+fi
 ```
 
 If `gh pr create` fails (branch protection, missing scope, pre-existing PR on the branch), emit one error line and stop. Do **not** force-push, do **not** rewrite the default branch.

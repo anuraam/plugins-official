@@ -4,9 +4,10 @@
 # Run as a PreToolUse hook before Bash tool executions.
 #
 # Reading  — git for logs / file lists on the default branch; gh / curl only for
-#            reading the trigger issue or work item, opening the PR, and linking back.
-# Writing  — the agent pushes to a `perf/issue-*` or `perf/workitem-*` branch only.
-#            Never to the repository's default branch.
+#            reading the trigger issue or work item (skipped for scheduled runs),
+#            opening the PR, and linking back (skipped for scheduled runs).
+# Writing  — the agent pushes to a `perf/issue-*`, `perf/workitem-*`, or
+#            `perf/scheduled-*` branch only. Never to the repository's default branch.
 #
 # Credentials
 #   GITHUB-TOKEN / GH_TOKEN — used by gh CLI and by git push for HTTPS auth on github.com
@@ -46,14 +47,14 @@ if ! git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
     exit 0
 fi
 
-# Block pushes from any branch that is not a `perf/issue-*` / `perf/workitem-*` branch.
-# The Performance Optimizer must only push to the fix branch it created — never to the
-# default branch, never to an existing feature branch.
+# Block pushes from any branch that is not a `perf/issue-*` / `perf/workitem-*` /
+# `perf/scheduled-*` branch. The Performance Optimizer must only push to the fix
+# branch it created — never to the default branch, never to an existing feature branch.
 if echo "$COMMAND" | grep -qE "^git push"; then
     CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
 
-    if [ -n "$CURRENT_BRANCH" ] && ! echo "$CURRENT_BRANCH" | grep -qE "^perf/(issue|workitem)-"; then
-        echo "{\"decision\": \"block\", \"reason\": \"Refusing to push from '${CURRENT_BRANCH}'. The Performance Optimizer only pushes from branches named 'perf/issue-*' or 'perf/workitem-*' created by the perf-pr-author agent. Never push to the default branch.\"}"
+    if [ -n "$CURRENT_BRANCH" ] && ! echo "$CURRENT_BRANCH" | grep -qE "^perf/(issue|workitem)-|^perf/scheduled-"; then
+        echo "{\"decision\": \"block\", \"reason\": \"Refusing to push from '${CURRENT_BRANCH}'. The Performance Optimizer only pushes from branches named 'perf/issue-*', 'perf/workitem-*', or 'perf/scheduled-*' created by the perf-pr-author agent. Never push to the default branch.\"}"
         exit 0
     fi
 fi

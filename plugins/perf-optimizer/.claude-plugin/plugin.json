@@ -1,7 +1,7 @@
 {
     "name": "perf-optimizer",
     "version": "2.0.0",
-    "description": "Whole-codebase performance bottleneck detection triggered from a GitHub issue or Azure DevOps work item, delivered as a ready-to-review fix PR. Detects latency, CPU, memory, and I/O / query inefficiencies across the repository's default branch. Works with GitHub and Azure DevOps.",
+    "description": "Whole-codebase performance bottleneck detection triggered from a GitHub issue, an Azure DevOps work item, or a recurring schedule, delivered as a ready-to-review fix PR. Detects latency, CPU, memory, and I/O / query inefficiencies across the repository's default branch. Works with GitHub and Azure DevOps.",
     "author": {
       "name": "99x",
       "email": "xianix@99x.io",
@@ -15,6 +15,8 @@
       "performance-optimization",
       "performance-review",
       "issue-driven",
+      "scheduled",
+      "cron",
       "whole-codebase",
       "latency",
       "cpu",

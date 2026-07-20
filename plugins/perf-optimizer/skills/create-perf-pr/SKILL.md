@@ -9,6 +9,8 @@ Open a performance optimization PR for $ARGUMENTS.
 
 This skill triggers the full **Performance Optimizer** flow locally, without waiting for a Xianix Agent webhook. It assumes the trigger issue (GitHub) or work item (Azure DevOps) already exists and that the `ai-dlc/perf/optimize` label / tag is (or would be) applied.
 
+For a scheduled (cron) run with no issue or work item at all, use `/perf-optimize --schedule` directly instead of this skill — see `docs/triggers-schedule.md`.
+
 Use the **orchestrator** agent to drive the flow. The orchestrator will:
 
 1. Detect the hosting platform from `git remote get-url origin`.

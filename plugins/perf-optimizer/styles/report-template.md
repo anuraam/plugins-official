@@ -12,7 +12,7 @@ On local runs where no PR is opened (no Quick-win applied cleanly, or `/analyze-
 
 All header fields below are **mandatory** and must be filled with concrete values — no placeholders, no `TBD`, no missing lines. Reviewers use this block to verify that the scope the agent announced in the starting comment matches the scope it actually ran under. Any drift between the starting comment and this header is a bug.
 
-**Trigger:** [Issue #`<n>`: `<title>`] or [Work Item #`<id>`: `<title>`]
+**Trigger:** [Issue #`<n>`: `<title>`] or [Work Item #`<id>`: `<title>`] or [Scheduled run @ `<baseline-sha>`]
 **Repository:** `<owner/repo>` or `<org/project/repo>`
 **Default branch:** `<branch>` @ `<short-sha>`
 **Language / Framework:** [detected stack]

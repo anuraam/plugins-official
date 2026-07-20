@@ -1,13 +1,13 @@
 ---
 title: Performance Optimizer
-description: Whole-codebase performance bottleneck detection triggered from a GitHub issue or Azure DevOps work item, delivered as a ready-to-review fix PR.
+description: Whole-codebase performance bottleneck detection triggered from a GitHub issue, an Azure DevOps work item, or a recurring schedule, delivered as a ready-to-review fix PR.
 ---
 
 The **Performance Optimizer** performs a **whole-codebase** performance review against the repository's default branch and opens a pull request containing focused, low-risk optimizations together with an embedded performance report.
 
-It is **issue-driven**: applying a single label to a GitHub issue (or tagging an Azure DevOps work item) launches the full flow — fetch default branch, analyze, fix, branch, PR, and link back to the originating issue.
+It is **issue-driven** by default: applying a single label to a GitHub issue (or tagging an Azure DevOps work item) launches the full flow — fetch default branch, analyze, fix, branch, PR, and link back to the originating issue. It can also run on a recurring **schedule** (cron) with no issue or work item at all — see [Automated Triggering](#automated-triggering-xianix-agent) below.
 
-Single trigger label: **`ai-dlc/perf/optimize`**
+Single trigger label: **`ai-dlc/perf/optimize`** (issue/work-item runs) — or a `schedule` rule set with `--schedule` in `execute-prompt` (cron runs).
 
 It focuses on:
 
@@ -52,6 +52,8 @@ flowchart TD
 
 This keeps the trigger lightweight (one label), moves review effort to the PR where teams already spend it, and still produces a human-readable report alongside actual code changes.
 
+**On a `schedule` (cron) run**, steps 1, 3, and 9 don't apply — there's no label/tag to detect and no issue/work-item body or issue/work-item to link back to. The run still fetches the default branch, analyzes, and opens a PR, but branch/PR naming falls back to the run date and baseline commit, and a Step 0 idempotency check skips the run entirely if a prior scheduled PR is still open. See [Automated Triggering](#automated-triggering-xianix-agent) and `docs/triggers-schedule.md`.
+
 ---
 
 ## Inputs
@@ -60,11 +62,12 @@ This keeps the trigger lightweight (one label), moves review effort to the PR wh
 |---|---|---|---|
 | Repository URL | Agent rule | Yes | The repository to analyze — provided by the Xianix Agent rule |
 | Default branch | Repository metadata | Yes | Analysis baseline (auto-detected from the remote) |
-| Issue number | GitHub webhook payload | Yes (GitHub) | The issue whose label triggered the run |
-| Work item ID | Azure DevOps webhook payload | Yes (Azure DevOps) | The work item whose tag triggered the run |
-| `ai-dlc/perf/optimize` | Issue label / work item tag | Yes | Single trigger for the full analyze-and-fix flow |
-| Scope path | Issue / work item body | No | Restrict analysis to a directory or glob — e.g. `Scope: src/services` |
-| Runtime target | Issue / work item body | No | Prioritize `api`, `worker`, `frontend`, or `data` — e.g. `Target: api` |
+| Issue number | GitHub webhook payload | Yes (issue-driven, GitHub) | The issue whose label triggered the run |
+| Work item ID | Azure DevOps webhook payload | Yes (issue-driven, Azure DevOps) | The work item whose tag triggered the run |
+| `ai-dlc/perf/optimize` | Issue label / work item tag | Yes (issue-driven only) | Single trigger for the full analyze-and-fix flow |
+| `--schedule` flag | Rule's `execute-prompt` | Yes (scheduled runs only) | Marks the run as a cron trigger with no issue/work item — see `docs/triggers-schedule.md` |
+| Scope path | Issue / work item body, or `--scope` flag | No | Restrict analysis to a directory or glob — e.g. `Scope: src/services`. Scheduled runs have no body — pass `--scope` in `execute-prompt` instead. |
+| Runtime target | Issue / work item body, or `--target` flag | No | Prioritize `api`, `worker`, `frontend`, or `data` — e.g. `Target: api`. Scheduled runs have no body — pass `--target` in `execute-prompt` instead. |
 
 The platform is **auto-detected** from `git remote`. Scope hints are optional; if none are provided, the agent scans the whole codebase.
 
@@ -112,6 +115,14 @@ The agent is primarily **webhook-driven** via issue labels. The `/perf-optimize`
 
 **Trigger via Azure DevOps work item:** add the `ai-dlc/perf/optimize` tag to the work item. The agent follows the same flow, creating a branch named `perf/workitem-{id}-<slug>` and a PR that references the work item.
 
+**Trigger on a schedule (cron), no issue or work item:**
+
+```text
+/perf-optimize --schedule
+```
+
+Configured via a `schedule` rule set (see `docs/triggers-schedule.md`) rather than a webhook. The agent creates a branch named `perf/scheduled-{date}-{sha}` and a PR whose only traceability is the baseline commit — unless a PR from a prior scheduled run is still open, in which case the run skips without opening a duplicate.
+
 ---
 
 ## PR Output
@@ -124,9 +135,11 @@ Every run produces **one pull request** against the default branch. Its body con
 - **I/O and query inefficiencies** with concrete rewrite suggestions
 - **Optimization backlog** split into quick wins vs deeper follow-up
 - **Per-change rationale** — why each commit matters, expected impact, validation hints
-- **Traceability** — `Closes #{issue-number}` (GitHub) or work-item reference (Azure DevOps)
+- **Traceability** — `Closes #{issue-number}` (GitHub), work-item reference (Azure DevOps), or `Trigger: Scheduled run @ {baseline-sha}` (scheduled runs, either platform)
 
 The agent only commits changes for findings it classifies as **low-risk quick wins**. Higher-risk or architectural suggestions are listed in the report's backlog section for human follow-up rather than auto-applied.
+
+Scheduled runs get **no link-back comment** (step 9 doesn't apply — there's no issue/work item to comment on) and are additionally gated by an idempotency check: if a PR from a prior scheduled run is still open against the default branch, the next scheduled tick skips entirely rather than opening a second one.
 
 ---
 
@@ -170,121 +183,32 @@ claude --plugin-dir /path/to/xianix-plugins-official/plugins/perf-optimizer
 /perf-optimize
 ```
 
-Or trigger it automatically via Xianix Agent rules by labeling a GitHub issue / tagging an Azure DevOps work item with `ai-dlc/perf/optimize`.
+Or trigger it automatically via Xianix Agent rules: label a GitHub issue / tag an Azure DevOps work item with `ai-dlc/perf/optimize`, or configure a `schedule` rule set for cron-driven runs.
 
 ---
 
-## Rule Examples
+## Automated Triggering (Xianix Agent)
 
-Use a single execution block per platform in your `rules.json`.
+Add an execution block to your `rules.json` so the Xianix Agent runs the plugin automatically — either on a webhook (label/tag) or on a `cron` timer with no webhook at all. The plugin uses **label-based** triggering on GitHub, **tag-based** triggering on Azure DevOps, and a **schedule rule set** for cron-driven runs on either platform.
 
-### Trigger behavior
+Full, copy-pasteable execution blocks live in dedicated per-trigger guides:
 
-The Performance Optimizer is **label-driven** with a single trigger:
+- **[Automated Triggering — GitHub](./docs/triggers-github.md)** — label applied to an issue (or issue opened with the label already on it).
+- **[Automated Triggering — Azure DevOps](./docs/triggers-azure-devops.md)** — tag added to a work item (or work item created with the tag already on it).
+- **[Automated Triggering — Schedule](./docs/triggers-schedule.md)** — recurring `cron` run with no issue/work item; opens the same kind of PR, traced by baseline commit instead.
 
-| Platform | Matched webhook event | Filter rule |
-|---|---|---|
-| GitHub | `issues` `action==labeled` | `label.name=='ai-dlc/perf/optimize'` |
-| Azure DevOps | `workitem.updated` | `resource.fields['System.Tags']` contains `ai-dlc/perf/optimize` |
+### Trigger matrix
 
-### GitHub Rule
+| Trigger type | Platform | Scenario | Webhook event / cadence | Filter rule |
+|---|---|---|---|---|
+| Webhook | GitHub | Label applied to an issue | `issues` `action==labeled` | `label.name=='ai-dlc/perf/optimize'` |
+| Webhook | Azure DevOps | Tag added to a work item | `workitem.updated` | `resource.fields['System.Tags']` contains `ai-dlc/perf/optimize` |
+| Schedule | Either | Cron tick, no payload | `cron` (e.g. `0 2 * * *` nightly) | none — every execution in the rule set runs on every tick |
 
-```json
-{
-  "name": "github-performance-optimizer",
-  "platform": "github",
-  "repository": {
-    "url": "repository.clone_url",
-    "ref": "repository.default_branch"
-  },
-  "match-any": [
-    {
-      "name": "github-issue-label-applied",
-      "rule": "action==labeled&&label.name=='ai-dlc/perf/optimize'"
-    }
-  ],
-  "use-inputs": [
-    { "name": "issue-number",    "value": "issue.number" },
-    { "name": "issue-title",     "value": "issue.title" },
-    { "name": "issue-body",      "value": "issue.body" },
-    { "name": "repository-name", "value": "repository.full_name" },
-    { "name": "default-branch",  "value": "repository.default_branch" }
-  ],
-  "use-plugins": [
-    {
-      "plugin-name": "perf-optimizer@xianix-plugins-official",
-      "marketplace": "xianix-team/plugins-official"
-    }
-  ],
-  "with-envs": [
-    {
-      "name": "GITHUB-TOKEN",
-      "value": "secrets.GITHUB-TOKEN",
-      "mandatory": true
-    }
-  ],
-  "execute-prompt": "You are running a whole-codebase performance review for repository {{repository-name}} triggered by issue #{{issue-number}} titled \"{{issue-title}}\".\n\nFetch the default branch ({{default-branch}}), parse any `Scope:` / `Target:` hints from the issue body below, and run /perf-optimize across the selected scope (default: entire codebase).\n\nApply only low-risk optimizations on a new branch named `perf/issue-{{issue-number}}-<slug>` and open a pull request against {{default-branch}}. The PR body MUST embed the full performance report and include `Closes #{{issue-number}}`. After opening the PR, post a comment on issue #{{issue-number}} linking to it.\n\nIssue body:\n{{issue-body}}"
-}
-```
-
-### Azure DevOps Rule
-
-Because work items are project-scoped (not repo-scoped), the target repository URL and default branch are **constants** on the rule itself rather than fields read from the event payload.
-
-```json
-{
-  "name": "azuredevops-performance-optimizer",
-  "platform": "azuredevops",
-  "repository": {
-    "url": "https://dev.azure.com/<org>/<project>/_git/<repo>",
-    "ref": "main",
-    "constant": true
-  },
-  "match-any": [
-    {
-      "name": "azuredevops-workitem-tagged",
-      "rule": "eventType==workitem.updated&&resource.fields.System.Tags*='ai-dlc/perf/optimize'"
-    }
-  ],
-  "use-inputs": [
-    { "name": "workitem-id",     "value": "resource.id" },
-    { "name": "workitem-title",  "value": "resource.fields.System.Title" },
-    { "name": "workitem-body",   "value": "resource.fields.System.Description" },
-    { "name": "repository-name", "value": "<org>/<project>/<repo>", "constant": true },
-    { "name": "default-branch",  "value": "main", "constant": true }
-  ],
-  "use-plugins": [
-    {
-      "plugin-name": "perf-optimizer@xianix-plugins-official",
-      "marketplace": "xianix-team/plugins-official"
-    }
-  ],
-  "with-envs": [
-    {
-      "name": "AZURE-DEVOPS-TOKEN",
-      "value": "secrets.AZURE-DEVOPS-TOKEN",
-      "mandatory": true
-    }
-  ],
-  "execute-prompt": "You are running a whole-codebase performance review for repository {{repository-name}} triggered by work item #{{workitem-id}} titled \"{{workitem-title}}\".\n\nFetch the default branch ({{default-branch}}), parse any `Scope:` / `Target:` hints from the work item description below, and run /perf-optimize across the selected scope (default: entire codebase).\n\nApply only low-risk optimizations on a new branch named `perf/workitem-{{workitem-id}}-<slug>` and open a pull request against {{default-branch}}. The PR body MUST embed the full performance report and reference work item #{{workitem-id}}. After opening the PR, post a comment on the work item linking to it.\n\nWork item description:\n{{workitem-body}}"
-}
-```
+The `GITHUB-TOKEN` / `AZURE-DEVOPS-TOKEN` secrets are injected via each block's `with-envs`, which is **required and `mandatory: true`** — the runtime refuses to start the container if the secret is missing, which is strictly better than discovering it at the first `git push` inside the hook. Webhook rules declare `with-envs` per execution; schedule rule sets typically declare it once at the rule-set level (sibling of `executions`) since credentials don't vary per tick. See the per-trigger guides for the exact PAT scopes.
 
 :::note
-Replace the `<org>`, `<project>`, and `<repo>` placeholders in both `repository.url` and the `repository-name` input with your actual values. Change the `ref` from `main` if your default branch is different. Deploy one rule per repository you want to cover.
-:::
-
-:::note
-These blocks belong inside the `executions` array of a rule set. See [Rules Configuration](/agent-configuration/rules/) for full syntax.
-:::
-
-:::warning Credentials
-The `with-envs` block is **required, rule-level, and `mandatory: true`** — the runtime refuses to start the container if the secret is missing, which is strictly better than discovering it at the first `git push` inside the hook:
-
-- `GITHUB-TOKEN` — resolved from `secrets.GITHUB-TOKEN` (a GitHub PAT with `repo` + `workflow` scopes, or an equivalent GitHub App token). Exposed inside the container as the env var `GITHUB-TOKEN`. Consumed by `gh` CLI and by `git push` over HTTPS to `github.com`.
-- `AZURE-DEVOPS-TOKEN` — resolved from `secrets.AZURE-DEVOPS-TOKEN` (an Azure DevOps PAT with `Work Items: Read & Write` and `Code: Read, Write & Manage`). Exposed inside the container as the env var `AZURE-DEVOPS-TOKEN`. Consumed by `curl` REST calls and by `git push` to `dev.azure.com` / `visualstudio.com`.
-
-If you omit `with-envs`, the runtime won't even launch the container — which is the intended behavior.
+Webhook blocks go inside the `executions` array of a `webhook` rule set. Schedule blocks are a top-level `schedule` + `cron` rule set with no `match-any` / `use-inputs`. See [Rules Configuration](/agent-configuration/rules/) for the full file structure and filter syntax, and [Schedule Rule Sets](https://xianix-team.github.io/documentation/agent-configuration/rules/schedules/) for the cron-specific shape.
 :::
 
 ---
@@ -293,10 +217,11 @@ If you omit `with-envs`, the runtime won't even launch the container — which i
 
 The Performance Optimizer guarantees — enforced by both the orchestrator prompt and the `hooks/validate-prerequisites.sh` PreToolUse hook — that:
 
-- **The default branch is never pushed to.** All changes go on a new `perf/issue-*` or `perf/workitem-*` branch.
+- **The default branch is never pushed to.** All changes go on a new `perf/issue-*`, `perf/workitem-*`, or `perf/scheduled-*` branch.
 - **Only Quick-win findings are ever applied automatically.** Architectural rewrites are surfaced as _Deeper follow-up_ in the embedded report, never auto-applied.
 - **Every optimization commit is scoped and documented.** One commit per finding, prefixed `perf:`, with file + line reference.
 - **The PR body always embeds the full performance report** so reviewers see analysis and code side by side.
+- **A scheduled run never opens a second PR on top of an already-open one.** The orchestrator checks for an open `perf/scheduled-*` PR against the default branch before doing any analysis, and skips the run entirely if one is found.
 
 ---
 
@@ -331,7 +256,9 @@ perf-optimizer/
 │   └── notify-push.sh
 ├── docs/
 │   ├── platform-setup.md
-│   └── rules-examples.md
+│   ├── triggers-github.md
+│   ├── triggers-azure-devops.md
+│   └── triggers-schedule.md
 └── README.md
 ```
 

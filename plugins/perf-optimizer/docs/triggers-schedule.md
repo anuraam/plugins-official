@@ -1,0 +1,158 @@
+# Automated Triggering — Schedule (cron)
+
+This guide shows how to make the **Xianix Agent** run the Performance Optimizer on a recurring timer instead of waiting for an issue label or work-item tag. It uses the [Schedule Rule Sets](https://xianix-team.github.io/documentation/agent-configuration/rules/schedules/) trigger type — a `schedule` + `cron` rule set that runs on its own timer with **no webhook payload at all**.
+
+For manual/interactive use (`/perf-optimize` in a chat), see the main [README](../README.md). For token setup and scopes, see [`platform-setup.md`](./platform-setup.md). For the label/tag triggers, see [`triggers-github.md`](./triggers-github.md) and [`triggers-azure-devops.md`](./triggers-azure-devops.md).
+
+---
+
+## How schedule triggering works
+
+A `schedule` rule set has no issue, work item, or webhook payload to read — it just fires on a `cron` timer. Every execution in the rule set runs on **every** tick, so there's no `match-any` / `use-inputs` to configure (see *No payload → no match-any / use-inputs* in the linked doc).
+
+Because there's no issue/work-item title, the run still produces a pull request, but naming and traceability fall back to date + baseline commit instead:
+
+| | Issue / work-item trigger | Schedule trigger |
+|---|---|---|
+| Fires on | Label applied / tag added | `cron` tick |
+| Scope/target hints | Parsed from issue/work-item body | Must be set directly in `execute-prompt` (no body to parse) |
+| Branch name | `perf/issue-<n>-<slug>` / `perf/workitem-<id>-<slug>` | `perf/scheduled-<YYYYMMDD>-<short-sha>` |
+| PR title | Issue/work-item title, verbatim | `perf: scheduled optimization scan (<date>)` |
+| PR traceability | `Closes #<n>` / `Related work item: #<id>` | `Trigger: Scheduled run @ <short-sha>` |
+| Link-back comment | Posted on the issue/work item | Not applicable — nothing to comment on |
+| Repeat-run safety | One issue → at most one open PR, naturally | **Idempotency guard:** if a `perf/scheduled-*` PR is already open against the default branch, the run stops before doing any analysis (see orchestrator Step 1a) |
+
+The `/perf-optimize` command detects this mode via the `--schedule` flag, which the rule's `execute-prompt` always passes — see `commands/perf-optimize.md`.
+
+---
+
+## Choosing a `cron` expression
+
+Pick a cadence that matches how often you actually want a new optimization PR to review — a whole-codebase scan is more expensive than a diff review, and the idempotency guard means a too-frequent cron mostly just no-ops until the last scheduled PR is merged or closed:
+
+| Cadence | `cron` | `timezone` | When to use it |
+|---|---|---|---|
+| Nightly | `0 2 * * *` | your team's timezone | Default recommendation — one fresh scan a day, reviewed the next morning |
+| Weekly | `0 2 * * 1` | your team's timezone | Lower-churn repositories, or to reduce PR review load |
+| Every 5 minutes (doc example default) | `*/5 * * * *` | — | **Not recommended for this plugin** — included only because it's the schedule-rules doc's illustrative default. At this cadence the idempotency guard will skip nearly every tick once the first scheduled PR is open, which just burns container starts for no benefit. |
+
+`timezone` is optional and defaults to `UTC` when omitted.
+
+:::note
+Per the Schedule Rule Sets doc: adding a new `schedule` rule set, or changing an existing one's `cron` / `timezone`, does not take effect until you **deactivate and reactivate the agent** in the Xianix Agent Studio. The scheduler only picks up schedule definitions on agent start.
+:::
+
+---
+
+## Rule-set shape
+
+A schedule rule set is a sibling of the `webhook` shape used for the label/tag triggers, with these differences:
+
+| Field | Purpose |
+|---|---|
+| `schedule` | Human-readable id for the rule set (the cron analogue of `webhook`'s `name`) |
+| `cron` | Standard 5-field cron expression controlling how often **every** execution in the rule set runs |
+| `timezone` _(optional)_ | IANA timezone the cron expression is evaluated against — defaults to `UTC` |
+| `repository` | **Plain literal strings** (no JSON-path payload to resolve against) — `url`, optional `name`, and `ref` (the default branch) |
+| `with-envs` (rule-set level) | Declared once as a sibling of `executions`, merged into every execution — the common pattern here since credentials don't vary per tick |
+| `executions[].execute-prompt` | Must explicitly pass `--schedule` (and, optionally, `--scope` / `--target`) since there's no issue/work-item body to parse hints from |
+
+`match-any` and `use-inputs` are omitted — there's no payload to filter or extract from.
+
+---
+
+## GitHub Schedule Rule
+
+```json
+[
+  {
+    "schedule": "github-performance-optimizer-nightly",
+    "cron": "0 2 * * *",
+    "timezone": "UTC",
+    "with-envs": [
+      { "name": "GITHUB-TOKEN", "value": "secrets.GITHUB-TOKEN", "mandatory": true }
+    ],
+    "executions": [
+      {
+        "name": "github-performance-optimizer-scheduled",
+        "platform": "github",
+        "repository": {
+          "url": "https://github.com/<org>/<repo>.git",
+          "name": "<org>/<repo>",
+          "ref": "main"
+        },
+        "use-plugins": [
+          {
+            "plugin-name": "perf-optimizer@xianix-plugins-official",
+            "marketplace": "xianix-team/plugins-official"
+          }
+        ],
+        "execute-prompt": "You are running a scheduled whole-codebase performance review for repository {{repository-name}} on branch {{git-ref}}. There is no triggering issue or work item — run /perf-optimize --schedule to scan the entire codebase and open a pull request if any Quick-win optimizations are found. If a performance PR from a prior scheduled run is already open, the command will detect it and skip this run without opening a duplicate."
+      }
+    ]
+  }
+]
+```
+
+> **Placeholders.** Replace `<org>/<repo>` in both `repository.url` and `repository.name` with your actual values. `{{repository-name}}` and `{{git-ref}}` are auto-injected structural placeholders (see the linked schedule-rules doc) — no `use-inputs` block is needed to make them available to `execute-prompt`.
+>
+> **Required secret:** Store a GitHub PAT (`repo` + `workflow` scopes) or an equivalent GitHub App token in the agent's secret store under the key `GITHUB-TOKEN`. Declaring it at the rule-set level (sibling of `executions`) applies it to every execution in the set — there's only one here, but this is the idiomatic place for schedule rule-set credentials per the linked doc.
+
+---
+
+## Azure DevOps Schedule Rule
+
+```json
+[
+  {
+    "schedule": "azuredevops-performance-optimizer-nightly",
+    "cron": "0 2 * * *",
+    "timezone": "UTC",
+    "with-envs": [
+      { "name": "AZURE-DEVOPS-TOKEN", "value": "secrets.AZURE-DEVOPS-TOKEN", "mandatory": true }
+    ],
+    "executions": [
+      {
+        "name": "azuredevops-performance-optimizer-scheduled",
+        "platform": "azuredevops",
+        "repository": {
+          "url": "https://dev.azure.com/<org>/<project>/_git/<repo>",
+          "name": "<org>/<project>/<repo>",
+          "ref": "main"
+        },
+        "use-plugins": [
+          {
+            "plugin-name": "perf-optimizer@xianix-plugins-official",
+            "marketplace": "xianix-team/plugins-official"
+          }
+        ],
+        "execute-prompt": "You are running a scheduled whole-codebase performance review for repository {{repository-name}} on branch {{git-ref}}. There is no triggering work item — run /perf-optimize --schedule to scan the entire codebase and open a pull request if any Quick-win optimizations are found. If a performance PR from a prior scheduled run is already open, the command will detect it and skip this run without opening a duplicate."
+      }
+    ]
+  }
+]
+```
+
+> **Placeholders.** Replace the `<org>`, `<project>`, and `<repo>` placeholders in both `repository.url` and `repository.name` with your actual values. Change `ref` from `main` if your default branch is different.
+>
+> **Required secret:** Store an Azure DevOps PAT (`Code: Read, Write & Manage`, `Pull Request Threads: Read & Write`) in the agent's secret store under the key `AZURE-DEVOPS-TOKEN`. `Work Items` scope is not needed here — there's no work item to read or comment on.
+
+---
+
+## Scoping a scheduled scan
+
+Since there's no issue/work-item body to parse `Scope:` / `Target:` hints from, set them directly in `execute-prompt` if you don't want a full, untargeted codebase scan every run:
+
+```
+"execute-prompt": "... run /perf-optimize --schedule --scope src/api,src/services --target api to scan only the API and services layers, prioritizing request-path bottlenecks. ..."
+```
+
+---
+
+## Notes
+
+- **One tick → one run, always.** Unlike the label/tag triggers, there's no `match-any` to gate on — every tick of the `cron` runs every execution in the rule set. The **idempotency guard** (orchestrator Step 1a) is what keeps a frequent cron from spamming duplicate PRs, not the rule itself.
+- **`repository` is a literal, not a payload reference.** There's no webhook body to resolve `repository.clone_url` / `repository.default_branch` against, so `url`, `name`, and `ref` are written as plain strings (or the `{ "value": "...", "constant": true }` form — see the linked doc for both spellings).
+- **Reactivate the agent after changing the schedule.** Per the linked Schedule Rule Sets doc, a new or edited `cron` / `timezone` only takes effect after you deactivate and reactivate the agent in the Xianix Agent Studio.
+- **`with-envs` at the rule-set level** (sibling of `executions`) is merged into every execution in the set — the idiomatic place to declare `GITHUB-TOKEN` / `AZURE-DEVOPS-TOKEN` for a schedule rule set, since credentials don't vary per tick.
+- These blocks are a top-level array entry in your rules configuration — see [Schedule Rule Sets](https://xianix-team.github.io/documentation/agent-configuration/rules/schedules/) and the parent [Rules Configuration](/agent-configuration/rules/) guide for the full file structure.

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # notify-push.sh
 # PostToolUse hook — runs after every Bash tool execution.
-# If the command was a git push from a `perf/issue-*` or `perf/workitem-*` branch,
-# outputs a confirmation and a platform-specific next-step hint for opening the PR.
+# If the command was a git push from a `perf/issue-*`, `perf/workitem-*`, or
+# `perf/scheduled-*` branch, outputs a confirmation and a platform-specific
+# next-step hint for opening the PR.
 
 set -euo pipefail
 
@@ -20,7 +21,7 @@ COMMIT=$(git log -1 --oneline 2>/dev/null || echo "")
 echo "Push complete — branch '${BRANCH}' pushed to ${REMOTE}"
 echo "Latest commit: ${COMMIT}"
 
-if ! echo "${BRANCH}" | grep -qE "^perf/(issue|workitem)-"; then
+if ! echo "${BRANCH}" | grep -qE "^perf/(issue|workitem)-|^perf/scheduled-"; then
     # Not a Performance Optimizer branch — quiet success.
     exit 0
 fi
