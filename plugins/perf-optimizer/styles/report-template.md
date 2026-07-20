@@ -2,9 +2,11 @@
 
 This template defines the structure for the compiled performance analysis report. The orchestrator agent must follow this format exactly when compiling findings from the four analyzer sub-agents.
 
-The report is **embedded in the body of the pull request** opened by the `perf-pr-author` agent — there is no separate analysis comment. Reviewers see the applied optimizations and the underlying analysis in one place.
+The report is **embedded in the body of the pull request** opened by the `perf-pr-author` agent for **issue- and work-item-driven runs** — there is no separate analysis comment. Reviewers see the applied optimizations and the underlying analysis in one place.
 
 On local runs where no PR is opened (no Quick-win applied cleanly, or `/analyze-performance` invoked directly), the report is also written verbatim to `performance-report.md` in the repository root.
+
+**Scheduled (`--schedule`) runs do NOT use this template.** A scheduled run ships a single change with a deliberately slim PR body (summary + the one change's rationale + a short checklist + a `Trigger: Scheduled run @ <sha>` line) and does **not** embed this full report or write `performance-report.md`. The orchestrator still compiles this report internally to rank findings and pick the single best item, but it is not published. See `agents/perf-pr-author.md` (*Body for `schedule`*) and `docs/triggers-schedule.md`.
 
 ---
 
