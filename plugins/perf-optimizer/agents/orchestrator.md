@@ -305,7 +305,10 @@ Split findings into the sections defined by `styles/report-template.md`:
 - **Optimization backlog** — explicitly split into **Quick wins** (safe, localized, low-risk) and **Deeper follow-up** (architectural, cross-cutting, needs measurement first)
 - **Files assessed**
 
-Compile everything into the exact structured format defined in `styles/report-template.md`. Read that file and follow its template precisely — this report becomes the **body of the pull request**.
+Compile everything into the exact structured format defined in `styles/report-template.md`. Read that file and follow its template precisely.
+
+- For `TRIGGER_MODE=issue` / `workitem`: this full report becomes the **body of the pull request** — reviewers see the entire analysis alongside the applied changes.
+- For `TRIGGER_MODE=schedule`: the full report is compiled the same way (you still need the complete cross-category ranking to pick the best single item in Step 8), but it is **not** embedded in the PR. A scheduled PR ships **one** change with a deliberately **slim** body — see Step 8 and `agents/perf-pr-author.md`. The goal is a fix a reviewer can read and approve in under a minute, not a backlog to wade through. Keep the compiled report only for internal ranking; do not write it to `performance-report.md` on a scheduled run.
 
 **Guidelines:**
 
@@ -316,15 +319,43 @@ Compile everything into the exact structured format defined in `styles/report-te
 - **Header consistency:** the report header's `Scope`, `Target runtime`, `Default branch`, `<short-sha>`, `Files in scope`, and `Exclusions applied` fields MUST use the exact same `SCOPE_RESOLVED` / `TARGET_RESOLVED` / `DEFAULT_BRANCH` / `BASELINE_SHA` / `FILE_COUNT` / `EXCLUSIONS_COUNT` values that were announced in the Step 2 starting comment (for `TRIGGER_MODE=schedule` / `local`, where Step 2 is skipped, use the same values as resolved in Step 2's freeze block instead). Any deviation is a bug — if you catch one, re-emit the header rather than silently changing the values.
 - **Trigger field for schedule runs:** the report header's `**Trigger:**` line has no issue/work-item to name — use `Scheduled run @ <BASELINE_SHA>` (see `styles/report-template.md`).
 
-### 8. Hand Off to the `perf-pr-author` Sub-Agent
+### 8. Select Findings and Hand Off to the `perf-pr-author` Sub-Agent
 
-Select the **Quick wins** subset from the ranked backlog — only safe, localized, low-risk items. Architectural rewrites stay in the **Deeper follow-up** section of the report and are never auto-applied.
+Selection depends on `TRIGGER_MODE`, because the two flows optimize for different things:
+
+#### `TRIGGER_MODE=issue` / `workitem` — apply the whole Quick-wins subset
+
+Select **all** the **Quick wins** from the ranked backlog — safe, localized, low-risk items. Architectural rewrites stay in the **Deeper follow-up** section of the report and are never auto-applied. The reviewer asked for this run explicitly (they labeled/tagged), so a batch of fixes plus the full report is the expected payload.
+
+#### `TRIGGER_MODE=schedule` — apply exactly ONE easy-to-review item
+
+A scheduled run is unattended and recurring. Its objective is **not** to surface the whole backlog — it is to drip **one** fix at a time that is both **worth merging** and **trivial to review**, so a busy reviewer can read and approve it in under a minute. Dumping every finding on them guarantees the PR is ignored; but shipping a safe-yet-pointless one-liner wastes the slot. The goal is the **highest-impact fix among the ones that are still trivially safe to review** — a low-hanging item that also moves the needle.
+
+Select in **two phases** — a hard eligibility gate first, then rank the survivors by impact. Do **not** collapse this into a single weighted score: impact must never buy its way past the safety gate.
+
+**Phase 1 — eligibility gate (hard filter).** From the **Quick wins** subset, keep only findings that satisfy **all** of:
+
+- **High confidence** — never pick a `Medium`- or `Low`-confidence item for a scheduled run.
+- **Small, localized diff** — a few lines in a single file (ideally one hunk). The reviewer must be able to eyeball the entire diff at once; drop anything multi-file or multi-hunk.
+- **Obviously behavior-preserving** — pure, self-evidently equivalent rewrites (e.g. hoist an invariant out of a loop, add a missing index hint, batch an N+1). Drop anything that could plausibly alter observable output, however promising.
+
+A finding that fails any gate criterion is **out for this run**, regardless of how high its impact is. It stays in the backlog for a future tick (or for a human to pick up via an issue-driven run).
+
+**Phase 2 — rank the eligible survivors by impact.** Among the findings that passed the gate, choose the one with the highest **impact** (`High` before `Medium`). Tie-breakers, in order:
+
+1. Smaller diff (even easier to review).
+2. On a request-path / hot-path file.
+3. Matches the `--target` runtime profile, if one was passed.
+
+Pick the single top candidate. **Do not** apply the second-best item "while you're at it" — one PR, one change, on purpose. The remaining findings are simply left for future scheduled ticks (which won't fire until this PR is merged/closed, thanks to the Step 1a idempotency guard).
+
+If the gate leaves **no** eligible finding (nothing is simultaneously high-confidence, small, and obviously safe), open **no** PR this run — even if high-impact but riskier items exist. A scheduled run would rather do nothing than ship something a reviewer can't quickly trust.
 
 Launch the `perf-pr-author` sub-agent via the `Agent` tool, passing:
 
 - `trigger_mode` — `issue` | `workitem` | `schedule` (this step never runs for `local` — see Step 8's precondition above)
-- the selected Quick-wins findings (with file, line range, suggested rewrite, category, impact, confidence, validation hint)
-- the full compiled report body (for embedding in the PR description)
+- the selected findings — **all** Quick-wins for `issue` / `workitem`; **exactly one** finding for `schedule` (with file, line range, suggested rewrite, category, impact, confidence, validation hint)
+- `trigger_mode=issue` / `workitem`: the full compiled report body (for embedding in the PR description). `trigger_mode=schedule`: **do not** pass the full report — pass only the single finding's details, from which `perf-pr-author` composes a slim body.
 - the detected platform (`github` | `azuredevops`)
 - the default branch name and `BASELINE_SHA`
 - the trigger metadata:
@@ -335,9 +366,9 @@ Launch the `perf-pr-author` sub-agent via the `Agent` tool, passing:
 The `perf-pr-author` agent will:
 
 1. create a new branch — `perf/issue-{issue-number}-<slug>` (GitHub), `perf/workitem-{workitem-id}-<slug>` (Azure DevOps), or `perf/scheduled-<date>-<short-sha>` (schedule) — based on the repository's **default branch**
-2. apply scoped, low-risk edits — one commit per finding with `perf:` prefixed messages
+2. apply the scoped, low-risk edit(s) — one commit per finding with `perf:` prefixed messages (a scheduled run therefore produces a **single** commit)
 3. push the branch
-4. open the pull request against the default branch with the **full performance report embedded in the PR body**, plus a `Closes #{issue-number}` / work-item reference (`issue` / `workitem`) or a `Trigger: Scheduled run` line (`schedule`)
+4. open the pull request against the default branch — `issue` / `workitem` embed the **full performance report** plus a `Closes #{issue-number}` / work-item reference; `schedule` ships a **slim single-change body** plus a `Trigger: Scheduled run` line (no embedded report, no analyzer-verdicts table)
 5. post a link-back comment on the originating issue / work item (`issue` / `workitem` only — `schedule` has nothing to comment on and skips this)
 
 After the `perf-pr-author` returns, emit a single confirmation line:
@@ -347,20 +378,25 @@ After the `perf-pr-author` returns, emit a single confirmation line:
 Performance PR opened: <new-pr-url> — targets <default-branch>, linked to issue/work item #<id>
 
 # schedule
-Performance PR opened: <new-pr-url> — targets <default-branch>, scheduled run @ <BASELINE_SHA>
+Performance PR opened: <new-pr-url> — targets <default-branch>, scheduled run @ <BASELINE_SHA> (single-change PR)
 ```
 
 If zero Quick-win findings can be applied cleanly, emit:
 
 ```
+# issue / workitem
 No performance PR opened — no Quick-win finding could be applied cleanly. Report written to performance-report.md.
+
+# schedule
+No performance PR opened — no easily-reviewable Quick-win found on this scheduled run.
 ```
 
-and write the compiled report body to `performance-report.md` in the working tree so the reporter still has the analysis artifact.
+For `issue` / `workitem` only, write the compiled report body to `performance-report.md` in the working tree so the reporter still has the analysis artifact. For `schedule`, do **not** write a report file — an unattended run should leave the working tree clean and simply try again on the next tick.
 
 **Invariants (must not be violated):**
 
 - The default branch is **never** pushed to.
 - Only findings explicitly classified as **Quick wins** are applied.
 - Every commit message begins with `perf:` and references the originating finding.
-- The optimization PR body includes: summary, the full performance report, `Closes #{issue-number}` / work-item reference, and a verification checklist.
+- A `TRIGGER_MODE=schedule` run applies **exactly one** finding — never a batch. If you find yourself selecting a second item for a scheduled run, stop: that is a contract violation.
+- The optimization PR body includes: summary and a verification checklist, plus — for `issue` / `workitem` — the full performance report and a `Closes #{issue-number}` / work-item reference, or — for `schedule` — the single change's details and a `Trigger: Scheduled run @ <BASELINE_SHA>` line.

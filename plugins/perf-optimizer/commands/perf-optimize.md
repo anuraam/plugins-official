@@ -23,8 +23,8 @@ This command invokes the **orchestrator** agent which runs a whole-codebase perf
    | `io-query-analyzer` | N+1 queries, repeated remote calls, blocking I/O, missing batching/caching |
 
 5. **Rank findings** by `impact × confidence` with hot-path and `--target` tie-breakers.
-6. **Apply only the Quick-win subset** via the `perf-pr-author` sub-agent, one commit per finding.
-7. **Open a single pull request** against the default branch with the full performance report embedded in the body, linked back to the originating issue / work item (or, for `--schedule` runs, traced only by baseline commit — see `docs/triggers-schedule.md`).
+6. **Apply Quick-wins** via the `perf-pr-author` sub-agent, one commit per finding — the **full** Quick-wins subset for issue/work-item runs, or **exactly one** fix for `--schedule` runs (the highest-impact item among the trivially-safe, high-confidence, small-diff candidates).
+7. **Open a single pull request** against the default branch. Issue/work-item runs embed the full performance report and link back to the originating issue / work item; `--schedule` runs ship a **single change with a slim body**, traced only by baseline commit — see `docs/triggers-schedule.md`.
 
 ## How to Use
 
@@ -49,7 +49,7 @@ All flags are optional. When invoked via a Xianix Agent rule, the execute prompt
 | `--target <runtime>` | `api` \| `worker` \| `frontend` \| `data` | Prioritize one runtime profile when ranking findings. Overrides any `Target:` hint. |
 | `--issue <number>` | positive integer | GitHub only. Attach this run to an existing issue: use its title / body for scope parsing, name the branch `perf/issue-<number>-<slug>`, reference `Closes #<number>` in the PR. |
 | `--workitem <id>` | positive integer | Azure DevOps only. Attach this run to an existing work item: use its title / description for scope parsing, name the branch `perf/workitem-<id>-<slug>`, reference the work item in the PR. |
-| `--schedule` | (no value) | Marks the run as coming from a cron `schedule` rule set instead of an issue/work-item webhook — see `docs/triggers-schedule.md`. Still opens a PR (branch `perf/scheduled-<date>-<sha>`), but skips the starting comment, issue-body scope parsing, and link-back comment since there is no issue/work item. Mutually exclusive with `--issue` / `--workitem`. |
+| `--schedule` | (no value) | Marks the run as coming from a cron `schedule` rule set instead of an issue/work-item webhook — see `docs/triggers-schedule.md`. Opens a PR with **exactly one** fix — the highest-impact item among the trivially-safe candidates — and a **slim body** (no embedded full report), on branch `perf/scheduled-<date>-<sha>`. Skips the starting comment, issue-body scope parsing, and link-back comment since there is no issue/work item. Mutually exclusive with `--issue` / `--workitem`. |
 
 ### Flags the orchestrator does NOT accept
 
@@ -89,7 +89,7 @@ The Performance Optimizer runs from three kinds of Xianix Agent rule: two **labe
 |---|---|---|
 | `ai-dlc/perf/optimize` on an issue | GitHub webhook | Run the whole-codebase review and open a PR from `perf/issue-{number}-<slug>` that references `Closes #{number}` |
 | `ai-dlc/perf/optimize` on a work item | Azure DevOps webhook | Run the whole-codebase review and open a PR from `perf/workitem-{id}-<slug>` that references work item `#{id}` |
-| Cron tick (no label, no payload) | `schedule` rule set — either platform | Run the whole-codebase review and open a PR from `perf/scheduled-<date>-<sha>` that references only the baseline commit — see `docs/triggers-schedule.md`. Skipped entirely if a prior scheduled PR is still open (idempotency guard, orchestrator Step 1a). |
+| Cron tick (no label, no payload) | `schedule` rule set — either platform | Run the whole-codebase review and open a **single-change, slim** PR from `perf/scheduled-<date>-<sha>` that references only the baseline commit — see `docs/triggers-schedule.md`. Applies exactly one fix (highest-impact of the trivially-safe candidates); skipped entirely if a prior scheduled PR is still open (idempotency guard, orchestrator Step 1a). |
 
 The command never pushes to the repository's default branch. All edits go on a new `perf/issue-*`, `perf/workitem-*`, or `perf/scheduled-*` branch.
 
@@ -97,9 +97,9 @@ The command never pushes to the repository's default branch. All edits go on a n
 
 - A single pull request against the default branch with:
   - title `perf: <issue title>` (issue/work-item runs) or `perf: scheduled optimization scan (<date>)` (`--schedule` runs)
-  - body containing the structured performance report (see `styles/report-template.md`)
-  - one commit per applied Quick-win finding, prefixed `perf:`
-  - `Closes #{issue-number}` (GitHub), a work-item reference (Azure DevOps), or `Trigger: Scheduled run @ <baseline-sha>` (`--schedule`)
+  - **body** — the full structured performance report (issue/work-item runs, see `styles/report-template.md`), or a **slim single-change body** (`--schedule` runs: one-change rationale + before/after + short checklist)
+  - **commits** — one per applied Quick-win (issue/work-item runs), or **exactly one** commit (`--schedule` runs)
+  - **traceability** — `Closes #{issue-number}` (GitHub), a work-item reference (Azure DevOps), or `Trigger: Scheduled run @ <baseline-sha>` (`--schedule`)
 - A link-back comment on the originating issue / work item pointing at the new PR — **not applicable** for `--schedule` runs, which have no issue/work item to comment on.
 
 ---

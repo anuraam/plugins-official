@@ -10,17 +10,22 @@ For manual/interactive use (`/perf-optimize` in a chat), see the main [README](.
 
 A `schedule` rule set has no issue, work item, or webhook payload to read — it just fires on a `cron` timer. Every execution in the rule set runs on **every** tick, so there's no `match-any` / `use-inputs` to configure (see *No payload → no match-any / use-inputs* in the linked doc).
 
-Because there's no issue/work-item title, the run still produces a pull request, but naming and traceability fall back to date + baseline commit instead:
+Because there's no issue/work-item title, the run still produces a pull request, but naming and traceability fall back to date + baseline commit instead. More importantly, a scheduled run has a **different objective** from an issue/work-item run — see the callout below.
 
 | | Issue / work-item trigger | Schedule trigger |
 |---|---|---|
 | Fires on | Label applied / tag added | `cron` tick |
+| Objective | Fix the whole reviewable backlog on demand | Drip **one** fix at a time — the highest-impact of the trivially-safe candidates |
+| Changes per PR | All selected Quick-wins (one commit each) | **Exactly one** Quick-win (single commit) |
+| PR body | Full embedded performance report + analyzer verdicts | **Slim** — the one change's rationale + a short checklist |
 | Scope/target hints | Parsed from issue/work-item body | Must be set directly in `execute-prompt` (no body to parse) |
 | Branch name | `perf/issue-<n>-<slug>` / `perf/workitem-<id>-<slug>` | `perf/scheduled-<YYYYMMDD>-<short-sha>` |
 | PR title | Issue/work-item title, verbatim | `perf: scheduled optimization scan (<date>)` |
 | PR traceability | `Closes #<n>` / `Related work item: #<id>` | `Trigger: Scheduled run @ <short-sha>` |
 | Link-back comment | Posted on the issue/work item | Not applicable — nothing to comment on |
 | Repeat-run safety | One issue → at most one open PR, naturally | **Idempotency guard:** if a `perf/scheduled-*` PR is already open against the default branch, the run stops before doing any analysis (see orchestrator Step 1a) |
+
+> **Why one change at a time?** A scheduled run is unattended and recurring — nobody asked for it right now. If it opened a PR containing every finding plus a full report, the reviewer would have no time to work through it and the PR would rot. Instead, each scheduled run selects in two phases: first a hard **eligibility gate** (High confidence, small/localized diff, obviously behavior-preserving), then, among the survivors, the **highest-impact** one. So it ships the biggest win that is still trivially safe to review — not just any tiny change — with a body a busy reviewer can approve in under a minute. Anything that fails the gate is skipped for this run no matter how high its impact; if nothing passes the gate, no PR is opened. Combined with the idempotency guard, this produces a **steady drip**: the next fix only appears once the current one is merged or closed. The remaining findings aren't lost — they simply surface on later ticks.
 
 The `/perf-optimize` command detects this mode via the `--schedule` flag, which the rule's `execute-prompt` always passes — see `commands/perf-optimize.md`.
 
@@ -101,7 +106,7 @@ A schedule rule set is a sibling of the `webhook` shape used for the label/tag t
 | `timezone` _(optional)_ | IANA timezone the cron expression is evaluated against — defaults to `UTC` |
 | `repository` | **Plain literal strings** (no JSON-path payload to resolve against) — `url`, optional `name`, and `ref` (the default branch) |
 | `with-envs` (rule-set level) | Declared once as a sibling of `executions`, merged into every execution — the common pattern here since credentials don't vary per tick |
-| `executions[].execute-prompt` | Must explicitly pass `--schedule` (and, optionally, `--scope` / `--target`) since there's no issue/work-item body to parse hints from |
+| `executions[].execute-prompt` | Must explicitly pass `--schedule` (and, optionally, `--scope` / `--target`) since there's no issue/work-item body to parse hints from. Should also reinforce the single-change, slim-PR objective (see the example prompts below). |
 
 `match-any` and `use-inputs` are omitted — there's no payload to filter or extract from.
 
@@ -133,7 +138,7 @@ A schedule rule set is a sibling of the `webhook` shape used for the label/tag t
             "marketplace": "xianix-team/plugins-official"
           }
         ],
-        "execute-prompt": "You are running a scheduled whole-codebase performance review for repository {{repository-name}} on branch {{git-ref}}. There is no triggering issue or work item — run /perf-optimize --schedule to scan the entire codebase and open a pull request if any Quick-win optimizations are found. If a performance PR from a prior scheduled run is already open, the command will detect it and skip this run without opening a duplicate."
+        "execute-prompt": "You are running a scheduled whole-codebase performance scan for repository {{repository-name}} on branch {{git-ref}}. There is no triggering issue or work item. Run /perf-optimize --schedule. Scan the entire codebase, then apply ONLY one optimization, chosen in two phases: first keep only fixes that are high-confidence, small and localized (a few lines in one file), and obviously behavior-preserving; then among those, pick the single HIGHEST-IMPACT one. Open a pull request with just that change. Do not batch multiple fixes and do not embed the full performance report; the PR must be small enough to review and approve in under a minute. If no fix passes the safety gate, open no PR — even if higher-impact but riskier items exist. If a performance PR from a prior scheduled run is still open, detect it and skip this run without opening a duplicate."
       }
     ]
   }
@@ -172,7 +177,7 @@ A schedule rule set is a sibling of the `webhook` shape used for the label/tag t
             "marketplace": "xianix-team/plugins-official"
           }
         ],
-        "execute-prompt": "You are running a scheduled whole-codebase performance review for repository {{repository-name}} on branch {{git-ref}}. There is no triggering work item — run /perf-optimize --schedule to scan the entire codebase and open a pull request if any Quick-win optimizations are found. If a performance PR from a prior scheduled run is already open, the command will detect it and skip this run without opening a duplicate."
+        "execute-prompt": "You are running a scheduled whole-codebase performance scan for repository {{repository-name}} on branch {{git-ref}}. There is no triggering work item. Run /perf-optimize --schedule. Scan the entire codebase, then apply ONLY one optimization, chosen in two phases: first keep only fixes that are high-confidence, small and localized (a few lines in one file), and obviously behavior-preserving; then among those, pick the single HIGHEST-IMPACT one. Open a pull request with just that change. Do not batch multiple fixes and do not embed the full performance report; the PR must be small enough to review and approve in under a minute. If no fix passes the safety gate, open no PR — even if higher-impact but riskier items exist. If a performance PR from a prior scheduled run is still open, detect it and skip this run without opening a duplicate."
       }
     ]
   }
@@ -197,6 +202,7 @@ Since there's no issue/work-item body to parse `Scope:` / `Target:` hints from, 
 
 ## Notes
 
+- **One change per scheduled PR — by design.** A scheduled run applies exactly one Quick-win and ships a slim body; it never batches fixes or embeds the full report. This is enforced in `agents/orchestrator.md` (Step 8 selection) and `agents/perf-pr-author.md` (single commit + slim body), and reinforced by the `execute-prompt`. To work through more findings, let each scheduled PR merge and wait for the next tick.
 - **One tick → one run, always.** Unlike the label/tag triggers, there's no `match-any` to gate on — every tick of the `cron` runs every execution in the rule set. The **idempotency guard** (orchestrator Step 1a) is what keeps a frequent cron from spamming duplicate PRs, not the rule itself.
 - **`repository` is a literal, not a payload reference.** There's no webhook body to resolve `repository.clone_url` / `repository.default_branch` against, so `url`, `name`, and `ref` are written as plain strings (or the `{ "value": "...", "constant": true }` form — see the linked doc for both spellings).
 - **Reactivate the agent after changing the schedule.** Per the linked Schedule Rule Sets doc, a new or edited `cron` / `timezone` only takes effect after you deactivate and reactivate the agent in the Xianix Agent Studio.

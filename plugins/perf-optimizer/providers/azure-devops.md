@@ -170,7 +170,7 @@ git push -u origin "${NEW_BRANCH}"
 
 ### 2. Create the PR via REST
 
-The PR body MUST contain, in order: summary, traceability line(s), applied-optimizations table, not-applied list, verification checklist, and the full performance report body. Title and traceability depend on `TRIGGER_MODE`:
+Title and body both depend on `TRIGGER_MODE`. Work-item runs open a **full-report** PR; scheduled runs open a **slim single-change** PR (see `agents/perf-pr-author.md`, *Body for `schedule`*).
 
 ```bash
 if [ "${TRIGGER_MODE}" = "schedule" ]; then
@@ -195,16 +195,25 @@ print(json.dumps({
 ")"
 ```
 
-Where `${PR_BODY_MARKDOWN}` is the pre-assembled body string containing:
+`${PR_BODY_MARKDOWN}` is the pre-assembled body string. Its contents differ by mode:
 
-1. Summary paragraph — for `trigger_mode=workitem`, describe it as the automated response to the work item; for `trigger_mode=schedule`, describe it as the output of a scheduled (cron) whole-codebase scan with no originating work item
-2. Traceability:
-   - `trigger_mode=workitem`: `Related work item: #${WORKITEM_ID}` and an `AB#${WORKITEM_ID}` smart commit reference (for Azure Boards auto-linking)
-   - `trigger_mode=schedule`: `Trigger: Scheduled run @ ${BASELINE_SHA}` — there is no work item to reference
+**`trigger_mode=workitem` — full report:**
+
+1. Summary paragraph describing the PR as the automated response to the work item
+2. Traceability: `Related work item: #${WORKITEM_ID}` and an `AB#${WORKITEM_ID}` smart commit reference (for Azure Boards auto-linking)
 3. Applied-optimizations table
 4. Not-applied list (or "None")
 5. Verification checklist (literal `- [ ]` items)
 6. `## Performance Report` heading followed by the full, already-compiled report body
+
+**`trigger_mode=schedule` — slim single-change:**
+
+1. Summary paragraph (1–2 sentences): automated scheduled (cron) scan, no work item, one small low-risk change; further findings arrive as separate PRs on later ticks
+2. Traceability: `Trigger: Scheduled run @ ${BASELINE_SHA}` — there is no work item to reference
+3. `## The optimization` heading followed by the compact single-change block (`file:lines` / category / why / before-after / how-to-verify)
+4. Verification checklist (literal `- [ ]` items — the short scheduled variant)
+
+Do **not** include an applied-optimizations table, a not-applied list, or the `## Performance Report` block on a scheduled run.
 
 Capture the returned `pullRequestId` and construct the web URL:
 

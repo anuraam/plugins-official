@@ -52,7 +52,7 @@ flowchart TD
 
 This keeps the trigger lightweight (one label), moves review effort to the PR where teams already spend it, and still produces a human-readable report alongside actual code changes.
 
-**On a `schedule` (cron) run**, steps 1, 3, and 9 don't apply — there's no label/tag to detect and no issue/work-item body or issue/work-item to link back to. The run still fetches the default branch, analyzes, and opens a PR, but branch/PR naming falls back to the run date and baseline commit, and a Step 0 idempotency check skips the run entirely if a prior scheduled PR is still open. See [Automated Triggering](#automated-triggering-xianix-agent) and `docs/triggers-schedule.md`.
+**On a `schedule` (cron) run**, steps 1, 3, and 9 don't apply — there's no label/tag to detect and no issue/work-item body or issue/work-item to link back to. The run still fetches the default branch and analyzes, but it opens a **deliberately minimal** PR: instead of applying the whole Quick-wins batch, a scheduled run first keeps only the trivially-safe fixes (high confidence, small localized diff, obviously behavior-preserving) and then, among those, ships the **single highest-impact** one — the biggest win that's still easy to review — with a slim body (no embedded full report). Branch/PR naming falls back to the run date and baseline commit, and a Step 0 idempotency check skips the run entirely if a prior scheduled PR is still open — so scheduled runs produce a **steady drip of one small, reviewable fix at a time**. See [Automated Triggering](#automated-triggering-xianix-agent) and `docs/triggers-schedule.md`.
 
 ---
 
@@ -121,13 +121,15 @@ The agent is primarily **webhook-driven** via issue labels. The `/perf-optimize`
 /perf-optimize --schedule
 ```
 
-Configured via a `schedule` rule set (see `docs/triggers-schedule.md`) rather than a webhook. The agent creates a branch named `perf/scheduled-{date}-{sha}` and a PR whose only traceability is the baseline commit — unless a PR from a prior scheduled run is still open, in which case the run skips without opening a duplicate.
+Configured via a `schedule` rule set (see `docs/triggers-schedule.md`) rather than a webhook. The agent creates a branch named `perf/scheduled-{date}-{sha}` and a PR containing a **single** low-risk fix with a slim body, traced only by the baseline commit — unless a PR from a prior scheduled run is still open, in which case the run skips without opening a duplicate.
 
 ---
 
 ## PR Output
 
-Every run produces **one pull request** against the default branch. Its body contains:
+Every run produces **one pull request** against the default branch.
+
+**Issue / work-item runs** embed the full analysis in the PR body:
 
 - **Top bottlenecks** ranked by likely user impact
 - **Latency risk areas** with estimated request-path effect
@@ -135,11 +137,11 @@ Every run produces **one pull request** against the default branch. Its body con
 - **I/O and query inefficiencies** with concrete rewrite suggestions
 - **Optimization backlog** split into quick wins vs deeper follow-up
 - **Per-change rationale** — why each commit matters, expected impact, validation hints
-- **Traceability** — `Closes #{issue-number}` (GitHub), work-item reference (Azure DevOps), or `Trigger: Scheduled run @ {baseline-sha}` (scheduled runs, either platform)
+- **Traceability** — `Closes #{issue-number}` (GitHub) or work-item reference (Azure DevOps)
 
 The agent only commits changes for findings it classifies as **low-risk quick wins**. Higher-risk or architectural suggestions are listed in the report's backlog section for human follow-up rather than auto-applied.
 
-Scheduled runs get **no link-back comment** (step 9 doesn't apply — there's no issue/work item to comment on) and are additionally gated by an idempotency check: if a PR from a prior scheduled run is still open against the default branch, the next scheduled tick skips entirely rather than opening a second one.
+**Scheduled runs are deliberately different** — the PR contains a **single** low-risk fix and a **slim body** (one-change rationale + before/after + a short checklist + `Trigger: Scheduled run @ {baseline-sha}`), with **no** embedded full report. They get **no link-back comment** (step 9 doesn't apply — there's no issue/work item) and are gated by an idempotency check: if a PR from a prior scheduled run is still open against the default branch, the next scheduled tick skips entirely rather than opening a second one. The intent is a fix a reviewer can approve in under a minute, dripped one at a time.
 
 ---
 
