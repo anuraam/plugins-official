@@ -1,6 +1,6 @@
 ---
 name: test-web-app
-description: Runs web app behaviour verification for a GitHub PR or Issue. Finds a testable URL, executes a structured test plan via Playwright CLI (headless Chromium), and posts a step-by-step test execution report as a GitHub comment.
+description: Runs web app behaviour verification for a GitHub PR or Issue. Resolves a testable URL (config, args, or comments), executes a structured test plan via Python Playwright (Webwright workflow, headless Chromium), and posts a step-by-step test execution report as a GitHub comment.
 triggers:
   - /test-web-app
 ---
@@ -26,9 +26,9 @@ The orchestrator runs three sequential phases, each backed by its own skill file
    - Finds an existing test plan or auto-generates one
 
 2. **Run Playwright session** (`skills/run-playwright-session/SKILL.md`)
-   - Resolves `playwright-cli` and ensures Chromium is available
-   - Opens a single headless browser session
-   - Executes each test step adaptively, retrying failures up to 3 times
+   - Ensures Chromium is available, then writes and executes a Python/Playwright script (Webwright workflow)
+   - Runs authenticated via a Playwright storage state when `.web-app-tester.json` configures one
+   - Executes each test step, retrying failures up to 3 times
    - Captures a screenshot on the final retry of any blocked step
    - Cleans up temp files
 
