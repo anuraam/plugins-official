@@ -1,6 +1,6 @@
 # Platform Setup Guide
 
-The Performance Optimizer analyzes the repository's **default branch** with plain `git` on every supported host. **GitHub CLI (`gh`)** and **Azure DevOps REST** (via `curl`) are used only to read the trigger issue / work item, open the pull request, and post the link-back comment — not for the core analysis.
+The Performance Optimizer analyzes the repository's **default branch** with plain `git` on every supported host. **GitHub CLI (`gh`)** and **Azure DevOps REST** (via `curl`) are used only to read the trigger issue / work item (skipped for scheduled runs — see `docs/triggers-schedule.md`), open the pull request, and post the link-back comment (also skipped for scheduled runs) — not for the core analysis.
 
 ---
 
@@ -28,8 +28,8 @@ For CI or scripted use, set **`GITHUB-TOKEN`** (preferred) or **`GH_TOKEN`** ins
 |---|---|---|
 | **Contents** | Read & Write | Read repository code on the default branch, push the new `perf/issue-*` branch |
 | **Metadata** | Read | Resolve repository metadata (default branch, clone URL, etc.) |
-| **Issues** | Read & Write | Read the trigger issue body / scope hints and post the link-back comment |
-| **Pull requests** | Read & Write | Open the performance PR and update it with the report |
+| **Issues** | Read & Write | Read the trigger issue body / scope hints and post the link-back comment. Unused for scheduled runs — there's no issue. |
+| **Pull requests** | Read & Write | Open the performance PR, update it with the report, and (scheduled runs) list open PRs for the dedupe check |
 
 Classic tokens: `repo` (private repos) or `public_repo` (public only); `read:org` (org repos).
 
@@ -37,7 +37,7 @@ The plugin does **not** use the GitHub MCP server.
 
 ### Credentials for `git push`
 
-The `perf-pr-author` agent pushes the new `perf/issue-<number>-<slug>` branch (never the default branch). The `GITHUB-TOKEN` is reused as the push credential — the `hooks/validate-prerequisites.sh` PreToolUse hook injects it into git via `GIT_CONFIG_*` environment variables just for that one push. No separate `GITHUB_TOKEN` is required.
+The `perf-pr-author` agent pushes the new `perf/issue-<number>-<slug>` (or `perf/scheduled-<date>-<sha>` for scheduled runs) branch — never the default branch. The `GITHUB-TOKEN` is reused as the push credential — the `hooks/validate-prerequisites.sh` PreToolUse hook injects it into git via `GIT_CONFIG_*` environment variables just for that one push. No separate `GITHUB_TOKEN` is required.
 
 Pass it at runtime:
 
@@ -80,9 +80,9 @@ Add to `~/.zshrc` or `~/.bashrc` to persist.
 
 | Scope | Access | Purpose |
 |---|---|---|
-| **Code** | Read & Write | Read repository code on the default branch, push the new `perf/workitem-*` branch |
-| **Work Items** | Read & Write | Read the trigger work item description / tags and post the link-back comment |
-| **Pull Request Threads** | Read & Write | Open the performance PR and maintain its discussion thread |
+| **Code** | Read & Write | Read repository code on the default branch, push the new `perf/workitem-*` / `perf/scheduled-*` branch |
+| **Work Items** | Read & Write | Read the trigger work item description / tags and post the link-back comment. Unused for scheduled runs — there's no work item. |
+| **Pull Request Threads** | Read & Write | Open the performance PR, maintain its discussion thread, and (scheduled runs) query open PRs for the dedupe check |
 
 ### Credentials for `git push`
 
@@ -99,7 +99,7 @@ The plugin reuses `AZURE-DEVOPS-TOKEN` for `git push` credential injection autom
 
 ## Unsupported platforms
 
-GitHub and Azure DevOps are the two platforms the issue-driven flow supports end-to-end. The `/perf-optimize` command can still run locally against any git remote — the analyzer pipeline is host-agnostic — but PR creation is only automated on the two platforms above. On any other remote, the PreToolUse hook will refuse the push and you will need to open the PR manually on your host.
+GitHub and Azure DevOps are the two platforms the issue-driven and scheduled flows support end-to-end. The `/perf-optimize` command can still run locally against any git remote — the analyzer pipeline is host-agnostic — but PR creation is only automated on the two platforms above. On any other remote, the PreToolUse hook will refuse the push and you will need to open the PR manually on your host.
 
 ---
 
@@ -109,6 +109,7 @@ GitHub and Azure DevOps are the two platforms the issue-driven flow supports end
 |---|---|---|---|---|
 | GitHub | Issue label `ai-dlc/perf/optimize` | `git ls-files` on the default branch | `gh pr create` | `GITHUB-TOKEN` |
 | Azure DevOps | Work item tag `ai-dlc/perf/optimize` | `git ls-files` on the default branch | REST (`curl`) per `providers/azure-devops.md` | `AZURE-DEVOPS-TOKEN` |
+| GitHub / Azure DevOps | `schedule` rule set (`cron`, `--schedule`) | `git ls-files` on the default branch | Same as above, minus the issue/work-item read + link-back | Same tokens as above |
 
 ---
 
@@ -116,4 +117,6 @@ GitHub and Azure DevOps are the two platforms the issue-driven flow supports end
 
 - `providers/github.md` — GitHub-specific issue reads, PR creation, and comment logic
 - `providers/azure-devops.md` — Azure DevOps-specific work-item reads, PR creation, and comment logic
-- `docs/rules-examples.md` — Xianix Agent rules for label-driven execution
+- `docs/triggers-github.md` — Xianix Agent rule for label-driven execution on GitHub
+- `docs/triggers-azure-devops.md` — Xianix Agent rule for tag-driven execution on Azure DevOps
+- `docs/triggers-schedule.md` — Xianix Agent rule for cron-driven execution with no issue/work item

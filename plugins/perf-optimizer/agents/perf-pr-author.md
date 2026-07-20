@@ -1,6 +1,6 @@
 ---
 name: perf-pr-author
-description: Opens the single performance optimization pull request. Takes the Quick-win findings and the compiled performance report from the orchestrator, creates a new branch from the default branch, applies each Quick-win as its own commit, pushes the branch, and opens a pull request whose body embeds the full report and references the originating issue or work item.
+description: Opens the single performance optimization pull request. Takes the Quick-win findings and the compiled performance report from the orchestrator, creates a new branch from the default branch, applies each Quick-win as its own commit, pushes the branch, and opens a pull request whose body embeds the full report and references the originating issue, work item, or (for scheduled runs) the baseline commit.
 tools: Read, Write, Grep, Glob, Bash
 model: inherit
 ---
@@ -19,10 +19,14 @@ You will receive:
 |---|---|
 | `platform` | `github` or `azuredevops` |
 | `default_branch` | The repository's default branch (e.g. `main`, `master`, `develop`) |
+| `trigger_mode` | `issue` \| `workitem` \| `schedule` — decides branch/PR naming and which traceability line / link-back step applies below |
 | `findings` | Ranked list of **Quick-win** findings with file, line range, suggested rewrite, reason, impact, confidence, validation hint |
 | `report_body` | The fully compiled performance report (per `styles/report-template.md`) to embed in the PR body |
-| `issue_number` / `issue_title` / `issue_body` | **GitHub only:** trigger issue metadata |
-| `workitem_id` / `workitem_title` / `workitem_body` | **Azure DevOps only:** trigger work item metadata |
+| `baseline_sha` | Short SHA of `origin/${default_branch}` at review start (from the orchestrator's Step 2 freeze). Always present; used for the schedule branch/commit naming and the report header |
+| `issue_number` / `issue_title` / `issue_body` | **`trigger_mode=issue` only:** trigger issue metadata |
+| `workitem_id` / `workitem_title` / `workitem_body` | **`trigger_mode=workitem` only:** trigger work item metadata |
+
+`trigger_mode=schedule` carries **no** issue/work-item metadata — there is nothing to parse a title from and nothing to link back to. Treat a missing `issue_number`/`workitem_id` as an error only when `trigger_mode` is `issue`/`workitem` respectively (see Step 2); it is expected and correct when `trigger_mode=schedule`.
 
 ## Hard Invariants (must not be violated)
 
@@ -52,14 +56,15 @@ git reset --hard "origin/${DEFAULT_BRANCH}"
 
 ### 2. Derive the branch name
 
-The branch name is **mechanically derived from the issue or work-item title** — no creative alternates, no generic suffixes like `-optimizations`, `-fixes`, `-perf-review`.
+The branch name is **mechanically derived** from the trigger — no creative alternates, no generic suffixes like `-optimizations`, `-fixes`, `-perf-review`.
 
 **Shape (mandatory):**
 
-- GitHub:        `perf/issue-{ISSUE_NUMBER}-{slug(ISSUE_TITLE)}`
-- Azure DevOps:  `perf/workitem-{WORKITEM_ID}-{slug(WORKITEM_TITLE)}`
+- `trigger_mode=issue`:      `perf/issue-{ISSUE_NUMBER}-{slug(ISSUE_TITLE)}`
+- `trigger_mode=workitem`:   `perf/workitem-{WORKITEM_ID}-{slug(WORKITEM_TITLE)}`
+- `trigger_mode=schedule`:   `perf/scheduled-{YYYYMMDD}-{BASELINE_SHA}` — no title to slugify, so the date (UTC, run start) plus the already-short `baseline_sha` make it both sortable and unique per baseline commit
 
-**Slug rules (apply in order):**
+**Slug rules for `issue` / `workitem` (apply in order):**
 
 1. Lowercase.
 2. Replace any run of characters that are not `[a-z0-9]` with a single `-`.
@@ -84,27 +89,39 @@ slugify() {
   printf '%s' "$s"
 }
 
-if [ "${PLATFORM}" = "github" ]; then
-  if [ -z "${ISSUE_NUMBER:-}" ]; then
-    echo "error: ISSUE_NUMBER is required for GitHub runs" >&2
+case "${TRIGGER_MODE}" in
+  issue)
+    if [ -z "${ISSUE_NUMBER:-}" ]; then
+      echo "error: ISSUE_NUMBER is required when TRIGGER_MODE=issue" >&2
+      exit 1
+    fi
+    SLUG=$(slugify "${ISSUE_TITLE:-}")
+    NEW_BRANCH="perf/issue-${ISSUE_NUMBER}-${SLUG}"
+    ;;
+  workitem)
+    if [ -z "${WORKITEM_ID:-}" ]; then
+      echo "error: WORKITEM_ID is required when TRIGGER_MODE=workitem" >&2
+      exit 1
+    fi
+    SLUG=$(slugify "${WORKITEM_TITLE:-}")
+    NEW_BRANCH="perf/workitem-${WORKITEM_ID}-${SLUG}"
+    ;;
+  schedule)
+    if [ -z "${BASELINE_SHA:-}" ]; then
+      echo "error: BASELINE_SHA is required when TRIGGER_MODE=schedule" >&2
+      exit 1
+    fi
+    RUN_DATE=$(date -u +%Y%m%d)
+    NEW_BRANCH="perf/scheduled-${RUN_DATE}-${BASELINE_SHA}"
+    ;;
+  *)
+    echo "error: unknown TRIGGER_MODE '${TRIGGER_MODE}' — must be issue, workitem, or schedule" >&2
     exit 1
-  fi
-  SLUG=$(slugify "${ISSUE_TITLE:-}")
-  NEW_BRANCH="perf/issue-${ISSUE_NUMBER}-${SLUG}"
-else
-  if [ -z "${WORKITEM_ID:-}" ]; then
-    echo "error: WORKITEM_ID is required for Azure DevOps runs" >&2
-    exit 1
-  fi
-  SLUG=$(slugify "${WORKITEM_TITLE:-}")
-  NEW_BRANCH="perf/workitem-${WORKITEM_ID}-${SLUG}"
-fi
+    ;;
+esac
 
 # Hard-fail on any deviation from the contract before we create the branch.
-case "${NEW_BRANCH}" in
-  perf/issue-*[!0-9]*-*|perf/workitem-*[!0-9]*-*) : ;;  # ok: digit-id-slug shape
-esac
-if ! printf '%s' "${NEW_BRANCH}" | grep -Eq '^perf/(issue|workitem)-[0-9]+-[a-z0-9][a-z0-9-]*$'; then
+if ! printf '%s' "${NEW_BRANCH}" | grep -Eq '^perf/(issue|workitem)-[0-9]+-[a-z0-9][a-z0-9-]*$|^perf/scheduled-[0-9]{8}-[0-9a-f]+$'; then
   echo "error: refusing to create non-conforming branch name '${NEW_BRANCH}'" >&2
   exit 1
 fi
@@ -120,16 +137,22 @@ For each finding, in the order provided by the orchestrator:
 2. Use `Write` to apply the scoped rewrite suggested by the analyzer. Keep edits **minimal and local** — do not refactor adjacent code.
 3. If the rewrite no longer applies cleanly, or applying it would change observable behavior, **skip** the finding and record it in a local "not applied" list with the reason.
 4. Run any quick static check the repository already supports (existing linter / formatter / typechecker invocation from `package.json`, `Makefile`, `go vet`, `dotnet build`, etc.). Do not invent tooling. If the check fails, revert the edit and move the finding to "not applied".
-5. Commit the change:
+5. Commit the change. The `Ref:` trailer depends on `TRIGGER_MODE` — there is no issue/work-item number to fall back to when `TRIGGER_MODE=schedule`:
 
    ```bash
+   case "${TRIGGER_MODE}" in
+     issue)    REF_LINE="Ref: issue #${ISSUE_NUMBER}" ;;
+     workitem) REF_LINE="Ref: work item #${WORKITEM_ID}" ;;
+     schedule) REF_LINE="Ref: scheduled run @ ${BASELINE_SHA}" ;;
+   esac
+
    git add <file>
    git commit -m "perf: <short description> (<file>:<lines>)
 
    Source finding: <category> — <one-sentence reason>
    Impact: <High|Medium|Low>
    Confidence: <High|Medium|Low>
-   Ref: issue #${ISSUE_NUMBER:-$WORKITEM_ID}"
+   ${REF_LINE}"
    ```
 
    One commit per logical finding. Do not squash.
@@ -157,11 +180,12 @@ Open a pull request from `${NEW_BRANCH}` to `${DEFAULT_BRANCH}` on the detected 
 The PR **title** is mechanically derived from the trigger — no paraphrasing, no summarizing the applied fixes:
 
 ```
-perf: <ISSUE_TITLE>        # GitHub
-perf: <WORKITEM_TITLE>     # Azure DevOps
+perf: <ISSUE_TITLE>                                 # trigger_mode=issue
+perf: <WORKITEM_TITLE>                              # trigger_mode=workitem
+perf: scheduled optimization scan (<YYYY-MM-DD>)    # trigger_mode=schedule — <YYYY-MM-DD> is the run date (UTC), matching RUN_DATE from Step 2
 ```
 
-Rules:
+Rules for `issue` / `workitem` titles:
 
 - Start with the literal prefix `perf: ` (lowercase, single space).
 - Append the issue or work-item title **verbatim** (preserve casing, punctuation, and wording). Do not describe what the PR did — that belongs in the body.
@@ -169,12 +193,15 @@ Rules:
 - Collapse internal whitespace runs to a single space and trim surrounding whitespace.
 - If the resulting title would exceed 72 characters, truncate on a word boundary and append `…`. Never shorten by rewording.
 
+For `schedule`, the title is a **fixed template** — there is no title to paraphrase or truncate; just substitute the date.
+
 The PR **body** must contain, in this order:
 
-1. **Summary** — one short paragraph explaining that this PR is the automated response to the performance issue / work item, containing scoped Quick-win optimizations applied across the codebase.
+1. **Summary** — one short paragraph. For `issue`/`workitem`, state that this PR is the automated response to the performance issue / work item. For `schedule`, state that this PR is the output of a scheduled (cron) whole-codebase scan with no originating issue or work item.
 2. **Links / traceability**:
-   - **GitHub:** literal `Closes #${ISSUE_NUMBER}` line (so GitHub auto-closes the issue on merge)
-   - **Azure DevOps:** literal `Related work item: #${WORKITEM_ID}` line and a `AB#${WORKITEM_ID}` smart commit reference for Azure Boards linking
+   - `trigger_mode=issue`: literal `Closes #${ISSUE_NUMBER}` line (so GitHub auto-closes the issue on merge)
+   - `trigger_mode=workitem`: literal `Related work item: #${WORKITEM_ID}` line and a `AB#${WORKITEM_ID}` smart commit reference for Azure Boards linking
+   - `trigger_mode=schedule`: literal `Trigger: Scheduled run @ ${BASELINE_SHA}` line — there is no issue/work item to close or reference
 3. **Applied optimizations** — a table, one row per commit:
 
    | File:Lines | Category | Impact | Confidence | Reason |
@@ -214,14 +241,22 @@ for h in "${required_headings[@]}"; do
   fi
 done
 
-# Traceability line must match the platform.
-if [ "${PLATFORM}" = "github" ]; then
-  grep -Eq "^Closes #${ISSUE_NUMBER}\b" "$BODY_FILE" \
-    || missing+=("Closes #${ISSUE_NUMBER}")
-else
-  grep -Eq "^Related work item: #${WORKITEM_ID}\b" "$BODY_FILE" \
-    || missing+=("Related work item: #${WORKITEM_ID}")
-fi
+# Traceability line must match trigger_mode (not just platform — a scheduled
+# run on GitHub still has no issue to close).
+case "${TRIGGER_MODE}" in
+  issue)
+    grep -Eq "^Closes #${ISSUE_NUMBER}\b" "$BODY_FILE" \
+      || missing+=("Closes #${ISSUE_NUMBER}")
+    ;;
+  workitem)
+    grep -Eq "^Related work item: #${WORKITEM_ID}\b" "$BODY_FILE" \
+      || missing+=("Related work item: #${WORKITEM_ID}")
+    ;;
+  schedule)
+    grep -Eq "^Trigger: Scheduled run @ ${BASELINE_SHA}\b" "$BODY_FILE" \
+      || missing+=("Trigger: Scheduled run @ ${BASELINE_SHA}")
+    ;;
+esac
 
 # The embedded report must include the analyzer verdicts block produced
 # by the orchestrator (see styles/report-template.md).
@@ -245,8 +280,10 @@ Platform-specific opening:
 
 ### 6. Link the new PR back to the originating issue / work item
 
-- **GitHub:** post a follow-up comment on the trigger issue pointing at the new PR (see `providers/github.md`, *Linking back to the issue*).
-- **Azure DevOps:** post a comment / discussion thread on the trigger work item pointing at the new PR (see `providers/azure-devops.md`, *Linking back to the work item*).
+Skip this step entirely when `TRIGGER_MODE=schedule` — there is no issue or work item to comment on, and the PR body's `Trigger: Scheduled run @ ${BASELINE_SHA}` line is the only traceability a scheduled run has (and needs).
+
+- **GitHub (`trigger_mode=issue`):** post a follow-up comment on the trigger issue pointing at the new PR (see `providers/github.md`, *Linking back to the issue*).
+- **Azure DevOps (`trigger_mode=workitem`):** post a comment / discussion thread on the trigger work item pointing at the new PR (see `providers/azure-devops.md`, *Linking back to the work item*).
 
 If the link-back post fails, emit one warning line but still succeed overall — the PR itself already references the issue / work item.
 
@@ -263,7 +300,8 @@ Leave the working tree clean.
 On success:
 
 ```
-Performance PR opened: <new_pr_url> — targets <default_branch>, linked to issue/work item #<id>
+Performance PR opened: <new_pr_url> — targets <default_branch>, linked to issue/work item #<id>   # issue / workitem
+Performance PR opened: <new_pr_url> — targets <default_branch>, scheduled run @ <baseline_sha>     # schedule
 ```
 
 If anything failed mid-flow, emit a single error line describing what failed and which step it failed at. Never leave the branch pushed without either an opened PR or an explicit error explaining why the PR was not opened.

@@ -10,7 +10,7 @@ Required environment variable:
 
 | Variable | Purpose |
 |---|---|
-| `AZURE-DEVOPS-TOKEN` | Azure DevOps PAT — must include `Code (Read & Write)`, `Work Items (Read & Write)`, and `Pull Request Threads (Read & Write)` |
+| `AZURE-DEVOPS-TOKEN` | Azure DevOps PAT — must include `Code (Read & Write)`, `Work Items (Read & Write)`, and `Pull Request Threads (Read & Write)`. `Work Items` is unused for `trigger_mode=schedule` (no work item exists) but the PAT can still carry the scope. |
 
 Optional — used to override values parsed from the remote URL:
 
@@ -55,6 +55,31 @@ Use `${API_BASE}` in place of a hardcoded host for **every** API call below.
 
 ---
 
+## Checking for an already-open scheduled PR
+
+**`trigger_mode=schedule` only** (orchestrator Step 1a). Query active PRs targeting the default branch and filter for a source branch starting with `perf/scheduled-`:
+
+```bash
+EXISTING_SCHEDULED_PR=$(curl -s -u ":${AZURE-DEVOPS-TOKEN}" \
+  "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests?searchCriteria.status=active&searchCriteria.targetRefName=refs/heads/${DEFAULT_BRANCH}&api-version=7.1" \
+  | python3 -c "
+import sys, json
+prs = json.load(sys.stdin).get('value', [])
+match = next((pr for pr in prs if pr['sourceRefName'].startswith('refs/heads/perf/scheduled-')), None)
+print(match['pullRequestId'] if match else '')
+")
+
+if [ -n "${EXISTING_SCHEDULED_PR}" ]; then
+  EXISTING_PR_URL="${API_BASE}/_git/${AZURE_REPO}/pullrequest/${EXISTING_SCHEDULED_PR}"
+  echo "Skipped: performance PR ${EXISTING_PR_URL} from a prior scheduled run is still open — review or merge it before the next scheduled optimization PR is opened."
+  exit 0
+fi
+```
+
+Run this **before** Step 0 (indexing) so a run with an already-open scheduled PR does no analysis work at all — not just no PR-opening work.
+
+---
+
 ## Reading the trigger work item
 
 The orchestrator receives the work item title / description via the rule payload. If you need to re-read it (e.g. local runs), use:
@@ -90,6 +115,8 @@ Include the same `properties` object on **every** PR `POST .../threads` body bel
 ---
 
 ## Posting the Starting Comment on the work item
+
+**Skip this section entirely when `TRIGGER_MODE=schedule`** — there is no work item to comment on.
 
 Post a comment on the originating work item so the reporter knows the Performance Optimizer has started **and which scope it committed to**. The comment must echo the orchestrator's resolved run plan — never the raw work-item body — so reviewers can catch scope drift before the PR is opened.
 
@@ -143,9 +170,16 @@ git push -u origin "${NEW_BRANCH}"
 
 ### 2. Create the PR via REST
 
-The PR body MUST contain, in order: summary, `Related work item: #${WORKITEM_ID}` plus `AB#${WORKITEM_ID}`, applied-optimizations table, not-applied list, verification checklist, and the full performance report body.
+The PR body MUST contain, in order: summary, traceability line(s), applied-optimizations table, not-applied list, verification checklist, and the full performance report body. Title and traceability depend on `TRIGGER_MODE`:
 
 ```bash
+if [ "${TRIGGER_MODE}" = "schedule" ]; then
+  RUN_DATE_DISPLAY=$(date -u +%Y-%m-%d)
+  PR_TITLE="perf: scheduled optimization scan (${RUN_DATE_DISPLAY})"
+else
+  PR_TITLE="perf: ${WORKITEM_TITLE}"
+fi
+
 curl -s -u ":${AZURE-DEVOPS-TOKEN}" \
   -X POST \
   -H "Content-Type: application/json" \
@@ -155,7 +189,7 @@ import json, os
 print(json.dumps({
   'sourceRefName': f\"refs/heads/{os.environ['NEW_BRANCH']}\",
   'targetRefName': f\"refs/heads/{os.environ['DEFAULT_BRANCH']}\",
-  'title': f\"perf: {os.environ['WORKITEM_TITLE']}\",
+  'title': os.environ['PR_TITLE'],
   'description': os.environ['PR_BODY_MARKDOWN']
 }))
 ")"
@@ -163,8 +197,10 @@ print(json.dumps({
 
 Where `${PR_BODY_MARKDOWN}` is the pre-assembled body string containing:
 
-1. Summary paragraph
-2. `Related work item: #${WORKITEM_ID}` and an `AB#${WORKITEM_ID}` smart commit reference (for Azure Boards auto-linking)
+1. Summary paragraph — for `trigger_mode=workitem`, describe it as the automated response to the work item; for `trigger_mode=schedule`, describe it as the output of a scheduled (cron) whole-codebase scan with no originating work item
+2. Traceability:
+   - `trigger_mode=workitem`: `Related work item: #${WORKITEM_ID}` and an `AB#${WORKITEM_ID}` smart commit reference (for Azure Boards auto-linking)
+   - `trigger_mode=schedule`: `Trigger: Scheduled run @ ${BASELINE_SHA}` — there is no work item to reference
 3. Applied-optimizations table
 4. Not-applied list (or "None")
 5. Verification checklist (literal `- [ ]` items)
@@ -177,6 +213,8 @@ ${API_BASE}/_git/${AZURE_REPO}/pullrequest/<new-pr-id>
 ```
 
 ### 3. Link the PR back to the work item
+
+**Skip this step entirely when `TRIGGER_MODE=schedule`** — there is no work item to comment on. Go straight to Step 4.
 
 Post a comment thread on the originating work item pointing to the new PR:
 
@@ -195,8 +233,12 @@ Optionally attach the PR to the work item as a `Pull Request` artifact link via 
 
 ### 4. Output
 
-```
-Performance PR opened: ${NEW_PR_URL} — targets ${DEFAULT_BRANCH}, linked to work item #${WORKITEM_ID}
+```bash
+if [ "${TRIGGER_MODE}" = "schedule" ]; then
+  echo "Performance PR opened: ${NEW_PR_URL} — targets ${DEFAULT_BRANCH}, scheduled run @ ${BASELINE_SHA}"
+else
+  echo "Performance PR opened: ${NEW_PR_URL} — targets ${DEFAULT_BRANCH}, linked to work item #${WORKITEM_ID}"
+fi
 ```
 
 If the REST call fails (missing scope, branch policy, duplicate PR), emit one error line and stop. Do **not** retry with different auth. Do **not** rewrite the default branch.
