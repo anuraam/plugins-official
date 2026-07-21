@@ -1,6 +1,6 @@
 ---
 name: test-chatbot
-description: Verify AI chatbot behaviour in a web application. Reads widget configuration and Q&A pairs from a chatbot-test block in a GitHub issue or Azure DevOps work item, opens the chatbot via Playwright (headless Chromium), runs six test categories, judges Q&A accuracy with a batched LLM call, and posts a structured report. Usage: /test-chatbot <url>
+description: Verify AI chatbot behaviour in a web application. Reads widget configuration and Q&A pairs from a chatbot-test block in a GitHub issue or Azure DevOps work item, opens the chatbot via Playwright (headless Chromium), runs seven test categories, judges Q&A accuracy with a batched LLM call, and posts a structured report. Usage: /test-chatbot <url>
 argument-hint: <github-issue-url | azure-devops-wi-url | app-url>
 ---
 
@@ -13,7 +13,7 @@ Invokes the **orchestrator** agent to:
 1. Parse the input URL to determine entry type (GitHub issue, Azure DevOps work item, or direct app URL)
 2. Fetch the issue/work item and extract the `chatbot-test` JSON block for widget hints, credentials, and Q&A pairs
 3. Open the web application in a headless Chromium browser and locate the chatbot widget
-4. Run six test categories against the chatbot
+4. Run seven test categories against the chatbot
 5. Judge Q&A pair responses with a single batched LLM call
 6. Post a structured report as an issue/work item comment, or write `chatbot-test-report.md` for direct URL runs
 
@@ -34,6 +34,7 @@ Invokes the **orchestrator** agent to:
 | **Fallback Handling** | Gibberish and out-of-scope inputs — bot responds gracefully | Same |
 | **Response Latency** | Time from message sent to response complete | Same |
 | **Conversation Continuity** | Follow-up question retains context from previous response | Same |
+| **Conversation Flow** | Sequential context-dependent Q&A chain from `conversation_flow` block — only runs when defined | Skipped |
 | **Empty Input Handling** | Blank message submission handled gracefully | Same |
 
 ## Test Case Block

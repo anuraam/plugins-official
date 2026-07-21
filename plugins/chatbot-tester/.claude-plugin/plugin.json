@@ -1,7 +1,7 @@
 {
   "name": "chatbot-tester",
   "version": "1.0.0",
-  "description": "Automated AI chatbot verification for any web application. Loads widget configuration from a knowledge file, opens the chatbot via Playwright, runs six test categories (UI availability, functional accuracy, fallback handling, response latency, conversation continuity, empty input handling), judges Q&A responses with a batched LLM call, and posts a structured report as a PR/issue comment or local markdown file.",
+  "description": "Automated AI chatbot verification for any web application. Loads widget configuration from a knowledge file, opens the chatbot via Playwright, runs seven test categories (UI availability, functional accuracy, fallback handling, response latency, conversation continuity, conversation flow, empty input handling), judges Q&A responses with a batched LLM call, and posts a structured report as a PR/issue comment or local markdown file.",
   "author": {
     "name": "Xianix",
     "email": "hello@xianix.com",

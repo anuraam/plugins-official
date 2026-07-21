@@ -1,6 +1,6 @@
 ---
 name: run-playwright-session
-description: Phase 2 of chatbot-tester. Opens the target URL in headless Chromium, logs in if required, translates plain language widget hints to Playwright selectors, runs a responsiveness probe, and runs six test categories against the chatbot. If the bot does not complete a response to the initial probe within 60 seconds all categories are marked BLOCKED immediately and the session exits. Outputs structured category results with verbatim bot responses for all Q&A pairs.
+description: Phase 2 of chatbot-tester. Opens the target URL in headless Chromium, logs in if required, translates plain language widget hints to Playwright selectors, runs a responsiveness probe, and runs seven test categories against the chatbot (Conversation Flow only when a conversation_flow array is defined). If the bot does not complete a response to the initial probe within 60 seconds all categories are marked BLOCKED immediately and the session exits. Outputs structured category results with verbatim bot responses for all Q&A pairs.
 disable-model-invocation: true
 ---
 
@@ -32,6 +32,10 @@ This skill is invoked by the **orchestrator** agent. It is not a standalone slas
   ],
   probe_results: [                     // for Fallback, Continuity, Empty Input categories
     { probe, actual_response, duration_ms }
+  ],
+  flow_steps: [                        // only present for Conversation Flow category
+    { index, name, question, actual_response, duration_ms,
+      chain_status }                   // "CONTINUE" | "STOPPED" | "NOT_RUN"
   ]
 }
 ```
@@ -50,19 +54,22 @@ $PYTHON -m playwright install chromium --with-deps 2>/dev/null || $PYTHON -m pla
 
 ## Step 2: Translate Widget Hints
 
-If `LITE_MODE=true` and `KNOWLEDGE` has no `widget` block, skip this step — no widget hints are available. Set `TRIGGER_SELECTOR`, `READY_SELECTOR`, and `RESPONSE_DONE_SELECTOR` to `null`.
+If `LITE_MODE=true` and `KNOWLEDGE` has no `widget` block, skip this step — no widget hints are available. Set `TRIGGER_SELECTORS` to `[]`, `READY_SELECTOR` and `RESPONSE_DONE_SELECTOR` to `null`.
 
-Otherwise, run a short Playwright exploration script to capture the page's HTML structure, then use an LLM call to translate the three plain language hints into CSS selectors or XPath expressions:
+Otherwise, run a short Playwright exploration script to capture the page's HTML structure, then use an LLM call to translate the plain language hints into CSS selectors or XPath expressions.
 
-- `KNOWLEDGE.widget.trigger_hint` → `TRIGGER_SELECTOR`
+`KNOWLEDGE.widget.trigger_hint` accepts two forms:
+- **String** — a single trigger (click once to open the widget). Wrap it in a one-element list: `TRIGGER_SELECTORS = [selector]`.
+- **Array of strings** — a sequence of intermediate navigation steps clicked in order before the widget/chat input is reachable (e.g. "open a menu", "pick an instance from a list", "switch to a tab"). Translate **each** entry independently into its own selector, in the same order, producing `TRIGGER_SELECTORS = [selector_1, selector_2, ...]`. Each step is resolved and clicked only after the previous step's click completes and the resulting selector becomes visible — later steps may depend on DOM elements that don't exist until the earlier click happens, so do not pre-resolve all selectors up front from the initial page state.
+
 - `KNOWLEDGE.widget.ready_hint` → `READY_SELECTOR`
 - `KNOWLEDGE.widget.response_done_hint` → `RESPONSE_DONE_SELECTOR`
 
-If translation fails for a hint, apply the per-variable fallback below. These are **last-resort** generic selectors — they match by common conventions and may hit unrelated elements on complex pages. Prefer a successful LLM translation over any fallback.
+If translation fails for a hint, apply the per-variable fallback below. These are **last-resort** generic selectors — they match by common conventions and may hit unrelated elements on complex pages. Prefer a successful LLM translation over any fallback. For a failed step within a `trigger_hint` array, apply the `TRIGGER_SELECTORS` fallback to that step only — leave successfully translated steps as-is.
 
 | Variable | Fallback selector (try in order, use first that matches) |
 |---|---|
-| `TRIGGER_SELECTOR` | `button[aria-label*="chat" i], button[title*="chat" i], [class*="chat-trigger"], [class*="chat-button"], [id*="chat-button"]` |
+| `TRIGGER_SELECTORS` (per step) | `button[aria-label*="chat" i], button[title*="chat" i], [class*="chat-trigger"], [class*="chat-button"], [id*="chat-button"]` |
 | `READY_SELECTOR` | `input[type=text]:not([disabled]), textarea:not([disabled])` |
 | `RESPONSE_DONE_SELECTOR` | 1. `.typing-indicator, .chat-loading, [class*="typing"]` disappears (wait for absence); 2. `button[type=submit]:not([disabled]), button.send:not([disabled])` re-enables; 3. `input[type=text]:not([disabled]), textarea:not([disabled])` re-enables |
 
@@ -197,9 +204,13 @@ try:
         page.goto(TEST_URL)
         page.wait_for_load_state('networkidle')
 
-    # 2. Find and click the trigger element
-    trigger = page.wait_for_selector(TRIGGER_SELECTOR, timeout=90000)
-    trigger.click()
+    # 2. Walk the trigger sequence in order — each step is resolved against the
+    #    page state left behind by the previous click, since later steps may
+    #    depend on elements that only exist after an earlier click (e.g. a menu
+    #    that must open before the next selector appears).
+    for step_selector in TRIGGER_SELECTORS:
+        step_element = page.wait_for_selector(step_selector, timeout=90000)
+        step_element.click()
 
     # 3. Wait for the input field to be ready
     page.wait_for_selector(READY_SELECTOR, timeout=90000)
@@ -460,7 +471,7 @@ CATEGORY_RESULT|script_crash|BLOCKED|Playwright script exited before writing any
 
 Pass this directly to `skills/post-test-report/SKILL.md` — skip Phase 3. The overall verdict is `BLOCKED`.
 
-**If the login entry has status `BLOCKED`:** all 6 categories will be `NOT_RUN`. Skip Phase 3 entirely — there are no responses to judge. Pass `CATEGORY_RESULTS` directly to `skills/post-test-report/SKILL.md`. The overall verdict is `BLOCKED`.
+**If the login entry has status `BLOCKED`:** all subsequent categories will be `NOT_RUN`. Skip Phase 3 entirely — there are no responses to judge. Pass `CATEGORY_RESULTS` directly to `skills/post-test-report/SKILL.md`. The overall verdict is `BLOCKED`.
 
 **If any Q&A pair has `actual_response` equal to `__RESPONSE_CAPTURE_FAILED__`**, replace it with the display string `(response capture failed — no matching bot message element found)` before passing to Phase 3. The judge must mark that pair FAIL.
 
