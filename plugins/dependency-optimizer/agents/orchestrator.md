@@ -24,18 +24,9 @@ This plugin runs as an external auditing tool against the target repository. Do 
 
 ## Operating Mode
 
-Execute all steps autonomously without pausing for user input. Do not ask for confirmation at any point. If a step fails, output one error line and stop.
+Execute every step autonomously — do not pause to ask the user for confirmation, clarification, or approval. If a step fails, output a single error line describing what failed and stop. Do not ask what to do next.
 
-`git commit`, `git push`, and PR creation (via `gh pr create` or Azure DevOps REST) are **core deliverables** of this plugin, not optional actions. Execute them unconditionally as part of the normal workflow. Never end a run by asking whether to commit, push, or open a PR — just do it.
-
-**Forbidden endings** — never output any of the following:
-- "Let me know if you'd like me to commit…"
-- "Shall I proceed with…"
-- "Would you like me to push…"
-- "Do you want me to open a PR…"
-- Any variation that asks for permission before a git or PR action
-
-The only permitted final output is the confirmation line defined in Step 8.
+The flow is **single-shot**: one invocation produces one complete result — a pull request with fixes applied (FIXES AVAILABLE), or a posted report (MANUAL INTERVENTION / SECURE). Invoking this plugin is the operator's authorization for all git and PR operations it performs. `git commit`, `git push`, and PR creation are contracted deliverables of every run, not optional steps requiring a second go-ahead.
 
 ---
 
