@@ -1,6 +1,6 @@
 ---
 name: run-playwright-session
-description: Phase 2 of chatbot-tester. Opens the target URL in headless Chromium, logs in if required, translates plain language widget hints to Playwright selectors, runs a responsiveness probe, and runs six test categories against the chatbot. If the bot does not complete a response to the initial probe within 60 seconds all categories are marked BLOCKED immediately and the session exits. Outputs structured category results with verbatim bot responses for all Q&A pairs.
+description: Phase 2 of chatbot-tester. Opens the target URL in headless Chromium, logs in if required, translates plain language widget hints to Playwright selectors, runs a responsiveness probe, and runs seven test categories against the chatbot (Conversation Flow only when a conversation_flow array is defined). If the bot does not complete a response to the initial probe within 60 seconds all categories are marked BLOCKED immediately and the session exits. Outputs structured category results with verbatim bot responses for all Q&A pairs.
 disable-model-invocation: true
 ---
 
@@ -32,6 +32,10 @@ This skill is invoked by the **orchestrator** agent. It is not a standalone slas
   ],
   probe_results: [                     // for Fallback, Continuity, Empty Input categories
     { probe, actual_response, duration_ms }
+  ],
+  flow_steps: [                        // only present for Conversation Flow category
+    { index, name, question, actual_response, duration_ms,
+      chain_status }                   // "CONTINUE" | "STOPPED" | "NOT_RUN"
   ]
 }
 ```
@@ -467,7 +471,7 @@ CATEGORY_RESULT|script_crash|BLOCKED|Playwright script exited before writing any
 
 Pass this directly to `skills/post-test-report/SKILL.md` — skip Phase 3. The overall verdict is `BLOCKED`.
 
-**If the login entry has status `BLOCKED`:** all 6 categories will be `NOT_RUN`. Skip Phase 3 entirely — there are no responses to judge. Pass `CATEGORY_RESULTS` directly to `skills/post-test-report/SKILL.md`. The overall verdict is `BLOCKED`.
+**If the login entry has status `BLOCKED`:** all subsequent categories will be `NOT_RUN`. Skip Phase 3 entirely — there are no responses to judge. Pass `CATEGORY_RESULTS` directly to `skills/post-test-report/SKILL.md`. The overall verdict is `BLOCKED`.
 
 **If any Q&A pair has `actual_response` equal to `__RESPONSE_CAPTURE_FAILED__`**, replace it with the display string `(response capture failed — no matching bot message element found)` before passing to Phase 3. The judge must mark that pair FAIL.
 
