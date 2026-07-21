@@ -1,6 +1,6 @@
 {
     "name": "dependency-optimizer",
-    "version": "2.1.0",
+    "version": "2.2.0",
     "description": "Audits and optimizes project dependencies across all major ecosystems. Scans for CVEs, SemVer drift, unused packages, and license violations, then auto-generates a PR with safe fixes.",
     "author": {
       "name": "99x",
