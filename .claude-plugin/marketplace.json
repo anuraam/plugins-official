@@ -214,7 +214,7 @@
       "name": "dependency-optimizer",
       "source": "./plugins/dependency-optimizer",
       "description": "Automated dependency audit and optimization across all major ecosystems (npm, pip, Cargo, Go modules, Maven, .NET, Bundler). Runs four parallel specialized analyses — vulnerability scanning (CVE/CVSS), SemVer version drift, bundle bloat and unused package detection, and license compliance. Automatically creates a pull request with safe fixes applied; flags critical CVEs and major breaking upgrades for manual review. Works with GitHub, Azure DevOps, and any git repository.",
-      "version": "2.0.0",
+      "version": "2.3.0",
       "author": {
         "name": "99x",
         "email": "xianix-agent@99x.io"
