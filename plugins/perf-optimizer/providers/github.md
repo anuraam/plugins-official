@@ -60,6 +60,42 @@ Run this **before** Step 0 (indexing) so a run with an already-open scheduled PR
 
 ---
 
+## Recovering the last scheduled baseline SHA
+
+**`trigger_mode=schedule` only** (orchestrator Step 1a). Recover `LAST_SCAN_SHA` — the baseline of the most recent prior scheduled run in **any** state (open, merged, or closed) — to drive the incremental scan window (orchestrator Step 1b). Primary source is the head branch name; fall back to the PR body's `Trigger:` line if the branch name doesn't parse:
+
+```bash
+LAST_SCAN_SHA=$(gh pr list \
+  --base "${DEFAULT_BRANCH}" \
+  --state all \
+  --limit 100 \
+  --json headRefName,createdAt \
+  --jq '[.[] | select(.headRefName | startswith("perf/scheduled-"))]
+        | sort_by(.createdAt) | last | .headRefName // ""' \
+  | sed -nE 's|^perf/scheduled-[0-9]{8}-([0-9a-f]+)$|\1|p')
+
+if [ -z "${LAST_SCAN_SHA}" ]; then
+  # Fallback: most recent scheduled PR's body trigger line
+  LAST_SCAN_SHA=$(gh pr list \
+    --base "${DEFAULT_BRANCH}" \
+    --state all \
+    --limit 100 \
+    --json headRefName,createdAt,body \
+    --jq '[.[] | select(.headRefName | startswith("perf/scheduled-"))]
+          | sort_by(.createdAt) | last | .body // ""' \
+    | sed -nE 's/^Trigger: Scheduled run @ ([0-9a-f]+).*/\1/p' | head -1)
+fi
+
+# Degrade to a full scan if the SHA is missing or gone from history
+if [ -z "${LAST_SCAN_SHA}" ] || ! git cat-file -e "${LAST_SCAN_SHA}^{commit}" 2>/dev/null; then
+  LAST_SCAN_SHA=""
+fi
+```
+
+An empty `LAST_SCAN_SHA` means the orchestrator resolves `SCAN_MODE=full` (Step 1b). Never fail the run over unrecoverable state — a full scan is always a valid fallback.
+
+---
+
 ## Reading the trigger issue body (for scope / target hints)
 
 The orchestrator receives the issue body via the rule payload. If you need to re-read it (for example when running the command locally after the webhook fired), use:
@@ -167,7 +203,7 @@ The `${REPORT_BODY}` substitution is the full, already-compiled report body prod
 
 **Slim single-change body (`trigger_mode=schedule`):**
 
-There is no `${REPORT_BODY}` and no applied-optimizations table — the body describes the one change only. `${OPTIMIZATION_BLOCK}` is the compact `file:lines / category / why / before-after / how-to-verify` block `perf-pr-author` assembled for the single finding.
+There is no `${REPORT_BODY}` and no applied-optimizations table — the body describes the one change only. `${OPTIMIZATION_BLOCK}` is the compact `file:lines / category / why / before-after / how-to-verify` block `perf-pr-author` assembled for the single finding. `${SCAN_WINDOW}` is the range the scan actually covered, frozen by the orchestrator in Step 1b-iv — `<last-sha>..<baseline-sha>` for an incremental scan, `full @ <baseline-sha>` for a full one.
 
 ```bash
 RUN_DATE_DISPLAY=$(date -u +%Y-%m-%d)
@@ -183,6 +219,7 @@ gh pr create \
 Automated scheduled (cron) performance scan — no originating issue or work item. This scan surfaced a single low-risk optimization, applied here as one small, easy-to-review change. Further findings, if any, will arrive as separate PRs on later scheduled runs.
 
 Trigger: Scheduled run @ ${BASELINE_SHA}
+Scan window: ${SCAN_WINDOW}
 
 ## The optimization
 

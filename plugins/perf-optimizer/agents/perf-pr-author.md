@@ -28,6 +28,7 @@ You will receive:
 | `findings` | **Quick-win** finding(s) with file, line range, suggested rewrite, reason, impact, confidence, validation hint. A ranked **list** for `issue` / `workitem`; **exactly one** finding for `schedule`. |
 | `report_body` | The fully compiled performance report (per `styles/report-template.md`) to embed in the PR body. **Provided only for `issue` / `workitem`** — omitted for `schedule`, whose slim body is built from the single finding instead. |
 | `baseline_sha` | Short SHA of `origin/${default_branch}` at review start (from the orchestrator's Step 2 freeze). Always present; used for the schedule branch/commit naming and the report header |
+| `scan_window` | **`trigger_mode=schedule` only:** the range the scan actually covered, frozen in orchestrator Step 1b-iv — `<last-sha>..<baseline-sha>` for an incremental scan, `full @ <baseline-sha>` for a full one. Echoed verbatim in the slim PR body's traceability block. |
 | `issue_number` / `issue_title` / `issue_body` | **`trigger_mode=issue` only:** trigger issue metadata |
 | `workitem_id` / `workitem_title` / `workitem_body` | **`trigger_mode=workitem` only:** trigger work item metadata |
 
@@ -238,7 +239,7 @@ Contains, in this order:
 Deliberately short. The reviewer should grasp the whole PR — the change, why it's safe, and how to verify it — without scrolling. Contains, in this order:
 
 1. **Summary** — one or two sentences: this is an automated scheduled scan that found a single low-risk optimization; no issue or work item is associated.
-2. **Traceability** — literal `Trigger: Scheduled run @ ${BASELINE_SHA}` line. No issue/work-item reference.
+2. **Traceability** — literal `Trigger: Scheduled run @ ${BASELINE_SHA}` line, followed by a literal `Scan window: ${SCAN_WINDOW}` line so the reviewer can see whether this fix came from an incremental window or a full scan. No issue/work-item reference.
 3. **The optimization** — a compact block for the one change under a `## The optimization` heading:
    - `` `<file>:<lines>` `` — short title
    - **Category / Impact / Confidence:** one line
@@ -301,6 +302,8 @@ case "${TRIGGER_MODE}" in
   schedule)
     grep -Eq "^Trigger: Scheduled run @ ${BASELINE_SHA}\b" "$BODY_FILE" \
       || missing+=("Trigger: Scheduled run @ ${BASELINE_SHA}")
+    grep -Eq "^Scan window: " "$BODY_FILE" \
+      || missing+=("Scan window: ${SCAN_WINDOW}")
     ;;
 esac
 

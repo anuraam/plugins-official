@@ -38,6 +38,7 @@ The invocation (either the rule-provided `execute-prompt` or a local `$ARGUMENTS
 - `--issue <number>` — **GitHub only.** Attach the run to an existing issue: the orchestrator reads the issue body for scope hints, uses the issue number / title in the branch name, and references `Closes #<number>` in the PR.
 - `--workitem <id>` — **Azure DevOps only.** Attach the run to an existing work item: the orchestrator reads the description for scope hints, uses the work-item id / title in the branch name, and references the work item in the PR.
 - `--schedule` — **Scheduled runs only.** Marks this invocation as coming from a cron `schedule` rule set rather than an issue/work-item webhook (see `docs/triggers-schedule.md`). A schedule tick carries no payload, so there is no issue/work-item title to parse hints from or derive naming from — `TRIGGER_MODE=schedule` uses date-based branch/PR naming instead (Step 1a) and skips issue-body scope parsing (Step 3).
+- `--full-scan-day <SUN..SAT>` — **Scheduled runs only.** The UTC day-of-week on which a scheduled run forces `SCAN_MODE=full` (the periodic whole-codebase re-scan). Three-letter day name, case-insensitive. Default: `SUN`. Ignored with a one-line notice on non-schedule runs. See *Resolving `SCAN_MODE`* and Step 1b.
 
 If `--scope` / `--target` are not passed as flags, parse them from the issue or work item body (see Step 3). Scheduled runs have no body to parse — pass `--scope` / `--target` explicitly in the rule's `execute-prompt` if you want anything other than a full-codebase, untargeted scan.
 
@@ -60,6 +61,17 @@ Exactly one of the three applies per run — resolve it once, at the top, and pa
 | None of the above (bare local `/perf-optimize`) | `local` | Skip Steps 2 and 7 entirely: run the analysis, apply Quick-wins, push the new branch, and output a message telling the caller to open the PR manually |
 
 `local` and `schedule` both lack an issue/work-item, but they are **not** the same thing — `local` is a human running the command interactively with no automation contract, so the safe default is to stop short of opening a PR. `schedule` is an unattended, repeated automation with an explicit `--schedule` contract from a rule the operator configured, so it completes the same PR-opening flow the issue/work-item paths do — just without an issue/work-item to reference or comment on.
+
+### Resolving `SCAN_MODE` (`TRIGGER_MODE=schedule` only)
+
+Scheduled runs additionally resolve a **scan mode** that controls how much of the codebase the analyzers see. Every other `TRIGGER_MODE` is implicitly `SCAN_MODE=full`, and the rest of this section does not apply to it. Scheduled runs recur, so most of the codebase is unchanged between ticks — re-analyzing all of it every night is the dominant cost of the schedule flow. Incremental mode confines analysis to what actually changed.
+
+| `SCAN_MODE` | Analyzer input | When |
+|---|---|---|
+| `full` | The whole codebase (identical to an issue/work-item run's coverage) | First-ever scheduled run; the periodic full-scan day (`--full-scan-day`, default `SUN`); any failure to recover the last scheduled baseline |
+| `incremental` | Only files changed since the last scheduled scan, plus their direct importers/callers (one hop) | Every other scheduled tick |
+
+The decision procedure is Step 1b. The prior baseline is recovered from artifacts previous runs already created — `perf/scheduled-<date>-<short-sha>` branch names and the PR body's `Trigger:` line — so there is **no separate state store**. **Every failure mode degrades to `full`**: never hard-fail a run because incremental state could not be recovered; `full` is simply the pre-incremental behavior.
 
 ---
 
@@ -101,6 +113,8 @@ Store a short mental model of:
 - which services look runtime-critical (API, worker, data-layer, frontend)
 - where the repository's "hot" surface area sits
 
+**Incremental-run trim:** when `SCAN_MODE=incremental` (resolved in Step 1b, which for scheduled runs executes before this step — see the ordering note in Step 1a/1b), keep this step to the manifests plus the directories containing the changed files. Do not walk or fingerprint the whole tree just to analyze a handful of files.
+
 ### 1. Detect Platform and Default Branch
 
 ```bash
@@ -131,7 +145,7 @@ git reset --hard "origin/${DEFAULT_BRANCH}"
 
 The working tree MUST be clean and aligned with `origin/${DEFAULT_BRANCH}` before analyzers run. If not, emit a single error line and stop.
 
-### 1a. Idempotency Check (`TRIGGER_MODE=schedule` only)
+### 1a. Idempotency Check + Last-Scan Recovery (`TRIGGER_MODE=schedule` only)
 
 Skip this step entirely for `issue` / `workitem` / `local` runs — an issue or work item naturally gates to at most one open PR, and local runs never open a PR at all.
 
@@ -146,7 +160,84 @@ If an open PR from a `perf/scheduled-*` branch already targets `${DEFAULT_BRANCH
 Skipped: performance PR <existing_pr_url> from a prior scheduled run is still open — review or merge it before the next scheduled optimization PR is opened.
 ```
 
-Only proceed to Step 2 when no such PR is open.
+Only proceed when no such PR is open.
+
+#### Recovering the last scheduled baseline (`LAST_SCAN_SHA`)
+
+While you are already listing scheduled PRs for the check above, also recover the baseline SHA of the **most recent prior scheduled run** — open, merged, or closed. Prior runs record it in two places, in priority order:
+
+1. The head branch name — `perf/scheduled-<YYYYMMDD>-<short-sha>` — parse the trailing `<short-sha>`.
+2. The PR body's `Trigger: Scheduled run @ <short-sha>` line — fallback if the branch name is unparseable.
+
+- **GitHub:** see `providers/github.md` (*Recovering the last scheduled baseline SHA*).
+- **Azure DevOps:** see `providers/azure-devops.md` (*Recovering the last scheduled baseline SHA*).
+
+Then validate the recovered SHA still exists in the fetched history (a history rewrite makes it unusable):
+
+```bash
+git cat-file -e "${LAST_SCAN_SHA}^{commit}" 2>/dev/null || LAST_SCAN_SHA=""
+```
+
+An empty `LAST_SCAN_SHA` (no prior scheduled PR, unparseable naming, or history rewrite) simply forces `SCAN_MODE=full` in Step 1b. Never hard-fail on unrecoverable state.
+
+### 1b. Resolve the Scan Window (`TRIGGER_MODE=schedule` only)
+
+Skip this step entirely for `issue` / `workitem` / `local` runs — they are always `SCAN_MODE=full` over the Step 4 file set.
+
+**Ordering note:** for scheduled runs, Steps 1a and 1b run **before** Step 0's indexing (matching the providers' "run the dedupe check before any analysis work" rule), so that a skipped or incremental tick never pays for a full-tree index.
+
+Three sub-decisions, in order:
+
+#### 1b-i. Periodic full-scan tick (stateless)
+
+Whether this tick is the periodic full scan is derived from the calendar, not stored state — no counter to persist, and a missed tick doesn't shift the cycle:
+
+```bash
+FULL_SCAN_DAY=$(printf '%s' "${FULL_SCAN_DAY:-SUN}" | tr '[:lower:]' '[:upper:]')  # from --full-scan-day
+TODAY=$(date -u +%a | tr '[:lower:]' '[:upper:]')                                  # MON..SUN
+
+if [ "${TODAY}" = "${FULL_SCAN_DAY}" ] || [ -z "${LAST_SCAN_SHA}" ]; then
+  SCAN_MODE=full
+else
+  SCAN_MODE=incremental
+fi
+```
+
+#### 1b-ii. Zero-change early exit (`SCAN_MODE=incremental` only)
+
+```bash
+git diff --name-only "${LAST_SCAN_SHA}..origin/${DEFAULT_BRANCH}"
+```
+
+Apply the Step 4 default exclusions (tests, docs, tooling, vendored/generated code) to the changed-file list first. If the filtered list is **empty**, stop the run — before any indexing or analyzer work — and emit:
+
+```
+Skipped: no analyzable changes on <DEFAULT_BRANCH> since last scheduled scan @ <LAST_SCAN_SHA>.
+```
+
+This is the cheapest possible outcome of a tick and is expected to be common on quiet repositories.
+
+#### 1b-iii. One-hop expansion (cross-file safety net)
+
+A change in file A can create a bottleneck that only manifests in an unchanged caller B (e.g. A's function got slower and B calls it in a loop). For each surviving changed file, use `Grep` to find its **direct importers/callers** — search for the file's module path / basename in import, require, using, and include statements — and add them to the set. Caps: at most **2** expansion files per changed file, at most **50** files total in the final set; when over the cap, prefer expansion files classified as request-path/hot-path.
+
+This is the one sanctioned discovery activity in the orchestrator turn — Step 6's "no discovery in the orchestrator" rule governs the analyzer fan-out, not this pre-computation, which exists precisely so the analyzers get a closed file set.
+
+The result is `SCAN_FILE_SET` — the changed files (exclusion-filtered) plus the one-hop expansion.
+
+#### 1b-iv. Freeze the scan window
+
+```bash
+BASELINE_SHA=$(git rev-parse --short "origin/${DEFAULT_BRANCH}")   # same value Step 2's freeze block resolves
+
+if [ "${SCAN_MODE}" = "incremental" ]; then
+  SCAN_WINDOW="${LAST_SCAN_SHA}..${BASELINE_SHA}"
+else
+  SCAN_WINDOW="full @ ${BASELINE_SHA}"
+fi
+```
+
+`SCAN_WINDOW` is carried into the analyzer briefs (Step 6), the report header (Step 7), and the `perf-pr-author` handoff (Step 8) — the slim scheduled PR body echoes it so a reviewer can see exactly what range the scan covered.
 
 ### 2. Post a "Review in Progress" Comment on the Issue / Work Item
 
@@ -195,7 +286,9 @@ If a supplied scope path does not exist in the checked-out tree, record it in th
 
 ### 4. Compute the Analysis File Set
 
-Using the effective scope:
+**`SCAN_MODE=incremental`:** do **not** start from `git ls-files` — start from `SCAN_FILE_SET` (Step 1b-iii), which is already exclusion-filtered. If a `--scope` was passed in the rule's `execute-prompt`, intersect `SCAN_FILE_SET` with it (a changed file outside the configured scope is out). Then continue at the exclusion list below only to double-check the one-hop expansion files (the filter is idempotent), and record the counts as usual.
+
+**`SCAN_MODE=full` (and all non-schedule runs)** — using the effective scope:
 
 ```bash
 # If no scope was supplied, analyze the whole repo
@@ -254,6 +347,7 @@ Pass each analyzer:
 3. The detected language / framework(s) and dominant data layer (ORM / query builder / raw SQL / HTTP clients)
 4. The `--target` runtime hint if set
 5. The absolute workspace root so the analyzer can `Read` files directly
+6. **`SCAN_MODE=incremental` only** — this exact confinement brief, with the values substituted: *"This is an incremental scan of files changed in `<SCAN_WINDOW>` plus their direct callers. Confine both exploration and findings to the provided file list — do not `Grep`, `Glob`, or `Read` beyond it to hunt for more findings; wider coverage belongs to the periodic full scan."* Without this instruction analyzers will roam the whole repository and forfeit the incremental savings.
 
 Analyzers:
 
@@ -317,7 +411,7 @@ Compile everything into the exact structured format defined in `styles/report-te
 - Do not invent metrics — keep impact qualitative (High / Medium / Low) unless real measurements exist.
 - Do not flag non-issues — only genuine runtime risks and real optimization opportunities.
 - **Header consistency:** the report header's `Scope`, `Target runtime`, `Default branch`, `<short-sha>`, `Files in scope`, and `Exclusions applied` fields MUST use the exact same `SCOPE_RESOLVED` / `TARGET_RESOLVED` / `DEFAULT_BRANCH` / `BASELINE_SHA` / `FILE_COUNT` / `EXCLUSIONS_COUNT` values that were announced in the Step 2 starting comment (for `TRIGGER_MODE=schedule` / `local`, where Step 2 is skipped, use the same values as resolved in Step 2's freeze block instead). Any deviation is a bug — if you catch one, re-emit the header rather than silently changing the values.
-- **Trigger field for schedule runs:** the report header's `**Trigger:**` line has no issue/work-item to name — use `Scheduled run @ <BASELINE_SHA>` (see `styles/report-template.md`).
+- **Trigger field for schedule runs:** the report header's `**Trigger:**` line has no issue/work-item to name — use `Scheduled run @ <BASELINE_SHA>` (see `styles/report-template.md`). Schedule runs additionally include a `**Scan window:**` header line carrying the exact `SCAN_WINDOW` frozen in Step 1b-iv (`<last-sha>..<baseline-sha>` or `full @ <baseline-sha>`) — the same value must later appear in the slim PR body.
 
 ### 8. Select Findings and Hand Off to the `perf-pr-author` Sub-Agent
 
@@ -362,6 +456,7 @@ Launch the `perf-pr-author` sub-agent via the `Agent` tool, passing:
   - `trigger_mode=issue`: `issue-number`, `issue-title`, `issue-body`
   - `trigger_mode=workitem`: `workitem-id`, `workitem-title`, `workitem-body`
   - `trigger_mode=schedule`: none — `perf-pr-author` derives branch/PR naming from `BASELINE_SHA` and the current date instead (see Step 8a in `agents/perf-pr-author.md`)
+- `trigger_mode=schedule` only: `scan_window` — the exact `SCAN_WINDOW` value frozen in Step 1b-iv, echoed in the slim PR body's traceability block
 
 The `perf-pr-author` agent will:
 
@@ -387,9 +482,14 @@ If zero Quick-win findings can be applied cleanly, emit:
 # issue / workitem
 No performance PR opened — no Quick-win finding could be applied cleanly. Report written to performance-report.md.
 
-# schedule
+# schedule, SCAN_MODE=full
 No performance PR opened — no easily-reviewable Quick-win found on this scheduled run.
+
+# schedule, SCAN_MODE=incremental
+No performance PR opened — no easily-reviewable Quick-win found in changes since <LAST_SCAN_SHA>.
 ```
+
+**Incremental window subtlety:** when an incremental run finds nothing and opens no PR, no new scheduled PR exists to record this tick's baseline — so the *next* incremental window still starts at the older `LAST_SCAN_SHA` and re-covers the range just scanned. That is correct (nothing is ever skipped), just mildly redundant, and it self-limits: windows only grow while there are no findings, which correlates with low churn and therefore cheap scans. Do not invent extra state (tags, files) to "fix" this.
 
 For `issue` / `workitem` only, write the compiled report body to `performance-report.md` in the working tree so the reporter still has the analysis artifact. For `schedule`, do **not** write a report file — an unattended run should leave the working tree clean and simply try again on the next tick.
 
@@ -399,4 +499,5 @@ For `issue` / `workitem` only, write the compiled report body to `performance-re
 - Only findings explicitly classified as **Quick wins** are applied.
 - Every commit message begins with `perf:` and references the originating finding.
 - A `TRIGGER_MODE=schedule` run applies **exactly one** finding — never a batch. If you find yourself selecting a second item for a scheduled run, stop: that is a contract violation.
+- A `SCAN_MODE=incremental` run analyzes **only** files changed since the last scheduled scan plus their direct one-hop callers; the periodic full scan (`--full-scan-day`) is the only mechanism that revisits unchanged code. If incremental state cannot be recovered, degrade to `SCAN_MODE=full` — never fail the run over it.
 - The optimization PR body includes: summary and a verification checklist, plus — for `issue` / `workitem` — the full performance report and a `Closes #{issue-number}` / work-item reference, or — for `schedule` — the single change's details and a `Trigger: Scheduled run @ <BASELINE_SHA>` line.

@@ -52,7 +52,7 @@ flowchart TD
 
 This keeps the trigger lightweight (one label), moves review effort to the PR where teams already spend it, and still produces a human-readable report alongside actual code changes.
 
-**On a `schedule` (cron) run**, steps 1, 3, and 9 don't apply — there's no label/tag to detect and no issue/work-item body or issue/work-item to link back to. The run still fetches the default branch and analyzes, but it opens a **deliberately minimal** PR: instead of applying the whole Quick-wins batch, a scheduled run first keeps only the trivially-safe fixes (high confidence, small localized diff, obviously behavior-preserving) and then, among those, ships the **single highest-impact** one — the biggest win that's still easy to review — with a slim body (no embedded full report). Branch/PR naming falls back to the run date and baseline commit, and a Step 0 idempotency check skips the run entirely if a prior scheduled PR is still open — so scheduled runs produce a **steady drip of one small, reviewable fix at a time**. See [Automated Triggering](#automated-triggering-xianix-agent) and `docs/triggers-schedule.md`.
+**On a `schedule` (cron) run**, steps 1, 3, and 9 don't apply — there's no label/tag to detect and no issue/work-item body or issue/work-item to link back to. The run still fetches the default branch, but it analyzes **incrementally** by default: only the files changed since the previous scheduled scan (plus their direct callers), with the previous baseline recovered from prior `perf/scheduled-*` PR branch names — no separate state store. A **full** codebase scan still happens on the first run, on the weekly full-scan day (`--full-scan-day`, default Sunday UTC), or whenever the previous baseline can't be recovered; and if nothing analyzable changed since the last scan, the tick skips before doing any analysis at all. Whatever it scans, it opens a **deliberately minimal** PR: instead of applying the whole Quick-wins batch, a scheduled run first keeps only the trivially-safe fixes (high confidence, small localized diff, obviously behavior-preserving) and then, among those, ships the **single highest-impact** one — the biggest win that's still easy to review — with a slim body (no embedded full report, but a `Scan window:` line stating exactly what range was analyzed). Branch/PR naming falls back to the run date and baseline commit, and a Step 0 idempotency check skips the run entirely if a prior scheduled PR is still open — so scheduled runs produce a **steady drip of one small, reviewable fix at a time**, at a per-tick cost that scales with churn rather than repository size. See [Automated Triggering](#automated-triggering-xianix-agent) and `docs/triggers-schedule.md`.
 
 ---
 
@@ -66,6 +66,7 @@ This keeps the trigger lightweight (one label), moves review effort to the PR wh
 | Work item ID | Azure DevOps webhook payload | Yes (issue-driven, Azure DevOps) | The work item whose tag triggered the run |
 | `ai-dlc/perf/optimize` | Issue label / work item tag | Yes (issue-driven only) | Single trigger for the full analyze-and-fix flow |
 | `--schedule` flag | Rule's `execute-prompt` | Yes (scheduled runs only) | Marks the run as a cron trigger with no issue/work item — see `docs/triggers-schedule.md` |
+| `--full-scan-day <day>` | Rule's `execute-prompt` | No (scheduled runs only) | UTC day-of-week (`SUN`–`SAT`) on which a scheduled run performs the periodic **full** codebase scan; all other ticks scan incrementally (changes since the last scheduled scan + direct callers). Default: `SUN`. |
 | Scope path | Issue / work item body, or `--scope` flag | No | Restrict analysis to a directory or glob — e.g. `Scope: src/services`. Scheduled runs have no body — pass `--scope` in `execute-prompt` instead. |
 | Runtime target | Issue / work item body, or `--target` flag | No | Prioritize `api`, `worker`, `frontend`, or `data` — e.g. `Target: api`. Scheduled runs have no body — pass `--target` in `execute-prompt` instead. |
 
@@ -121,7 +122,7 @@ The agent is primarily **webhook-driven** via issue labels. The `/perf-optimize`
 /perf-optimize --schedule
 ```
 
-Configured via a `schedule` rule set (see `docs/triggers-schedule.md`) rather than a webhook. The agent creates a branch named `perf/scheduled-{date}-{sha}` and a PR containing a **single** low-risk fix with a slim body, traced only by the baseline commit — unless a PR from a prior scheduled run is still open, in which case the run skips without opening a duplicate.
+Configured via a `schedule` rule set (see `docs/triggers-schedule.md`) rather than a webhook. The agent scans **incrementally** — only what changed since the previous scheduled run, with a periodic full scan on the `--full-scan-day` — then creates a branch named `perf/scheduled-{date}-{sha}` and a PR containing a **single** low-risk fix with a slim body, traced by the baseline commit and scan window. The run skips without analyzing if a PR from a prior scheduled run is still open, or if nothing changed since the last scan.
 
 ---
 
@@ -141,7 +142,7 @@ Every run produces **one pull request** against the default branch.
 
 The agent only commits changes for findings it classifies as **low-risk quick wins**. Higher-risk or architectural suggestions are listed in the report's backlog section for human follow-up rather than auto-applied.
 
-**Scheduled runs are deliberately different** — the PR contains a **single** low-risk fix and a **slim body** (one-change rationale + before/after + a short checklist + `Trigger: Scheduled run @ {baseline-sha}`), with **no** embedded full report. They get **no link-back comment** (step 9 doesn't apply — there's no issue/work item) and are gated by an idempotency check: if a PR from a prior scheduled run is still open against the default branch, the next scheduled tick skips entirely rather than opening a second one. The intent is a fix a reviewer can approve in under a minute, dripped one at a time.
+**Scheduled runs are deliberately different** — the PR contains a **single** low-risk fix and a **slim body** (one-change rationale + before/after + a short checklist + `Trigger: Scheduled run @ {baseline-sha}` + `Scan window: {last-sha}..{baseline-sha}` or `full @ {baseline-sha}`), with **no** embedded full report. They get **no link-back comment** (step 9 doesn't apply — there's no issue/work item) and are gated by two pre-analysis checks: if a PR from a prior scheduled run is still open against the default branch, or nothing analyzable changed since the last scheduled scan, the tick skips entirely. The intent is a fix a reviewer can approve in under a minute, dripped one at a time, at a cost that scales with churn rather than repository size.
 
 ---
 
@@ -224,6 +225,7 @@ The Performance Optimizer guarantees — enforced by both the orchestrator promp
 - **Every optimization commit is scoped and documented.** One commit per finding, prefixed `perf:`, with file + line reference.
 - **The PR body always embeds the full performance report** so reviewers see analysis and code side by side.
 - **A scheduled run never opens a second PR on top of an already-open one.** The orchestrator checks for an open `perf/scheduled-*` PR against the default branch before doing any analysis, and skips the run entirely if one is found.
+- **A scheduled incremental run analyzes only what changed.** Files changed since the previous scheduled scan plus their direct callers — nothing else; unchanged code is revisited only by the periodic full scan (`--full-scan-day`). If the previous baseline can't be recovered, the run degrades to a full scan, never to an error.
 
 ---
 

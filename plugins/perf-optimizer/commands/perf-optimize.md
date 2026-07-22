@@ -1,7 +1,7 @@
 ---
 name: perf-optimize
-description: Run a whole-codebase performance bottleneck analysis against the repository's default branch and open a single pull request containing focused low-risk optimizations and the embedded performance report. Issue-driven on GitHub (label an issue with ai-dlc/perf/optimize), Azure DevOps (tag a work item with ai-dlc/perf/optimize), or on a recurring schedule (--schedule, no issue/work item). Usage: /perf-optimize [--scope <path>] [--target <api|worker|frontend|data>] [--schedule]
-argument-hint: [--scope <path>] [--target <runtime>] [--schedule]
+description: Run a whole-codebase performance bottleneck analysis against the repository's default branch and open a single pull request containing focused low-risk optimizations and the embedded performance report. Issue-driven on GitHub (label an issue with ai-dlc/perf/optimize), Azure DevOps (tag a work item with ai-dlc/perf/optimize), or on a recurring schedule (--schedule, no issue/work item; scans incrementally between periodic full scans). Usage: /perf-optimize [--scope <path>] [--target <api|worker|frontend|data>] [--schedule] [--full-scan-day <SUN..SAT>]
+argument-hint: [--scope <path>] [--target <runtime>] [--schedule] [--full-scan-day <day>]
 ---
 
 Run a whole-codebase performance bottleneck review for $ARGUMENTS.
@@ -37,6 +37,7 @@ This command invokes the **orchestrator** agent which runs a whole-codebase perf
 /perf-optimize --workitem 4567          # Attach the run to Azure DevOps work item #4567
 /perf-optimize --schedule               # Scheduled (cron) run — no issue/work item, still opens a PR
 /perf-optimize --schedule --scope src/api --target api   # Scheduled run scoped to a directory/runtime
+/perf-optimize --schedule --full-scan-day MON            # Scheduled run with Monday (UTC) as the weekly full-scan day
 ```
 
 ### Supported flags
@@ -49,7 +50,8 @@ All flags are optional. When invoked via a Xianix Agent rule, the execute prompt
 | `--target <runtime>` | `api` \| `worker` \| `frontend` \| `data` | Prioritize one runtime profile when ranking findings. Overrides any `Target:` hint. |
 | `--issue <number>` | positive integer | GitHub only. Attach this run to an existing issue: use its title / body for scope parsing, name the branch `perf/issue-<number>-<slug>`, reference `Closes #<number>` in the PR. |
 | `--workitem <id>` | positive integer | Azure DevOps only. Attach this run to an existing work item: use its title / description for scope parsing, name the branch `perf/workitem-<id>-<slug>`, reference the work item in the PR. |
-| `--schedule` | (no value) | Marks the run as coming from a cron `schedule` rule set instead of an issue/work-item webhook — see `docs/triggers-schedule.md`. Opens a PR with **exactly one** fix — the highest-impact item among the trivially-safe candidates — and a **slim body** (no embedded full report), on branch `perf/scheduled-<date>-<sha>`. Skips the starting comment, issue-body scope parsing, and link-back comment since there is no issue/work item. Mutually exclusive with `--issue` / `--workitem`. |
+| `--schedule` | (no value) | Marks the run as coming from a cron `schedule` rule set instead of an issue/work-item webhook — see `docs/triggers-schedule.md`. Opens a PR with **exactly one** fix — the highest-impact item among the trivially-safe candidates — and a **slim body** (no embedded full report), on branch `perf/scheduled-<date>-<sha>`. Scans **incrementally** by default: only files changed since the last scheduled scan (recovered from prior `perf/scheduled-*` PRs) plus their direct callers, falling back to a full scan on the first run, on the weekly full-scan day, or when the prior baseline can't be recovered; skips outright if nothing changed. Skips the starting comment, issue-body scope parsing, and link-back comment since there is no issue/work item. Mutually exclusive with `--issue` / `--workitem`. |
+| `--full-scan-day <day>` | `SUN`–`SAT` (three-letter, case-insensitive) | Scheduled runs only. The UTC day-of-week on which a scheduled run performs the periodic **full** codebase scan instead of an incremental one. Default: `SUN`. Ignored with a one-line notice on non-schedule runs. |
 
 ### Flags the orchestrator does NOT accept
 
@@ -89,7 +91,7 @@ The Performance Optimizer runs from three kinds of Xianix Agent rule: two **labe
 |---|---|---|
 | `ai-dlc/perf/optimize` on an issue | GitHub webhook | Run the whole-codebase review and open a PR from `perf/issue-{number}-<slug>` that references `Closes #{number}` |
 | `ai-dlc/perf/optimize` on a work item | Azure DevOps webhook | Run the whole-codebase review and open a PR from `perf/workitem-{id}-<slug>` that references work item `#{id}` |
-| Cron tick (no label, no payload) | `schedule` rule set — either platform | Run the whole-codebase review and open a **single-change, slim** PR from `perf/scheduled-<date>-<sha>` that references only the baseline commit — see `docs/triggers-schedule.md`. Applies exactly one fix (highest-impact of the trivially-safe candidates); skipped entirely if a prior scheduled PR is still open (idempotency guard, orchestrator Step 1a). |
+| Cron tick (no label, no payload) | `schedule` rule set — either platform | Run an **incremental** review (files changed since the last scheduled scan + direct callers; full codebase on the first run and the weekly `--full-scan-day`) and open a **single-change, slim** PR from `perf/scheduled-<date>-<sha>` that references the baseline commit and scan window — see `docs/triggers-schedule.md`. Applies exactly one fix (highest-impact of the trivially-safe candidates); skipped entirely if a prior scheduled PR is still open (idempotency guard, orchestrator Step 1a) or if nothing changed since the last scan (Step 1b). |
 
 The command never pushes to the repository's default branch. All edits go on a new `perf/issue-*`, `perf/workitem-*`, or `perf/scheduled-*` branch.
 

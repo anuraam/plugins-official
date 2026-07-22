@@ -17,6 +17,7 @@ Because there's no issue/work-item title, the run still produces a pull request,
 | Fires on | Label applied / tag added | `cron` tick |
 | Objective | Fix the whole reviewable backlog on demand | Drip **one** fix at a time — the highest-impact of the trivially-safe candidates |
 | Changes per PR | All selected Quick-wins (one commit each) | **Exactly one** Quick-win (single commit) |
+| Scan coverage | Always the full codebase (or the `Scope:` hint) | **Incremental** by default — only files changed since the last scheduled scan, plus their direct callers; full codebase on the first run and on the periodic full-scan day (see below) |
 | PR body | Full embedded performance report + analyzer verdicts | **Slim** — the one change's rationale + a short checklist |
 | Scope/target hints | Parsed from issue/work-item body | Must be set directly in `execute-prompt` (no body to parse) |
 | Branch name | `perf/issue-<n>-<slug>` / `perf/workitem-<id>-<slug>` | `perf/scheduled-<YYYYMMDD>-<short-sha>` |
@@ -28,6 +29,28 @@ Because there's no issue/work-item title, the run still produces a pull request,
 > **Why one change at a time?** A scheduled run is unattended and recurring — nobody asked for it right now. If it opened a PR containing every finding plus a full report, the reviewer would have no time to work through it and the PR would rot. Instead, each scheduled run selects in two phases: first a hard **eligibility gate** (High confidence, small/localized diff, obviously behavior-preserving), then, among the survivors, the **highest-impact** one. So it ships the biggest win that is still trivially safe to review — not just any tiny change — with a body a busy reviewer can approve in under a minute. Anything that fails the gate is skipped for this run no matter how high its impact; if nothing passes the gate, no PR is opened. Combined with the idempotency guard, this produces a **steady drip**: the next fix only appears once the current one is merged or closed. The remaining findings aren't lost — they simply surface on later ticks.
 
 The `/perf-optimize` command detects this mode via the `--schedule` flag, which the rule's `execute-prompt` always passes — see `commands/perf-optimize.md`.
+
+---
+
+## Incremental vs. full scans (cost control)
+
+Re-analyzing the whole codebase on every tick is the dominant cost of the schedule flow, and on most days almost none of it has changed. Scheduled runs therefore resolve a **scan mode** (`SCAN_MODE`, orchestrator Step 1b) on every tick:
+
+| Tick | `SCAN_MODE` | Analyzer input |
+|---|---|---|
+| First-ever scheduled run | `full` | Whole codebase |
+| The periodic **full-scan day** — `--full-scan-day <SUN..SAT>`, default `SUN` (UTC) | `full` | Whole codebase — this is the only tick that revisits unchanged code |
+| Last scheduled baseline can't be recovered (history rewrite, deleted PRs, unparseable naming) | `full` | Whole codebase — every failure mode degrades to `full`, never to a hard error |
+| Any other tick | `incremental` | Only files changed since the last scheduled scan, plus their direct importers/callers (one hop), capped at 50 files |
+
+**No state store is involved.** The previous scan's baseline commit is recovered from artifacts prior runs already created: the `perf/scheduled-<YYYYMMDD>-<short-sha>` branch name (primary) or the PR body's `Trigger: Scheduled run @ <sha>` line (fallback), across open, merged, *and* closed scheduled PRs.
+
+Two consequences worth knowing:
+
+- **Quiet repos skip for free.** If nothing analyzable changed since the last scan, an incremental tick stops before any analysis with `Skipped: no analyzable changes on <branch> since last scheduled scan @ <sha>.` — the second skip message the schedule flow can emit, alongside the open-PR idempotency skip.
+- **The PR says what was scanned.** A scheduled PR's slim body carries a `Scan window:` line — `<last-sha>..<baseline-sha>` for an incremental scan, `full @ <baseline-sha>` for a full one — so reviewers always know the coverage behind the fix.
+
+The four analyzer sub-agents also run on a smaller, cheaper model than the orchestrator (see the `model:` frontmatter in `agents/*-analyzer.md`) — pattern-spotting over a confined file set doesn't need the large model; the safety gate and ranking in the orchestrator do.
 
 ---
 
@@ -79,11 +102,11 @@ Times are always evaluated against the rule set's `timezone` (see below), **not*
 
 ## Choosing a `cron` expression
 
-Pick a cadence that matches how often you actually want a new optimization PR to review — a whole-codebase scan is more expensive than a diff review, and the idempotency guard means a too-frequent cron mostly just no-ops until the last scheduled PR is merged or closed:
+Pick a cadence that matches how often you actually want a new optimization PR to review. With incremental scanning, most ticks only analyze the last day's churn (or skip outright when nothing changed), so a nightly cron is cheap — the periodic full-scan day is the only expensive tick. The idempotency guard still means a too-frequent cron mostly just no-ops until the last scheduled PR is merged or closed:
 
 | Cadence | `cron` | `timezone` | When to use it |
 |---|---|---|---|
-| Nightly | `0 2 * * *` | your team's timezone | Default recommendation — one fresh scan a day, reviewed the next morning |
+| Nightly | `0 2 * * *` | your team's timezone | Default recommendation — incremental scan of the day's changes each night, full re-scan once a week on the `--full-scan-day` |
 | Weekly | `0 2 * * 1` | your team's timezone | Lower-churn repositories, or to reduce PR review load |
 | Every 5 minutes (doc example default) | `*/5 * * * *` | — | **Not recommended for this plugin** — included only because it's the schedule-rules doc's illustrative default. At this cadence the idempotency guard will skip nearly every tick once the first scheduled PR is open, which just burns container starts for no benefit. |
 
@@ -106,7 +129,7 @@ A schedule rule set is a sibling of the `webhook` shape used for the label/tag t
 | `timezone` _(optional)_ | IANA timezone the cron expression is evaluated against — defaults to `UTC` |
 | `repository` | **Plain literal strings** (no JSON-path payload to resolve against) — `url`, optional `name`, and `ref` (the default branch) |
 | `with-envs` (rule-set level) | Declared once as a sibling of `executions`, merged into every execution — the common pattern here since credentials don't vary per tick |
-| `executions[].execute-prompt` | Must explicitly pass `--schedule` (and, optionally, `--scope` / `--target`) since there's no issue/work-item body to parse hints from. Should also reinforce the single-change, slim-PR objective (see the example prompts below). |
+| `executions[].execute-prompt` | Must explicitly pass `--schedule` (and, optionally, `--scope` / `--target` / `--full-scan-day`) since there's no issue/work-item body to parse hints from. Should also reinforce the single-change, slim-PR objective and the incremental-scan behavior (see the example prompts below). |
 
 `match-any` and `use-inputs` are omitted — there's no payload to filter or extract from.
 
@@ -138,7 +161,7 @@ A schedule rule set is a sibling of the `webhook` shape used for the label/tag t
             "marketplace": "xianix-team/plugins-official"
           }
         ],
-        "execute-prompt": "You are running a scheduled whole-codebase performance scan for repository {{repository-name}} on branch {{git-ref}}. There is no triggering issue or work item. Run /perf-optimize --schedule. Scan the entire codebase, then apply ONLY one optimization, chosen in two phases: first keep only fixes that are high-confidence, small and localized (a few lines in one file), and obviously behavior-preserving; then among those, pick the single HIGHEST-IMPACT one. Open a pull request with just that change. Do not batch multiple fixes and do not embed the full performance report; the PR must be small enough to review and approve in under a minute. If no fix passes the safety gate, open no PR — even if higher-impact but riskier items exist. If a performance PR from a prior scheduled run is still open, detect it and skip this run without opening a duplicate."
+        "execute-prompt": "You are running a scheduled whole-codebase performance scan for repository {{repository-name}} on branch {{git-ref}}. There is no triggering issue or work item. Run /perf-optimize --schedule. Scan incrementally: analyze only the files changed since the last scheduled scan (recovered from the prior perf/scheduled-* PRs) plus their direct callers, falling back to a full-codebase scan on the first run, on the weekly full-scan day, or if the previous baseline cannot be recovered. If nothing analyzable changed since the last scan, skip the run without opening a PR. Then apply ONLY one optimization, chosen in two phases: first keep only fixes that are high-confidence, small and localized (a few lines in one file), and obviously behavior-preserving; then among those, pick the single HIGHEST-IMPACT one. Open a pull request with just that change. Do not batch multiple fixes and do not embed the full performance report; the PR must be small enough to review and approve in under a minute. If no fix passes the safety gate, open no PR — even if higher-impact but riskier items exist. If a performance PR from a prior scheduled run is still open, detect it and skip this run without opening a duplicate."
       }
     ]
   }
@@ -177,7 +200,7 @@ A schedule rule set is a sibling of the `webhook` shape used for the label/tag t
             "marketplace": "xianix-team/plugins-official"
           }
         ],
-        "execute-prompt": "You are running a scheduled whole-codebase performance scan for repository {{repository-name}} on branch {{git-ref}}. There is no triggering work item. Run /perf-optimize --schedule. Scan the entire codebase, then apply ONLY one optimization, chosen in two phases: first keep only fixes that are high-confidence, small and localized (a few lines in one file), and obviously behavior-preserving; then among those, pick the single HIGHEST-IMPACT one. Open a pull request with just that change. Do not batch multiple fixes and do not embed the full performance report; the PR must be small enough to review and approve in under a minute. If no fix passes the safety gate, open no PR — even if higher-impact but riskier items exist. If a performance PR from a prior scheduled run is still open, detect it and skip this run without opening a duplicate."
+        "execute-prompt": "You are running a scheduled whole-codebase performance scan for repository {{repository-name}} on branch {{git-ref}}. There is no triggering work item. Run /perf-optimize --schedule. Scan incrementally: analyze only the files changed since the last scheduled scan (recovered from the prior perf/scheduled-* PRs) plus their direct callers, falling back to a full-codebase scan on the first run, on the weekly full-scan day, or if the previous baseline cannot be recovered. If nothing analyzable changed since the last scan, skip the run without opening a PR. Then apply ONLY one optimization, chosen in two phases: first keep only fixes that are high-confidence, small and localized (a few lines in one file), and obviously behavior-preserving; then among those, pick the single HIGHEST-IMPACT one. Open a pull request with just that change. Do not batch multiple fixes and do not embed the full performance report; the PR must be small enough to review and approve in under a minute. If no fix passes the safety gate, open no PR — even if higher-impact but riskier items exist. If a performance PR from a prior scheduled run is still open, detect it and skip this run without opening a duplicate."
       }
     ]
   }
@@ -202,6 +225,7 @@ Since there's no issue/work-item body to parse `Scope:` / `Target:` hints from, 
 
 ## Notes
 
+- **Incremental by default, full weekly.** A scheduled tick analyzes only the changes since the last scheduled scan (plus one hop of direct callers); the whole codebase is only re-scanned on the `--full-scan-day` (default Sunday UTC), on the first run, or when the prior baseline can't be recovered. State lives entirely in the `perf/scheduled-*` branch names and PR bodies — deleting those PRs/branches simply forces the next tick back to a full scan. See *Incremental vs. full scans* above and orchestrator Steps 1a/1b.
 - **One change per scheduled PR — by design.** A scheduled run applies exactly one Quick-win and ships a slim body; it never batches fixes or embeds the full report. This is enforced in `agents/orchestrator.md` (Step 8 selection) and `agents/perf-pr-author.md` (single commit + slim body), and reinforced by the `execute-prompt`. To work through more findings, let each scheduled PR merge and wait for the next tick.
 - **One tick → one run, always.** Unlike the label/tag triggers, there's no `match-any` to gate on — every tick of the `cron` runs every execution in the rule set. The **idempotency guard** (orchestrator Step 1a) is what keeps a frequent cron from spamming duplicate PRs, not the rule itself.
 - **`repository` is a literal, not a payload reference.** There's no webhook body to resolve `repository.clone_url` / `repository.default_branch` against, so `url`, `name`, and `ref` are written as plain strings (or the `{ "value": "...", "constant": true }` form — see the linked doc for both spellings).
