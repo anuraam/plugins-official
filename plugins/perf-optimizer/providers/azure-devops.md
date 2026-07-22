@@ -80,6 +80,40 @@ Run this **before** Step 0 (indexing) so a run with an already-open scheduled PR
 
 ---
 
+## Recovering the last scheduled baseline SHA
+
+**`trigger_mode=schedule` only** (orchestrator Step 1a). Recover `LAST_SCAN_SHA` — the baseline of the most recent prior scheduled run in **any** state — to drive the incremental scan window (orchestrator Step 1b). Query PRs with `searchCriteria.status=all`, take the most recent `perf/scheduled-*` one, and parse the trailing short SHA from its source branch name (falling back to the description's `Trigger:` line):
+
+```bash
+LAST_SCAN_SHA=$(curl -s -u ":${AZURE-DEVOPS-TOKEN}" \
+  "${API_BASE}/_apis/git/repositories/${AZURE_REPO}/pullrequests?searchCriteria.status=all&searchCriteria.targetRefName=refs/heads/${DEFAULT_BRANCH}&\$top=100&api-version=7.1" \
+  | python3 -c "
+import sys, json, re
+prs = json.load(sys.stdin).get('value', [])
+sched = [pr for pr in prs if pr['sourceRefName'].startswith('refs/heads/perf/scheduled-')]
+sched.sort(key=lambda pr: pr['creationDate'])
+sha = ''
+if sched:
+    last = sched[-1]
+    m = re.match(r'refs/heads/perf/scheduled-\d{8}-([0-9a-f]+)\$', last['sourceRefName'])
+    if m:
+        sha = m.group(1)
+    else:
+        m = re.search(r'Trigger: Scheduled run @ ([0-9a-f]+)', last.get('description', ''))
+        sha = m.group(1) if m else ''
+print(sha)
+")
+
+# Degrade to a full scan if the SHA is missing or gone from history
+if [ -z "${LAST_SCAN_SHA}" ] || ! git cat-file -e "${LAST_SCAN_SHA}^{commit}" 2>/dev/null; then
+  LAST_SCAN_SHA=""
+fi
+```
+
+An empty `LAST_SCAN_SHA` means the orchestrator resolves `SCAN_MODE=full` (Step 1b). Never fail the run over unrecoverable state — a full scan is always a valid fallback.
+
+---
+
 ## Reading the trigger work item
 
 The orchestrator receives the work item title / description via the rule payload. If you need to re-read it (e.g. local runs), use:
@@ -209,7 +243,7 @@ print(json.dumps({
 **`trigger_mode=schedule` — slim single-change:**
 
 1. Summary paragraph (1–2 sentences): automated scheduled (cron) scan, no work item, one small low-risk change; further findings arrive as separate PRs on later ticks
-2. Traceability: `Trigger: Scheduled run @ ${BASELINE_SHA}` — there is no work item to reference
+2. Traceability: a `Trigger: Scheduled run @ ${BASELINE_SHA}` line followed by a `Scan window: ${SCAN_WINDOW}` line (`<last-sha>..<baseline-sha>` for an incremental scan, `full @ <baseline-sha>` for a full one) — there is no work item to reference
 3. `## The optimization` heading followed by the compact single-change block (`file:lines` / category / why / before-after / how-to-verify)
 4. Verification checklist (literal `- [ ]` items — the short scheduled variant)
 
