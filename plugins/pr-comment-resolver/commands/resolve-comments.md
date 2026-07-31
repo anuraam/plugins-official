@@ -8,20 +8,22 @@ Resolve all unresolved review threads on pull request $ARGUMENTS.
 
 ## What This Does
 
-This command invokes the **orchestrator** agent which:
+This command invokes the **orchestrator** agent (`agents/orchestrator.md` is the authoritative procedure), which:
 
 | Step | Action |
 |------|--------|
-| 1 | Detects the platform from `git remote get-url origin` |
-| 2 | Posts a "resolution in progress" comment on the PR |
-| 3 | Fetches every unresolved review thread (inline and top-level) |
-| 4 | Filters out non-code-change threads (auto-decline) |
-| 5 | Classifies each remaining thread: **apply**, **discuss**, or **decline** |
-| 6 | Edits files for all **apply** threads |
-| 7 | Commits changes and pushes to the PR branch |
-| 8 | Marks applied threads as resolved on the platform |
-| 9 | Replies to **discuss** and **decline** threads with short explanations |
-| 10 | Posts a structured disposition summary comment |
+| 1 | Indexes the codebase structure |
+| 2 | Detects the platform from `git remote get-url origin` |
+| 3 | Resolves the PR number and checks whether the PR is open or already merged |
+| 4 | Posts a "resolution in progress" comment on the PR |
+| 5 | Fetches every unresolved review thread (inline and top-level) |
+| 6 | Filters out non-code-change threads (auto-decline) |
+| 7 | Classifies each remaining thread: **apply**, **discuss**, or **decline** |
+| 8 | Edits files for all **apply** threads |
+| 9 | Commits changes in a single commit and pushes to the PR branch |
+| 10 | Marks applied threads as resolved on the platform |
+| 11 | Replies to **discuss** and **decline** threads with short explanations |
+| 12 | Posts a structured disposition summary comment |
 
 ## Dispositions
 
@@ -37,6 +39,8 @@ This command invokes the **orchestrator** agent which:
 /resolve-comments              # Resolve comments on the current branch's PR
 /resolve-comments 42           # Resolve comments on PR #42
 ```
+
+To run automatically via the Xianix Agent (webhook-driven), see the rule blocks in [docs/triggers-github.md](../docs/triggers-github.md) and [docs/triggers-azure-devops.md](../docs/triggers-azure-devops.md).
 
 ## Merged PR Handling
 

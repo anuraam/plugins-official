@@ -1,11 +1,13 @@
 ---
 name: post-summary
-description: "Post the PR comment resolution disposition summary to the pull request. Requires a PR number."
+description: "Post the PR comment resolution disposition summary to the pull request. Requires a PR number and dispositions compiled earlier in the conversation. Usage: /post-summary [pr-number]"
 argument-hint: "[pr-number]"
 disable-model-invocation: true
 ---
 
 Post the PR comment resolution disposition summary to PR #$ARGUMENTS.
+
+This skill posts dispositions **already compiled earlier in this conversation** by a `/resolve-comments` run whose posting step did not complete. It does not resolve anything itself. If no dispositions exist in the conversation, **stop immediately** with an error — do not re-run the resolution flow and do not invent a summary.
 
 Do not ask for confirmation at any point. Execute all steps autonomously and proceed immediately from one step to the next.
 
@@ -50,3 +52,5 @@ Do not ask for confirmation at any point. Execute all steps autonomously and pro
    ```
    Resolution complete: <N> applied, <N> discussed, <N> declined — report written to pr-comment-resolution.md
    ```
+
+   If any step fails, output the error and stop — do not retry or ask for input.
