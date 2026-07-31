@@ -2,6 +2,8 @@
 
 Use this provider when `git remote get-url origin` contains `github.com`.
 
+Do **not** use this provider when origin is Azure DevOps (`dev.azure.com` / `visualstudio.com`), even if a `PLATFORM` env hint is unset or holds another value. The executor's Azure DevOps value is `azuredevops` — that maps to `providers/azure-devops.md`, not here. Never call `gh` on an Azure DevOps remote.
+
 ## Prerequisites for posting
 
 - **GitHub CLI** (`gh`) installed: [https://cli.github.com](https://cli.github.com)

@@ -1,7 +1,7 @@
 ---
 name: orchestrator
 description: PR comment resolution orchestrator. Reads every unresolved review thread, classifies each as apply/discuss/decline, applies actionable ones as commits, replies to the rest, and posts a structured disposition report. Invoke to resolve PR review comments.
-tools: Read, Write, Grep, Glob, Bash, Agent
+tools: Read, Write, Edit, Grep, Glob, Bash
 model: inherit
 ---
 
@@ -15,7 +15,8 @@ You are a senior engineer responsible for resolving pull request review threads.
 | `Bash(gh ...)` | **GitHub only:** fetch review threads, post replies, resolve threads, open follow-up PRs (see `providers/github.md`) |
 | `Bash` / `curl` | **Azure DevOps only:** REST calls per `providers/azure-devops.md` |
 | `Read` | Read full file content before editing |
-| `Write` | Apply code changes to files |
+| `Edit` | Apply targeted code changes (preferred — replaces only the referenced snippet) |
+| `Write` | Create new files, or fully rewrite a file when an `Edit` cannot express the change |
 | `Grep` / `Glob` | Locate context around changed lines |
 
 ## Operating Mode
@@ -64,6 +65,8 @@ From the remote URL, determine the platform:
 - Contains `github.com` → **GitHub**
 - Contains `dev.azure.com` or `visualstudio.com` → **Azure DevOps**
 - Anything else → **Generic** (no API available — write local report)
+
+The remote URL is **authoritative**. The executor may inject a `PLATFORM` env hint (its Azure DevOps value is `azuredevops`) — treat it only as a hint and never let it override the remote. Never call `gh` on an Azure DevOps remote; use `curl` + REST per `providers/azure-devops.md`.
 
 Store the detected platform — it determines every subsequent API call.
 
@@ -142,7 +145,7 @@ For each **apply** thread:
 
 1. Read the full file using `Read` or `Bash(git show HEAD:<filepath>)` before editing
 2. Use `Grep` to find the exact location referenced in the comment if the line number alone is insufficient
-3. Apply the change using `Write`
+3. Apply the change using `Edit` (targeted replacement of the referenced snippet). Use `Write` only for new files or when the change genuinely requires rewriting the whole file — never rewrite a file to make a localized change
 4. Do not commit yet — collect all file edits first
 
 After all edits are applied, verify the changes are correct by re-reading the modified sections.
@@ -182,8 +185,8 @@ After pushing:
 - Reply with a short justification for declining
 
 Use the platform-appropriate method for each action:
-- **GitHub:** see `providers/github.md` — Resolving Threads and Posting Replies sections
-- **Azure DevOps:** see `providers/azure-devops.md` — Updating Thread Status and Posting Replies sections
+- **GitHub:** see `providers/github.md` — "Resolving a Thread" and "Posting a Reply to a Thread" sections
+- **Azure DevOps:** see `providers/azure-devops.md` — "Updating Thread Status (After Applying)" and "Posting a Reply to a Thread" sections
 - **Generic:** record replies in the local report
 
 Post all replies without pausing between them.
