@@ -15,16 +15,21 @@ This command invokes the **orchestrator** agent (`agents/orchestrator.md` is the
 | 1 | Indexes the codebase structure |
 | 2 | Detects the platform from `git remote get-url origin` |
 | 3 | Resolves the PR number and checks whether the PR is open or already merged |
-| 4 | Posts a "resolution in progress" comment on the PR |
-| 5 | Fetches every unresolved review thread (inline and top-level) |
-| 6 | Filters out non-code-change threads (auto-decline) |
-| 7 | Classifies each remaining thread: **apply**, **discuss**, or **decline** |
-| 8 | Edits files for all **apply** threads |
-| 9 | Runs the repository's test suite — applies that introduce new failures are reverted and reclassified as **discuss** |
-| 10 | Commits changes in a single commit and pushes to the PR branch |
-| 11 | Marks applied threads as resolved on the platform |
-| 12 | Replies to **discuss** and **decline** threads with short explanations |
-| 13 | Posts a structured disposition summary comment |
+| 4 | Detects any prior resolution run via the plugin's invisible comment markers |
+| 5 | Posts a "resolution in progress" comment — or updates the previous one on a re-run |
+| 6 | Fetches every unresolved review thread, excluding its own comments and threads already dispositioned in a prior run |
+| 7 | Filters out non-code-change threads (auto-decline) |
+| 8 | Classifies each remaining thread: **apply**, **discuss**, or **decline** |
+| 9 | Edits files for all **apply** threads |
+| 10 | Runs the repository's test suite — applies that introduce new failures are reverted and reclassified as **discuss** |
+| 11 | Commits changes in a single commit and pushes to the PR branch |
+| 12 | Marks applied threads as resolved on the platform |
+| 13 | Replies to **discuss** and **decline** threads with short explanations |
+| 14 | Posts a structured disposition summary comment — or updates the existing one in place on a re-run, appending to its Run History |
+
+## Re-run Behavior
+
+Running the command again on the same PR (e.g. after new review comments arrive) is safe and incremental. Every comment the plugin posts carries an invisible marker, so a re-run only processes threads it hasn't already dispositioned (threads where a human replied after the plugin's response come back into scope), reuses its progress comment, and updates the existing disposition summary in place with cumulative totals and a per-run history — it never stacks duplicate summaries.
 
 ## Dispositions
 

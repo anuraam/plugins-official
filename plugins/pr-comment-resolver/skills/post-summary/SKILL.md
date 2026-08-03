@@ -34,7 +34,7 @@ Do not ask for confirmation at any point. Execute all steps autonomously and pro
 
 3. **Post the summary**
 
-   Follow the instructions in the appropriate provider file:
+   Follow the instructions in the appropriate provider file. First check for a prior summary comment via the plugin marker (see the provider's "Comment Markers and Prior-Run Detection" section) — if one exists, **update it in place** (cumulative totals + Run History) instead of posting a duplicate:
    - **GitHub** → `providers/github.md` — Posting the Disposition Summary section
    - **Azure DevOps** → `providers/azure-devops.md` — Posting the Disposition Summary section
    - **Generic / unknown** → `providers/generic.md` — write to `pr-comment-resolution.md`
