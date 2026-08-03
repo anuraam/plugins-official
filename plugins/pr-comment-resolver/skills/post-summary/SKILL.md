@@ -27,7 +27,7 @@ Do not ask for confirmation at any point. Execute all steps autonomously and pro
 2. **Format the summary**
 
    Use the template defined in `styles/report-template.md`. Populate all sections:
-   - Applied threads (with commit SHA, file, line, and description)
+   - Applied threads (with the commit rendered as a markdown link — see the providers' "Linking to Commits" section — plus file, line, and description)
    - Discuss threads (with file, line, and reason)
    - Declined threads (with file, line, and justification)
    - Non-code declined threads

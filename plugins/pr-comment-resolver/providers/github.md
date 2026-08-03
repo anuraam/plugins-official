@@ -134,6 +134,21 @@ gh pr comment <pr-number> --body "<reply text>"
 
 ---
 
+## Linking to Commits
+
+Whenever a reply or the summary references a commit, render it as a markdown link so reviewers can click through:
+
+```bash
+COMMIT_SHA=$(git rev-parse HEAD)
+SHORT_SHA=$(git rev-parse --short HEAD)
+COMMIT_URL="https://github.com/${OWNER}/${REPO}/commit/${COMMIT_SHA}"
+# In comment bodies: [${SHORT_SHA}](${COMMIT_URL})
+```
+
+Do **not** wrap the SHA in backticks or post it bare — backticks suppress GitHub's autolinking, and an explicit link works regardless of context.
+
+---
+
 ## Posting the Disposition Summary
 
 Post the compiled summary as a PR comment:

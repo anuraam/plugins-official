@@ -31,7 +31,9 @@ Use these labels consistently:
 
 ### Apply reply (posted after committing)
 
-> Applied in commit `<sha>`: <one-line description of what was changed>.
+> Applied in commit [<short-sha>](<commit-url>): <one-line description of what was changed>.
+
+`<commit-url>` is the platform commit URL (see the providers' "Linking to Commits" section). On generic remotes, where no URL exists, use the bare short SHA instead. Never wrap the SHA in backticks — that suppresses GitHub's autolinking.
 
 ### Discuss reply
 

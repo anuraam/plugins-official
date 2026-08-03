@@ -7,7 +7,7 @@ disable-model-invocation: true
 
 Resolve all unresolved review threads on pull request $ARGUMENTS.
 
-This skill is a thin alias for the `/resolve-comments` command. Invoke the **orchestrator** agent to run the full comment resolution flow — `agents/orchestrator.md` is the authoritative step-by-step procedure. In outline, it will index the codebase, detect the hosting platform, resolve the PR number and state, fetch every unresolved review thread, classify each as **apply** / **discuss** / **decline**, apply the actionable changes as a single pushed commit, mark applied threads resolved, reply to the rest, and post the disposition summary.
+This skill is a thin alias for the `/resolve-comments` command. Invoke the **orchestrator** agent to run the full comment resolution flow — `agents/orchestrator.md` is the authoritative step-by-step procedure. In outline, it will index the codebase, detect the hosting platform, resolve the PR number and state, fetch every unresolved review thread, classify each as **apply** / **discuss** / **decline**, apply the actionable changes, verify them against the repository's test suite (reverting any apply that introduces new failures), push a single commit, mark applied threads resolved, reply to the rest, and post the disposition summary.
 
 If the PR is already merged, the orchestrator applies changes on a new branch and opens a follow-up PR linked to the original.
 

@@ -20,10 +20,11 @@ This command invokes the **orchestrator** agent (`agents/orchestrator.md` is the
 | 6 | Filters out non-code-change threads (auto-decline) |
 | 7 | Classifies each remaining thread: **apply**, **discuss**, or **decline** |
 | 8 | Edits files for all **apply** threads |
-| 9 | Commits changes in a single commit and pushes to the PR branch |
-| 10 | Marks applied threads as resolved on the platform |
-| 11 | Replies to **discuss** and **decline** threads with short explanations |
-| 12 | Posts a structured disposition summary comment |
+| 9 | Runs the repository's test suite — applies that introduce new failures are reverted and reclassified as **discuss** |
+| 10 | Commits changes in a single commit and pushes to the PR branch |
+| 11 | Marks applied threads as resolved on the platform |
+| 12 | Replies to **discuss** and **decline** threads with short explanations |
+| 13 | Posts a structured disposition summary comment |
 
 ## Dispositions
 

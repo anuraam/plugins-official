@@ -141,6 +141,8 @@ Store the disposition for each thread.
 
 ### 7. Apply Code Changes (Apply threads only)
 
+**Baseline test run (before the first edit):** if at least one thread is classified **apply** and `PR_RESOLVER_RUN_TESTS` is not `false`, detect the test command (see the table in Step 7.5) and run the suite once *before* touching any file. Record which tests (if any) already fail — pre-existing failures must not be blamed on the applied changes.
+
 For each **apply** thread:
 
 1. Read the full file using `Read` or `Bash(git show HEAD:<filepath>)` before editing
@@ -149,6 +151,42 @@ For each **apply** thread:
 4. Do not commit yet — collect all file edits first
 
 After all edits are applied, verify the changes are correct by re-reading the modified sections.
+
+### 7.5 Verify: Run the Repository's Tests
+
+Skip this step entirely (and write the marker with `skipped`) if `PR_RESOLVER_RUN_TESTS=false` or there are no **apply** changes.
+
+Detect the test command from the build manifests found in Step 0 (first match wins):
+
+| Manifest present | Test command |
+|---|---|
+| `*.sln` / `*.csproj` | `dotnet test --nologo` |
+| `package.json` with a `test` script | `npm test --silent` |
+| `pyproject.toml` / `pytest.ini` / `setup.py` | `python3 -m pytest -q` |
+| `go.mod` | `go test ./...` |
+| `Cargo.toml` | `cargo test --quiet` |
+| `pom.xml` | `mvn -q test` |
+| `build.gradle` / `build.gradle.kts` | `./gradlew test` (or `gradle test`) |
+| none of the above | no suite — record `no-tests` and proceed |
+
+Run the suite with a hard timeout so a hanging test cannot consume the whole run budget:
+
+```bash
+timeout 600 <test command>
+```
+
+**Compare against the baseline from Step 7:**
+
+- **Only pre-existing failures (or all green):** verification passes.
+- **New failures:** an applied change broke them. Identify the offending apply thread(s), revert those edits (`git checkout -- <file>` per file, or undo the specific `Edit`), reclassify the thread(s) as **discuss** with a short excerpt of the failing test output as the reason, and re-run the suite to confirm the remaining applies are clean. Do not push a change that introduces a test failure.
+
+**Record the outcome** (the `PreToolUse` hook refuses `git push` without this marker):
+
+```bash
+echo "<pass|no-tests|baseline-fail|skipped>" > /tmp/pr_resolver_tests.status
+```
+
+Keep the command and result (e.g. `dotnet test — 142 passed`, `no test suite detected`, `skipped (PR_RESOLVER_RUN_TESTS=false)`) for the **Tests** line of the disposition summary.
 
 ### 8. Commit and Push
 
@@ -170,13 +208,28 @@ git push origin HEAD
 
 If the commit or push fails, output a single error line and stop — do not ask what to do.
 
+After a successful push, capture the commit identifiers and build a clickable commit URL for use in replies and the summary:
+
+```bash
+COMMIT_SHA=$(git rev-parse HEAD)
+SHORT_SHA=$(git rev-parse --short HEAD)
+```
+
+| Platform | `COMMIT_URL` |
+|---|---|
+| GitHub | `https://github.com/${OWNER}/${REPO}/commit/${COMMIT_SHA}` |
+| Azure DevOps | `${API_BASE}/_git/${AZURE_REPO}/commit/${COMMIT_SHA}` |
+| Generic | none — use the bare short SHA |
+
+Whenever a reply or the summary mentions the commit, render it as a markdown link — `[${SHORT_SHA}](${COMMIT_URL})` — never as a bare or backticked SHA (backticks suppress GitHub's autolinking, and Azure DevOps never autolinks SHAs).
+
 ### 9. Resolve Applied Threads and Reply to All
 
 After pushing:
 
 **For applied threads:**
 - Mark the thread as resolved on the platform
-- Post a confirmation reply naming the commit SHA
+- Post a confirmation reply linking the commit: `[<short-sha>](<commit-url>)` per the table in Step 8 (bare short SHA on generic remotes)
 
 **For discuss threads:**
 - Reply with a short explanation of why human judgement is needed
@@ -228,7 +281,7 @@ When the PR was already merged before this plugin ran:
    git checkout -b ${NEW_BRANCH} ${MERGE_SHA}
    ```
 
-3. **Apply all apply-classified changes** on this new branch using the same edit steps as Step 7.
+3. **Apply all apply-classified changes** on this new branch using the same edit steps as Step 7, then verify them with the test run from Step 7.5 (baseline taken on the fresh branch before editing) — the push gate applies here too.
 
 4. **Commit and push the new branch:**
    ```bash
