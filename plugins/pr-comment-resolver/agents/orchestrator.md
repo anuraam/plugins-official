@@ -170,13 +170,28 @@ git push origin HEAD
 
 If the commit or push fails, output a single error line and stop — do not ask what to do.
 
+After a successful push, capture the commit identifiers and build a clickable commit URL for use in replies and the summary:
+
+```bash
+COMMIT_SHA=$(git rev-parse HEAD)
+SHORT_SHA=$(git rev-parse --short HEAD)
+```
+
+| Platform | `COMMIT_URL` |
+|---|---|
+| GitHub | `https://github.com/${OWNER}/${REPO}/commit/${COMMIT_SHA}` |
+| Azure DevOps | `${API_BASE}/_git/${AZURE_REPO}/commit/${COMMIT_SHA}` |
+| Generic | none — use the bare short SHA |
+
+Whenever a reply or the summary mentions the commit, render it as a markdown link — `[${SHORT_SHA}](${COMMIT_URL})` — never as a bare or backticked SHA (backticks suppress GitHub's autolinking, and Azure DevOps never autolinks SHAs).
+
 ### 9. Resolve Applied Threads and Reply to All
 
 After pushing:
 
 **For applied threads:**
 - Mark the thread as resolved on the platform
-- Post a confirmation reply naming the commit SHA
+- Post a confirmation reply linking the commit: `[<short-sha>](<commit-url>)` per the table in Step 8 (bare short SHA on generic remotes)
 
 **For discuss threads:**
 - Reply with a short explanation of why human judgement is needed

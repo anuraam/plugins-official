@@ -166,6 +166,21 @@ print(json.dumps({
 
 ---
 
+## Linking to Commits
+
+Azure DevOps does **not** autolink commit SHAs in PR comments — always render them as explicit markdown links:
+
+```bash
+COMMIT_SHA=$(git rev-parse HEAD)
+SHORT_SHA=$(git rev-parse --short HEAD)
+COMMIT_URL="${API_BASE}/_git/${AZURE_REPO}/commit/${COMMIT_SHA}"
+# In comment bodies: [${SHORT_SHA}](${COMMIT_URL})
+```
+
+Markdown rendering requires the `Microsoft.TeamFoundation.Discussion.SupportsMarkdown` thread property (see "Markdown in PR Threads" above) — without it the link syntax shows as literal text.
+
+---
+
 ## Posting the Disposition Summary
 
 Post the compiled summary as a new thread:

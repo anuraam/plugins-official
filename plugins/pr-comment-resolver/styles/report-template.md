@@ -8,8 +8,10 @@ This template defines the structure for the disposition summary comment. The orc
 
 **PR:** [title or PR number]
 **Branch:** [head branch]
-**Resolved by commit:** [`<sha>`] *(omit if no changes were applied)*
+**Resolved by commit:** [[<short-sha>](<commit-url>)] *(omit if no changes were applied; on generic remotes use the bare short SHA — no URL available)*
 **Threads processed:** [total count]
+
+> `<commit-url>` is the platform commit URL built in Step 8 of the orchestrator flow (GitHub: `https://github.com/<owner>/<repo>/commit/<full-sha>`, Azure DevOps: `<api-base>/_git/<repo>/commit/<full-sha>`). Always render commit SHAs as markdown links, never bare or backticked — backticks suppress GitHub's autolinking and Azure DevOps never autolinks SHAs.
 
 | Disposition | Count |
 |---|---|
