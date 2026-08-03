@@ -74,7 +74,7 @@ A human asks for resolution by commenting `@xianix resolve` (optionally with ext
   "conversation-key": "resource.pullRequest.pullRequestId",
   "model": "claude-sonnet-4-5",
   "max-budget-usd": 3,
-  "execute-prompt": "{{comment-author}} asked you to resolve the review comments on pull request #{{pr-number}} in the repository {{repository-name}} with the comment: \"{{user-instruction}}\"\n\nRun /resolve-comments {{pr-number}} to classify every unresolved review thread, apply the actionable ones as commits, reply to the rest, and post the disposition summary. If the comment contains additional scoping instructions (e.g. only certain files or threads), honor them."
+  "execute-prompt": "{{comment-author}} asked you to resolve the review comments on pull request #{{pr-number}} in the repository {{repository-name}} with the comment: \"{{user-instruction}}\"\n\nRun /resolve-comments {{pr-number}} to classify every unresolved review thread, apply the actionable ones as commits, reply to the rest, and post the disposition summary. If the comment contains additional scoping instructions (e.g. only certain files or threads), honor them. IMPORTANT: your text output alone is NOT delivered anywhere — the work counts only when the commits are pushed and the comments exist on the PR. Do not end the run until the disposition summary comment has been posted (or a hard error has been reported)."
 }
 ```
 

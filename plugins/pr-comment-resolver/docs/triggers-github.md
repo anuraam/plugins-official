@@ -76,7 +76,7 @@ In production, both triggers are best combined into a **single execution block**
   "conversation-key": "pull_request.number",
   "model": "claude-sonnet-4-5",
   "max-budget-usd": 3,
-  "execute-prompt": "You are resolving the review comments on pull request #{{pr-number}} in the repository {{repository-name}}. Run /resolve-comments {{pr-number}} to classify every unresolved review thread, apply the actionable ones as commits, reply to the rest, and post the disposition summary."
+  "execute-prompt": "You are resolving the review comments on pull request #{{pr-number}} in the repository {{repository-name}}. Run /resolve-comments {{pr-number}} to classify every unresolved review thread, apply the actionable ones as commits, reply to the rest, and post the disposition summary. IMPORTANT: your text output alone is NOT delivered anywhere — the work counts only when the commits are pushed and the comments exist on the PR. Do not end the run until the disposition summary comment has been posted (or a hard error has been reported)."
 }
 ```
 
@@ -116,7 +116,7 @@ A human (or another rule) adds the `ai-dlc/pr/resolve-comments` label to an open
   "conversation-key": "pull_request.number",
   "model": "claude-sonnet-4-5",
   "max-budget-usd": 3,
-  "execute-prompt": "You are resolving the review comments on pull request #{{pr-number}} in the repository {{repository-name}}. Run /resolve-comments {{pr-number}} to classify every unresolved review thread, apply the actionable ones as commits, reply to the rest, and post the disposition summary."
+  "execute-prompt": "You are resolving the review comments on pull request #{{pr-number}} in the repository {{repository-name}}. Run /resolve-comments {{pr-number}} to classify every unresolved review thread, apply the actionable ones as commits, reply to the rest, and post the disposition summary. IMPORTANT: your text output alone is NOT delivered anywhere — the work counts only when the commits are pushed and the comments exist on the PR. Do not end the run until the disposition summary comment has been posted (or a hard error has been reported)."
 }
 ```
 
@@ -156,7 +156,7 @@ When a reviewer submits a **changes requested** review on a PR that carries the 
   "conversation-key": "pull_request.number",
   "model": "claude-sonnet-4-5",
   "max-budget-usd": 3,
-  "execute-prompt": "A reviewer requested changes on pull request #{{pr-number}} in the repository {{repository-name}}. Run /resolve-comments {{pr-number}} to classify the unresolved review threads, apply the actionable ones as commits, reply to the rest, and post the disposition summary."
+  "execute-prompt": "A reviewer requested changes on pull request #{{pr-number}} in the repository {{repository-name}}. Run /resolve-comments {{pr-number}} to classify the unresolved review threads, apply the actionable ones as commits, reply to the rest, and post the disposition summary. IMPORTANT: your text output alone is NOT delivered anywhere — the work counts only when the commits are pushed and the comments exist on the PR. Do not end the run until the disposition summary comment has been posted (or a hard error has been reported)."
 }
 ```
 

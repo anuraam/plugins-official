@@ -6,6 +6,8 @@ argument-hint: [pr-number]
 
 Resolve all unresolved review threads on pull request $ARGUMENTS.
 
+**Critical execution rule (read first).** This file is not documentation — it is your instruction to act **now, in this turn**. Invoke the **orchestrator** agent via the `Agent`/`Task` tool (`subagent_type: orchestrator`), run it **synchronously** (not in the background), wait for it to finish, and relay its final confirmation line. If the orchestrator sub-agent is unavailable in this environment, read `agents/orchestrator.md` and execute its steps yourself, directly in this context. Do **not** describe or summarize the process instead of performing it — text output alone posts nothing to the PR. Ending the turn before the disposition summary has been posted (or a hard error has been reported with its output) is a **failure**.
+
 ## What This Does
 
 This command invokes the **orchestrator** agent (`agents/orchestrator.md` is the authoritative procedure), which:
@@ -71,4 +73,4 @@ The plugin auto-detects the hosting platform from your git remote URL:
 
 ---
 
-Starting comment resolution now...
+Now execute: invoke the **orchestrator** agent with the PR number (`$ARGUMENTS` if given, otherwise resolve from the current branch) and wait for its result. Success means the orchestrator's completion line (`Resolution complete on PR #<n>: …`) has been produced and the summary comment exists on the PR — verify by relaying that line as your final output.
