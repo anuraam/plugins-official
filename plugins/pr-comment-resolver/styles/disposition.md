@@ -47,6 +47,10 @@ Use these labels consistently:
 
 > This comment does not request a code change and is outside the scope of automated resolution.
 
+### Marker (all replies)
+
+Every reply body ends with `<!-- pr-comment-resolver:v1 reply -->` on its own line. It renders invisibly; later runs use it to skip threads that are already dispositioned. Never omit it.
+
 ---
 
 ## Summary Comment Format

@@ -45,15 +45,51 @@ gh pr view --json number --jq '.number'
 
 ---
 
+## Comment Markers and Prior-Run Detection
+
+Every comment this plugin posts **must** embed an invisible HTML marker so later runs can find, filter, and update it:
+
+| Comment | Marker |
+|---|---|
+| Progress comment | `<!-- pr-comment-resolver:v1 progress -->` |
+| Disposition summary | `<!-- pr-comment-resolver:v1 summary -->` |
+| Thread replies | `<!-- pr-comment-resolver:v1 reply -->` |
+
+Before posting anything, detect a prior run by scanning the PR's issue comments for the markers:
+
+```bash
+SUMMARY_COMMENT_ID=$(gh api "repos/${OWNER}/${REPO}/issues/<pr-number>/comments" --paginate \
+  --jq '[.[] | select(.body | contains("pr-comment-resolver:v1 summary"))] | last | .id // empty')
+PROGRESS_COMMENT_ID=$(gh api "repos/${OWNER}/${REPO}/issues/<pr-number>/comments" --paginate \
+  --jq '[.[] | select(.body | contains("pr-comment-resolver:v1 progress"))] | last | .id // empty')
+```
+
+Non-empty ids mean this is a **re-run**: update those comments in place (below) instead of posting duplicates. When updating the summary, also fetch its current body first (`gh api repos/${OWNER}/${REPO}/issues/comments/${SUMMARY_COMMENT_ID} --jq '.body'`) so the existing run history can be carried forward.
+
+---
+
 ## Posting the "Resolution in Progress" Comment
+
+First run (no `PROGRESS_COMMENT_ID`):
 
 ```bash
 gh pr comment <pr-number> --body "$(cat <<'EOF'
 🔧 **PR comment resolution in progress**
 
 I'm reviewing all unresolved threads and will apply actionable ones as commits, reply to the rest, and post a disposition summary when complete.
+<!-- pr-comment-resolver:v1 progress -->
 EOF
 )"
+```
+
+Re-run (`PROGRESS_COMMENT_ID` found) — update the existing comment instead of posting a new one:
+
+```bash
+gh api -X PATCH "repos/${OWNER}/${REPO}/issues/comments/${PROGRESS_COMMENT_ID}" \
+  -f body="🔧 **PR comment resolution in progress** (run started $(date -u +%Y-%m-%dT%H:%MZ))
+
+I'm reviewing the threads opened since the last resolution run.
+<!-- pr-comment-resolver:v1 progress -->"
 ```
 
 If posting fails, output one warning line and continue.
@@ -83,6 +119,9 @@ query($owner: String!, $repo: String!, $pr: Int!) {
               createdAt
             }
           }
+          lastComment: comments(last: 1) {
+            nodes { body }
+          }
         }
       }
     }
@@ -90,7 +129,12 @@ query($owner: String!, $repo: String!, $pr: Int!) {
 }' -F owner="$OWNER" -F repo="$REPO" -F pr=<pr-number>
 ```
 
-Filter to threads where `isResolved == false`. For each unresolved thread, collect:
+Filter to threads where `isResolved == false`, then apply two **self-exclusion** rules:
+
+1. **Skip the plugin's own threads:** drop any thread whose first comment body contains `pr-comment-resolver:v1` — the plugin never processes its own comments.
+2. **Skip already-dispositioned threads:** drop any thread whose `lastComment` body contains `pr-comment-resolver:v1 reply` — a prior run already replied (discuss/decline threads stay unresolved by design), and no human has responded since. If a human **has** commented after the plugin's reply (the last comment is not the plugin's), the thread is back in scope — process it fresh.
+
+For each remaining thread, collect:
 - `id` — the thread node ID (for resolving via mutation later)
 - `comments.nodes[0].id` — the first comment ID (for posting replies)
 - `comments.nodes[0].body` — the reviewer's comment text
@@ -118,18 +162,20 @@ mutation($threadId: ID!) {
 
 ## Posting a Reply to a Thread
 
-Reply to the first comment in a thread (for **apply** confirmations, **discuss** explanations, and **decline** justifications):
+Reply to the first comment in a thread (for **apply** confirmations, **discuss** explanations, and **decline** justifications). Every reply ends with the reply marker — it is what lets the next run skip already-dispositioned threads:
 
 ```bash
 gh api repos/${OWNER}/${REPO}/pulls/comments/<first-comment-id>/replies \
   --method POST \
-  --field body="<reply text>"
+  --field body="<reply text>
+<!-- pr-comment-resolver:v1 reply -->"
 ```
 
 For top-level PR comments (no `path`), post as a general PR comment instead:
 
 ```bash
-gh pr comment <pr-number> --body "<reply text>"
+gh pr comment <pr-number> --body "<reply text>
+<!-- pr-comment-resolver:v1 reply -->"
 ```
 
 ---
@@ -151,11 +197,22 @@ Do **not** wrap the SHA in backticks or post it bare — backticks suppress GitH
 
 ## Posting the Disposition Summary
 
-Post the compiled summary as a PR comment:
+The summary body comes from `styles/report-template.md` and must include the `<!-- pr-comment-resolver:v1 summary -->` marker.
+
+First run (no `SUMMARY_COMMENT_ID`) — post a new comment:
 
 ```bash
 gh pr comment <pr-number> --body "<full disposition summary from styles/report-template.md>"
 ```
+
+Re-run (`SUMMARY_COMMENT_ID` found) — **update the existing summary in place** rather than posting a second one. Rebuild the body with cumulative totals, append this run's line to the **Run History** section (carry forward the prior history fetched during prior-run detection), then:
+
+```bash
+gh api -X PATCH "repos/${OWNER}/${REPO}/issues/comments/${SUMMARY_COMMENT_ID}" \
+  -f body="<updated disposition summary>"
+```
+
+Editing does not re-notify participants — that is intentional; the per-thread replies posted this run carry the notifications.
 
 ---
 

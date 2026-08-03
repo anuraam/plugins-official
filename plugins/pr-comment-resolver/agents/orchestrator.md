@@ -87,9 +87,15 @@ After resolving the PR number, check whether the PR is **open** or **already mer
 
 Store the PR state. If the PR is already merged, proceed with the **Merged PR Flow** at the end of this document instead of the normal push flow.
 
+### 2.5 Detect a Prior Run
+
+Every comment this plugin posts carries an invisible HTML marker (`<!-- pr-comment-resolver:v1 progress|summary|reply -->`). Before posting anything, scan the PR for prior markers using the platform's "Comment Markers and Prior-Run Detection" section (`providers/github.md` / `providers/azure-devops.md`; generic: check for an existing `pr-comment-resolution.md`).
+
+Store what was found: the prior summary comment id (and its current body — the run history must be carried forward) and the prior progress comment id. Finding them means this is a **re-run**: the plugin updates its prior comments in place and processes only threads it has not already dispositioned.
+
 ### 3. Post a "Resolution in Progress" Comment
 
-Before fetching any threads, post an immediate comment so the PR author knows the process has started:
+Before fetching any threads, post an immediate comment so the PR author knows the process has started — or, on a re-run, **update the prior progress comment** found in Step 2.5 instead of posting a duplicate:
 
 - **GitHub:** see `providers/github.md` — Posting the "Resolution in Progress" comment section
 - **Azure DevOps:** see `providers/azure-devops.md` — Posting the Starting Comment section
@@ -105,7 +111,11 @@ Fetch every unresolved review thread using the platform-appropriate method:
 - **Azure DevOps:** see `providers/azure-devops.md` — Fetching Unresolved Threads section
 - **Generic:** no threads to fetch — proceed to writing a local report
 
-For each thread, collect:
+Apply the providers' **self-exclusion rules** while filtering:
+- Skip threads the plugin itself started (first comment carries a `pr-comment-resolver:v1` marker) — its own progress/summary threads are never review feedback.
+- Skip threads a prior run already dispositioned (last comment is a plugin `reply` marker with no human response after it). A thread where a human replied **after** the plugin's reply is back in scope — process it fresh.
+
+For each remaining thread, collect:
 - Thread ID (for resolving / replying later)
 - Comment body (the reviewer's comment text)
 - File path and line number (if it is an inline comment)
@@ -246,10 +256,11 @@ Post all replies without pausing between them.
 
 ### 10. Post Disposition Summary
 
-Post the compiled summary comment using the template in `styles/report-template.md`. Read that file and follow its structure exactly.
+Compile the summary using the template in `styles/report-template.md`. Read that file and follow its structure exactly, including the summary marker and the **Run History** section.
 
-- **GitHub / Azure DevOps:** post as a new comment thread on the PR
-- **Generic:** write to `pr-comment-resolution.md` in the repo root
+- **GitHub / Azure DevOps, first run:** post as a new comment thread on the PR
+- **GitHub / Azure DevOps, re-run (prior summary found in Step 2.5):** **update the existing summary comment in place** — cumulative totals across runs, this run's line appended to Run History (carrying forward the prior history), per the providers' "Posting the Disposition Summary" section. Do not post a second summary comment.
+- **Generic:** write to `pr-comment-resolution.md` in the repo root (overwrite; append this run to Run History)
 
 After posting, output a single confirmation line:
 
