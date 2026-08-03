@@ -54,10 +54,17 @@ if echo "$COMMAND" | grep -qE "^git commit"; then
     fi
 fi
 
-# For push operations — require a remote and a token
+# For push operations — require a remote, a token, and a completed test-verification step
 if echo "$COMMAND" | grep -qE "^git push"; then
     if ! git remote | grep -q .; then
         echo '{"decision": "block", "reason": "No git remote configured. Add a remote with: git remote add origin <url>"}'
+        exit 0
+    fi
+
+    # Tests gate — the orchestrator's Verify step (agents/orchestrator.md step 7.5) must have
+    # recorded an outcome before anything is pushed. PR_RESOLVER_RUN_TESTS=false skips the gate.
+    if [ "${PR_RESOLVER_RUN_TESTS:-true}" != "false" ] && [ ! -f /tmp/pr_resolver_tests.status ]; then
+        echo '{"decision": "block", "reason": "Tests have not been verified since edits were applied. Run the repository test suite per agents/orchestrator.md step 7.5 and write /tmp/pr_resolver_tests.status — or set PR_RESOLVER_RUN_TESTS=false to skip — before pushing."}'
         exit 0
     fi
 
