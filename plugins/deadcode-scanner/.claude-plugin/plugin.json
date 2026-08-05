@@ -18,6 +18,7 @@
     "./agents/report-writer.md",
     "./agents/fix-writer.md"
   ],
+  "skills": "./skills/",
   "outputStyles": "./styles/",
   "schemas": "./schemas/"
 }

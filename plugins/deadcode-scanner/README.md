@@ -77,7 +77,7 @@ If your repo has a `knip.json`, `knip.ts`, or a `"knip"` key in `package.json`, 
 
 - **Node.js 18+** (Knip runs via `npx --yes knip`; no global install needed)
 - Installed `node_modules` recommended — without it the scan runs but is marked `partial` (degraded module resolution)
-- For `--fix`: a git repo with an `origin` remote; `gh` (GitHub) or `az` (Azure DevOps) CLI to auto-open the PR (falls back to a pushed branch + compare URL)
+- For `--fix`: a git repo with an `origin` remote; `gh` (GitHub) or `az` (Azure DevOps) CLI to auto-open the PR (falls back to a pushed branch + compare URL) — see [`docs/platform-setup.md`](docs/platform-setup.md) for auth setup and troubleshooting. Not needed for `--fix-dry-run` or the default report-only scan.
 
 ## Scope & Limitations
 
